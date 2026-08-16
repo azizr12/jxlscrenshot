@@ -1,22 +1,23 @@
-/* jxlshot.c — tray-resident screenshot tool for Windows, saving JPEG XL via libjxl.
+/* jxlshot.c — tray screenshot tool for Windows, saving JPEG XL via libjxl.
  *
- *  - Tray icon: left-click = capture region, right-click = menu
- *  - Menu: Capture region / Capture full screen (all monitors) / Open folder / Exit
- *  - Greenshot-style region selection: darkened overlay, drag rectangle, ESC or
- *    right-click cancels
- *  - Output: lossless .jxl saved to %USERPROFILE%\Pictures (falls back to Desktop)
+ * Tray mode (started without arguments):
+ *   - Lives in the notification area (check the ^ overflow icons).
+ *   - Clicking the icon opens a menu: Capture full screen / Capture region.
+ *   - Output folder and quality come from jxlshot.ini (created next to the exe).
  *
- * Build from a terminal with MSYS2 / MinGW-w64 (no Visual Studio):
- *   pacman -S --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-libjxl
+ * Command-line mode (started with arguments):
+ *   jxlshot.exe <output.jxl> [-l] [-d distance] [-a] [-w milliseconds]
+ *     -l       lossless encoding
+ *     -d       lossy distance 0.0-25.0, lower = better (default 1.0)
+ *     -a       capture all monitors instead of the primary one
+ *     -w       wait N milliseconds before capturing
+ *
+ * Build (MSYS2 / MinGW-w64):
  *   gcc -O2 -mwindows -o jxlshot.exe jxlshot.c -ljxl -lgdi32 -luser32 -lshell32
  */
 
 #define UNICODE
 #define _UNICODE
-#define WINVER 0x0601
-#define _WIN32_WINNT 0x0601
-#define WIN32_LEAN_AND_MEAN
-#include <windows.h>
 #define WINVER 0x0601
 #define _WIN32_WINNT 0x0601
 #define WIN32_LEAN_AND_MEAN
@@ -38,33 +39,115 @@
 #define WM_APP_TRAY (WM_APP + 1)
 #define TRAY_ID     1
 
-enum { ID_REGION = 1001, ID_FULL, ID_OPEN, ID_EXIT };
+enum { ID_REGION = 1001, ID_FULL, ID_OPEN, ID_SETTINGS, ID_EXIT };
 
 /* ------------------------------------------------------------------ */
 /* Globals                                                            */
 /* ------------------------------------------------------------------ */
 
 static HINSTANCE g_hinst;
-static HWND      g_hwnd;      /* hidden owner window for the tray icon   */
-static HWND      g_overlay;   /* region-selection overlay, if active     */
+static HWND      g_hwnd;      /* hidden owner window for the tray icon */
+static HWND      g_overlay;   /* region-selection overlay, if active   */
 static HICON     g_icon;
+
+typedef struct {
+    wchar_t dir[MAX_PATH];    /* output folder                  */
+    int     lossless;         /* 1 = lossless, 0 = lossy        */
+    float   distance;         /* lossy distance, if lossless=0  */
+} Settings;
+
+static Settings g_set;
+static wchar_t  g_exe_dir[MAX_PATH];
+static wchar_t  g_ini_path[MAX_PATH];
 
 typedef struct {
     HBITMAP  hbmp, hbmpDark;
     HDC      hdc,   hdcDark;
-    uint8_t *bits;            /* BGRA capture                            */
-    int      x, y, w, h;      /* virtual-screen origin and size          */
+    uint8_t *bits;            /* BGRA capture */
+    int      x, y, w, h;
 } Grab;
 
 static Grab  g_grab;
 static struct { int have; int x0, y0, x1, y1; } g_drag;
 
 /* ------------------------------------------------------------------ */
+/* Settings (jxlshot.ini)                                             */
+/* ------------------------------------------------------------------ */
+
+static void init_paths(void) {
+    wchar_t tmp[MAX_PATH];
+    GetModuleFileNameW(NULL, tmp, MAX_PATH);
+    wchar_t *slash = wcsrchr(tmp, L'\\');
+    if (slash) *slash = 0;
+    wcsncpy(g_exe_dir, tmp, MAX_PATH - 1);
+    g_exe_dir[MAX_PATH - 1] = 0;
+    _snwprintf(g_ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    g_ini_path[MAX_PATH - 1] = 0;
+}
+
+static void default_output_dir(wchar_t *dir, int n) {
+    wchar_t base[MAX_PATH];
+    if (GetEnvironmentVariableW(L"USERPROFILE", base, MAX_PATH) == 0)
+        base[0] = 0;
+    _snwprintf(dir, n, L"%s\\Pictures", base); dir[n-1] = 0;
+    if (GetFileAttributesW(dir) == INVALID_FILE_ATTRIBUTES) {
+        _snwprintf(dir, n, L"%s\\Desktop", base); dir[n-1] = 0;
+    }
+}
+
+static void write_default_ini(void) {
+    static const char tpl[] =
+        "; jxlshot settings - restart jxlshot after editing\r\n"
+        "[Output]\r\n"
+        "; Folder where screenshots are saved.\r\n"
+        "; Leave empty to use %%USERPROFILE%%\\Pictures\r\n"
+        "Directory=\r\n"
+        "; 1 = lossless (recommended for screenshots), 0 = lossy\r\n"
+        "Lossless=1\r\n"
+        "; Lossy quality distance 0.5-3.0, lower = better (ignored when Lossless=1)\r\n"
+        "Distance=1.0\r\n";
+
+    HANDLE f = CreateFileW(g_ini_path, GENERIC_WRITE, 0, NULL,
+                           CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD wr;
+    WriteFile(f, tpl, (DWORD)strlen(tpl), &wr, NULL);
+    CloseHandle(f);
+}
+
+static void load_settings(void) {
+    if (GetFileAttributesW(g_ini_path) == INVALID_FILE_ATTRIBUTES)
+        write_default_ini();
+
+    wchar_t buf[MAX_PATH];
+    GetPrivateProfileStringW(L"Output", L"Directory", L"", buf, MAX_PATH, g_ini_path);
+    if (buf[0]) {
+        wcsncpy(g_set.dir, buf, MAX_PATH - 1);
+        g_set.dir[MAX_PATH - 1] = 0;
+    } else {
+        default_output_dir(g_set.dir, MAX_PATH);
+    }
+
+    g_set.lossless = GetPrivateProfileIntW(L"Output", L"Lossless", 1, g_ini_path);
+
+    wchar_t dstr[32];
+    GetPrivateProfileStringW(L"Output", L"Distance", L"1.0", dstr, 32, g_ini_path);
+    g_set.distance = (float)wcstod(dstr, NULL);
+
+    /* Create the folder if needed; fall back if impossible. */
+    if (GetFileAttributesW(g_set.dir) == INVALID_FILE_ATTRIBUTES) {
+        if (!CreateDirectoryW(g_set.dir, NULL))
+            default_output_dir(g_set.dir, MAX_PATH);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* JPEG XL encoding                                                   */
 /* ------------------------------------------------------------------ */
 
-static int encode_jxl_lossless(const uint8_t *rgba, int w, int h,
-                               uint8_t **out_buf, size_t *out_size) {
+static int encode_jxl(const uint8_t *rgba, int w, int h,
+                      int lossless, float distance,
+                      uint8_t **out_buf, size_t *out_size) {
     int ok = 0;
     uint8_t *buf = NULL;
 
@@ -85,8 +168,12 @@ static int encode_jxl_lossless(const uint8_t *rgba, int w, int h,
 
     JxlEncoderFrameSettings *fs = JxlEncoderFrameSettingsCreate(enc, NULL);
     if (!fs) goto done;
-    JxlEncoderSetFrameLossless(fs, JXL_TRUE);
-    JxlEncoderSetFrameDistance(fs, 0.0f);
+    if (lossless) {
+        JxlEncoderSetFrameLossless(fs, JXL_TRUE);
+        JxlEncoderSetFrameDistance(fs, 0.0f);
+    } else {
+        JxlEncoderSetFrameDistance(fs, distance);
+    }
 
     JxlPixelFormat fmt = {4, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
     if (JxlEncoderAddImageFrame(fs, &fmt, rgba, (size_t)w * h * 4)
@@ -147,33 +234,22 @@ static void convert_bgra_to_rgba(const uint8_t *src, uint8_t *dst, size_t n) {
     }
 }
 
-static void get_output_dir(wchar_t *dir, int n) {
-    wchar_t base[MAX_PATH];
-    if (GetEnvironmentVariableW(L"USERPROFILE", base, MAX_PATH) == 0)
-        base[0] = L'\0';
-    _snwprintf(dir, n, L"%s\\Pictures", base); dir[n-1] = 0;
-    if (GetFileAttributesW(dir) == INVALID_FILE_ATTRIBUTES) {
-        _snwprintf(dir, n, L"%s\\Desktop", base); dir[n-1] = 0;
-    }
-}
-
 static void build_out_path(wchar_t *path, int n) {
-    wchar_t dir[MAX_PATH];
     SYSTEMTIME st;
-    get_output_dir(dir, MAX_PATH);
     GetLocalTime(&st);
     _snwprintf(path, n, L"%s\\jxlshot_%04d%02d%02d_%02d%02d%02d.jxl",
-               dir, st.wYear, st.wMonth, st.wDay,
+               g_set.dir, st.wYear, st.wMonth, st.wDay,
                st.wHour, st.wMinute, st.wSecond);
     path[n-1] = 0;
 }
 
 static int save_rgba_as_jxl(const uint8_t *rgba, int w, int h,
+                            int lossless, float distance,
                             const wchar_t *path) {
     uint8_t *buf = NULL;
     size_t   size = 0;
     int ok = 0;
-    if (!encode_jxl_lossless(rgba, w, h, &buf, &size)) return 0;
+    if (!encode_jxl(rgba, w, h, lossless, distance, &buf, &size)) return 0;
     FILE *f = _wfopen(path, L"wb");
     if (f) {
         ok = (fwrite(buf, 1, size, f) == size);
@@ -200,12 +276,19 @@ static void show_balloon(const wchar_t *title, const wchar_t *msg) {
 /* Screen capture                                                     */
 /* ------------------------------------------------------------------ */
 
-static int grab_screen(Grab *g) {
+static int grab_screen(Grab *g, int all_monitors) {
     ZeroMemory(g, sizeof *g);
-    g->x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    g->y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    g->w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    g->h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (all_monitors) {
+        g->x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        g->y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        g->w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        g->h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    } else {
+        g->x = 0;
+        g->y = 0;
+        g->w = GetSystemMetrics(SM_CXSCREEN);
+        g->h = GetSystemMetrics(SM_CYSCREEN);
+    }
     if (g->w <= 0 || g->h <= 0) return 0;
 
     HDC sdc = GetDC(NULL);
@@ -226,15 +309,14 @@ static int grab_screen(Grab *g) {
 
     if (!BitBlt(g->hdc, 0, 0, g->w, g->h, sdc, g->x, g->y, SRCCOPY)) {
         ReleaseDC(NULL, sdc);
-        return 0;   /* caller frees via free_grab */
+        return 0;
     }
     GdiFlush();
     ReleaseDC(NULL, sdc);
 
     /* Darkened copy for the overlay background (~45% brightness). */
-    BITMAPINFO bd = bi;
     uint8_t *darkbits = NULL;
-    g->hbmpDark = CreateDIBSection(sdc, &bd, DIB_RGB_COLORS, (void **)&darkbits, NULL, 0);
+    g->hbmpDark = CreateDIBSection(sdc, &bi, DIB_RGB_COLORS, (void **)&darkbits, NULL, 0);
     if (g->hbmpDark) {
         g->hdcDark = CreateCompatibleDC(NULL);
         SelectObject(g->hdcDark, g->hbmpDark);
@@ -258,19 +340,19 @@ static void free_grab(Grab *g) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Capture actions                                                    */
+/* Tray capture actions                                               */
 /* ------------------------------------------------------------------ */
 
 static void do_full_capture(void) {
     Grab g;
-    if (!grab_screen(&g)) { show_balloon(L"JXL Screenshot", L"Capture failed."); return; }
+    if (!grab_screen(&g, 1)) { show_balloon(L"JXL Screenshot", L"Capture failed."); return; }
 
     uint8_t *rgba = (uint8_t *)malloc((size_t)g.w * g.h * 4);
-    wchar_t  path[MAX_PATH];
     if (rgba) {
         convert_bgra_to_rgba(g.bits, rgba, (size_t)g.w * g.h);
+        wchar_t path[MAX_PATH];
         build_out_path(path, MAX_PATH);
-        if (save_rgba_as_jxl(rgba, g.w, g.h, path))
+        if (save_rgba_as_jxl(rgba, g.w, g.h, g_set.lossless, g_set.distance, path))
             show_balloon(L"JXL Screenshot", path);
         else
             show_balloon(L"JXL Screenshot", L"Encoding or saving failed.");
@@ -281,7 +363,7 @@ static void do_full_capture(void) {
 
 static void begin_region(void) {
     if (g_overlay) return;
-    if (!grab_screen(&g_grab)) {
+    if (!grab_screen(&g_grab, 1)) {
         show_balloon(L"JXL Screenshot", L"Capture failed.");
         return;
     }
@@ -293,7 +375,7 @@ static void begin_region(void) {
     if (!g_overlay) { free_grab(&g_grab); return; }
     ShowWindow(g_overlay, SW_SHOW);
     UpdateWindow(g_overlay);
-    SetForegroundWindow(g_overlay);   /* so ESC reaches us */
+    SetForegroundWindow(g_overlay);
 }
 
 static void cancel_region(void) {
@@ -313,7 +395,7 @@ static void finish_region(const RECT *r) {
         }
         wchar_t path[MAX_PATH];
         build_out_path(path, MAX_PATH);
-        if (save_rgba_as_jxl(rgba, w, h, path))
+        if (save_rgba_as_jxl(rgba, w, h, g_set.lossless, g_set.distance, path))
             show_balloon(L"JXL Screenshot", path);
         else
             show_balloon(L"JXL Screenshot", L"Encoding or saving failed.");
@@ -356,7 +438,6 @@ static HICON make_icon(void) {
         }
     }
 
-    /* AND mask: all zeros => fully opaque icon. */
     BITMAPINFO bm = bi;
     bm.bmiHeader.biBitCount = 1;
     void *maskbits = NULL;
@@ -403,11 +484,13 @@ static void tray_remove(void) {
 
 static void show_menu(HWND hwnd) {
     HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, ID_REGION, L"Capture region (left-click tray icon)");
-    AppendMenuW(m, MF_STRING, ID_FULL,   L"Capture full screen");
+    AppendMenuW(m, MF_STRING, ID_FULL,    L"Capture full screen (all monitors)");
+    AppendMenuW(m, MF_STRING, ID_REGION,  L"Capture region");
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(m, MF_STRING, ID_OPEN,   L"Open output folder");
-    AppendMenuW(m, MF_STRING, ID_EXIT,   L"Exit");
+    AppendMenuW(m, MF_STRING, ID_OPEN,     L"Open output folder");
+    AppendMenuW(m, MF_STRING, ID_SETTINGS, L"Open settings file");
+    AppendMenuW(m, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(m, MF_STRING, ID_EXIT,     L"Exit");
 
     POINT pt;
     GetCursorPos(&pt);
@@ -499,21 +582,23 @@ static LRESULT CALLBACK tray_wndproc(HWND hw, UINT m, WPARAM wp, LPARAM lp) {
     switch (m) {
     case WM_APP_TRAY:
         switch (HIWORD(lp)) {
-        case WM_LBUTTONUP:   begin_region();             return 0;
+        case WM_LBUTTONUP:
         case WM_RBUTTONUP:
-        case WM_CONTEXTMENU: show_menu(hw);              return 0;
+        case WM_CONTEXTMENU:
+            show_menu(hw);
+            return 0;
         }
         return 0;
     case WM_COMMAND:
         switch (LOWORD(wp)) {
-        case ID_REGION: begin_region();   break;
-        case ID_FULL:   do_full_capture(); break;
-        case ID_OPEN: {
-            wchar_t dir[MAX_PATH];
-            get_output_dir(dir, MAX_PATH);
-            ShellExecuteW(NULL, L"open", dir, NULL, NULL, SW_SHOWNORMAL);
+        case ID_FULL:     do_full_capture(); break;
+        case ID_REGION:   begin_region();    break;
+        case ID_OPEN:
+            ShellExecuteW(NULL, L"open", g_set.dir, NULL, NULL, SW_SHOWNORMAL);
             break;
-        }
+        case ID_SETTINGS:
+            ShellExecuteW(NULL, L"open", g_ini_path, NULL, NULL, SW_SHOWNORMAL);
+            break;
         case ID_EXIT:
             tray_remove();
             DestroyWindow(hw);
@@ -528,17 +613,93 @@ static LRESULT CALLBACK tray_wndproc(HWND hw, UINT m, WPARAM wp, LPARAM lp) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Command-line mode                                                  */
+/* ------------------------------------------------------------------ */
+
+static int run_cli(int argc, wchar_t **argv) {
+    int own_console = 0;
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
+        if (AllocConsole()) own_console = 1;
+    }
+    FILE *dummy;
+    dummy = freopen("CONOUT$", "wb", stdout);
+    dummy = freopen("CONOUT$", "wb", stderr);
+    dummy = freopen("CONIN$",  "rb", stdin);
+    (void)dummy;
+
+    const wchar_t *out_path = NULL;
+    float distance = 1.0f;
+    int lossless = 0, all_monitors = 0;
+    DWORD wait_ms = 0;
+
+    for (int i = 1; i < argc; i++) {
+        if      (!wcscmp(argv[i], L"-l")) lossless = 1;
+        else if (!wcscmp(argv[i], L"-a")) all_monitors = 1;
+        else if (!wcscmp(argv[i], L"-d") && i + 1 < argc) distance = (float)wcstod(argv[++i], NULL);
+        else if (!wcscmp(argv[i], L"-w") && i + 1 < argc) wait_ms = (DWORD)wcstol(argv[++i], NULL, 10);
+        else if (argv[i][0] != L'-' && !out_path) out_path = argv[i];
+        else {
+            fwprintf(stderr,
+                L"Usage: jxlshot.exe <output.jxl> [-l] [-d distance] [-a] [-w ms]\n"
+                L"Run without arguments for tray mode.\n");
+            return 2;
+        }
+    }
+    if (!out_path) {
+        fwprintf(stderr, L"Missing output file name. Usage: jxlshot.exe <output.jxl> [options]\n");
+        return 2;
+    }
+
+    if (wait_ms) Sleep(wait_ms);
+
+    Grab g;
+    if (!grab_screen(&g, all_monitors)) {
+        fwprintf(stderr, L"error: screen capture failed\n");
+        return 1;
+    }
+
+    int rc = 1;
+    uint8_t *rgba = (uint8_t *)malloc((size_t)g.w * g.h * 4);
+    if (rgba) {
+        convert_bgra_to_rgba(g.bits, rgba, (size_t)g.w * g.h);
+        if (save_rgba_as_jxl(rgba, g.w, g.h, lossless, distance, out_path)) {
+            fwprintf(stderr, L"saved %s (%dx%d, %s)\n", out_path, g.w, g.h,
+                     lossless ? L"lossless" : L"lossy");
+            rc = 0;
+        } else {
+            fwprintf(stderr, L"error: encoding or saving failed\n");
+        }
+        free(rgba);
+    }
+    free_grab(&g);
+
+    if (own_console) {
+        fwprintf(stderr, L"\nPress Enter to exit...");
+        getchar();
+    }
+    return rc;
+}
+
+/* ------------------------------------------------------------------ */
 /* Entry point                                                        */
 /* ------------------------------------------------------------------ */
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
     (void)hPrev; (void)cmd; (void)nShow;
 
-    /* Single instance. */
+    set_dpi_aware();
+
+    int argc = 0;
+    wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (argv && argc >= 2)
+        return run_cli(argc, argv);
+
+    /* Tray mode: single instance. */
     HANDLE mtx = CreateMutexW(NULL, TRUE, L"Local\\jxlshot.single");
     if (mtx && GetLastError() == ERROR_ALREADY_EXISTS) return 0;
 
-    set_dpi_aware();
+    init_paths();
+    load_settings();
     g_hinst = hInst;
 
     WNDCLASSW wc;
