@@ -85,7 +85,6 @@ static int encode_jxl_lossless(const uint8_t *rgba, int w, int h,
 
     JxlEncoderFrameSettings *fs = JxlEncoderFrameSettingsCreate(enc, NULL);
     if (!fs) goto done;
-    JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_EFFORT, 7);
     JxlEncoderSetFrameLossless(fs, JXL_TRUE);
     JxlEncoderSetFrameDistance(fs, 0.0f);
 
