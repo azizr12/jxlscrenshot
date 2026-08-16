@@ -11,6 +11,12 @@
  *   gcc -O2 -mwindows -o jxlshot.exe jxlshot.c -ljxl -lgdi32 -luser32 -lshell32
  */
 
+#define UNICODE
+#define _UNICODE
+#define WINVER 0x0601
+#define _WIN32_WINNT 0x0601
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 #define WINVER 0x0601
 #define _WIN32_WINNT 0x0601
 #define WIN32_LEAN_AND_MEAN
