@@ -12,7 +12,7 @@
 #define WINVER 0x0601
 #define _WIN32_WINNT 0x0601
 #define WIN32_LEAN_AND_MEAN
-#define JXLSHOT_TRAY_BUILD 
+#define JXLSHOT_TRAY_BUILD
 #include <windows.h>
 #include <shellapi.h>
 #include <commctrl.h>
@@ -26,6 +26,54 @@
 #include "jxlshot.c"
 
 /* ------------------------------------------------------------------ */
+/* Config Reloading & Hotkey Management                               */
+/* ------------------------------------------------------------------ */
+static FILETIME g_last_ini_time;
+
+static BOOL get_ini_file_time(FILETIME* ft) {
+    wchar_t ini_path[MAX_PATH];
+    _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind = FindFirstFileW(ini_path, &fd);
+    if (hFind != INVALID_HANDLE_VALUE) {
+        *ft = fd.ftLastWriteTime;
+        FindClose(hFind);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static void register_hotkeys(void); // Forward declaration
+
+static void reload_config(void) {
+    FILETIME current_time;
+    if (get_ini_file_time(&current_time)) {
+        if (CompareFileTime(&current_time, &g_last_ini_time) != 0) {
+            g_last_ini_time = current_time;
+            
+            // Unregister old hotkeys before re-reading config
+            UnregisterHotKey(NULL, IDM_FULL);
+            UnregisterHotKey(NULL, IDM_REGION);
+            
+            init_config(); // Re-read INI
+            
+            // Re-register hotkeys
+            register_hotkeys();
+            dbg("Configuration reloaded from INI.");
+        }
+    }
+}
+
+static void register_hotkeys(void) {
+    if (g_cfg.hk_full_vk) {
+        RegisterHotKey(NULL, IDM_FULL, g_cfg.hk_full_mod, g_cfg.hk_full_vk);
+    }
+    if (g_cfg.hk_region_vk) {
+        RegisterHotKey(NULL, IDM_REGION, g_cfg.hk_region_mod, g_cfg.hk_region_vk);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Tray Icon & Context Menu                                           */
 /* ------------------------------------------------------------------ */
 #define WM_TRAYICON   (WM_USER + 1)
@@ -33,6 +81,8 @@
 #define IDM_FULL      101
 #define IDM_REGION    102
 #define IDM_EXIT      103
+#define IDM_SETPATH   104
+#define IDM_ABOUT     105
 
 static NOTIFYICONDATAW g_nid;
 static HWND            g_hwndTray = NULL;
@@ -44,11 +94,14 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_FULL, L"Capture Full Screen");
     AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, L"About...");
     AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
     SetForegroundWindow(hwnd);
     TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
     DestroyMenu(hMenu);
-    PostMessage(hwnd, WM_NULL, 0, 0); 
+    PostMessage(hwnd, WM_NULL, 0, 0);
 }
 
 static void execute_full_capture(void) {
@@ -68,6 +121,60 @@ static void execute_full_capture(void) {
         dbg("Successfully saved full screen capture to: %ls", out_path);
     }
     free_grab(&g);
+}
+
+static void execute_set_path(void) {
+    BROWSEINFOW bi = { 0 };
+    bi.hwndOwner = NULL;
+    bi.lpszTitle = L"Select Export Folder for Screenshots";
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    
+    LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
+    if (pidl != NULL) {
+        wchar_t path[MAX_PATH];
+        if (SHGetPathFromIDListW(pidl, path)) {
+            wcsncpy(g_cfg.export_path, path, MAX_PATH - 1);
+            g_cfg.export_path[MAX_PATH - 1] = L'\0';
+            
+            // Write to INI
+            wchar_t ini_path[MAX_PATH];
+            _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+            WritePrivateProfileStringW(L"Capture", L"ExportPath", path, ini_path);
+            
+            // Update file timestamp to prevent immediate redundant reload
+            get_ini_file_time(&g_last_ini_time);
+            
+            dbg("Export path updated to: %ls", path);
+            MessageBoxW(NULL, L"Export path updated successfully.", L"jxlshot", MB_ICONINFORMATION);
+        }
+        CoTaskMemFree(pidl);
+    }
+}
+
+static void execute_about(void) {
+    const wchar_t* about_text = 
+        L"JXL Screenshot Tool\n"
+        L"Version 1.1\n\n"
+        L"A minimal command-line and tray screenshot tool\n"
+        L"using the JPEG XL image codec.\n\n"
+        L"Copyright (c) 2024\n\n"
+        L"Permission is hereby granted, free of charge, to any person obtaining a copy\n"
+        L"of this software and associated documentation files (the \"Software\"), to deal\n"
+        L"in the Software without restriction, including without limitation the rights\n"
+        L"to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n"
+        L"copies of the Software, and to permit persons to whom the Software is\n"
+        L"furnished to do so, subject to the following conditions:\n\n"
+        L"The above copyright notice and this permission notice shall be included in all\n"
+        L"copies or substantial portions of the Software.\n\n"
+        L"THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n"
+        L"IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
+        L"FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n"
+        L"AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n"
+        L"LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n"
+        L"OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n"
+        L"SOFTWARE.";
+    
+    MessageBoxW(NULL, about_text, L"About JXL Screenshot Tool", MB_OK | MB_ICONINFORMATION);
 }
 
 /* ------------------------------------------------------------------ */
@@ -120,85 +227,85 @@ static void crop_and_encode_region(RECT *r) {
 
 LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_PAINT: {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-        BitBlt(hdc, 0, 0, g_screenW, g_screenH, g_hdcMem, 0, 0, SRCCOPY);
-        BLENDFUNCTION bf = { AC_SRC_OVER, 0, 120, 0 }; 
-        AlphaBlend(hdc, 0, 0, g_screenW, g_screenH, g_hdcBlack, 0, 0, g_screenW, g_screenH, bf);
-        if (g_isDragging || (g_rcSel.right > g_rcSel.left && g_rcSel.bottom > g_rcSel.top)) {
-            int x = min(g_rcSel.left, g_rcSel.right);
-            int y = min(g_rcSel.top, g_rcSel.bottom);
-            int w = abs(g_rcSel.right - g_rcSel.left);
-            int h = abs(g_rcSel.bottom - g_rcSel.top);
-            BitBlt(hdc, x, y, w, h, g_hdcMem, x, y, SRCCOPY);
-            HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
-            HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
-            HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            Rectangle(hdc, x, y, x + w, y + h);
-            SelectObject(hdc, hOldBrush);
-            SelectObject(hdc, hOldPen);
-            DeleteObject(hPen);
-        }
-        EndPaint(hwnd, &ps);
-        return 0;
-    }
-    case WM_LBUTTONDOWN: {
-        g_isDragging = TRUE;
-        g_rcSel.left = GET_X_LPARAM(lp);
-        g_rcSel.top  = GET_Y_LPARAM(lp);
-        g_rcSel.right = g_rcSel.left;
-        g_rcSel.bottom = g_rcSel.top;
-        SetCapture(hwnd);
-        InvalidateRect(hwnd, NULL, FALSE);
-        return 0;
-    }
-    case WM_MOUSEMOVE: {
-        if (g_isDragging) {
-            g_rcSel.right = GET_X_LPARAM(lp);
-            g_rcSel.bottom = GET_Y_LPARAM(lp);
-            InvalidateRect(hwnd, NULL, FALSE);
-        }
-        return 0;
-    }
-    case WM_LBUTTONUP: {
-        if (g_isDragging) {
-            g_isDragging = FALSE;
-            ReleaseCapture();
-            RECT r = g_rcSel;
-            if (r.left > r.right) { int t = r.left; r.left = r.right; r.right = t; }
-            if (r.top > r.bottom) { int t = r.top; r.top = r.bottom; r.bottom = t; }
-            DestroyWindow(hwnd);
-            if ((r.right - r.left) > 0 && (r.bottom - r.top) > 0) {
-                crop_and_encode_region(&r);
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            BitBlt(hdc, 0, 0, g_screenW, g_screenH, g_hdcMem, 0, 0, SRCCOPY);
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 120, 0 };
+            AlphaBlend(hdc, 0, 0, g_screenW, g_screenH, g_hdcBlack, 0, 0, g_screenW, g_screenH, bf);
+            if (g_isDragging || (g_rcSel.right > g_rcSel.left && g_rcSel.bottom > g_rcSel.top)) {
+                int x = min(g_rcSel.left, g_rcSel.right);
+                int y = min(g_rcSel.top, g_rcSel.bottom);
+                int w = abs(g_rcSel.right - g_rcSel.left);
+                int h = abs(g_rcSel.bottom - g_rcSel.top);
+                BitBlt(hdc, x, y, w, h, g_hdcMem, x, y, SRCCOPY);
+                HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
+                HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+                HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                Rectangle(hdc, x, y, x + w, y + h);
+                SelectObject(hdc, hOldBrush);
+                SelectObject(hdc, hOldPen);
+                DeleteObject(hPen);
             }
+            EndPaint(hwnd, &ps);
+            return 0;
         }
-        return 0;
-    }
-    case WM_KEYDOWN: {
-        if (wp == VK_ESCAPE) {
-            g_isDragging = FALSE;
-            ReleaseCapture();
-            DestroyWindow(hwnd);
+        case WM_LBUTTONDOWN: {
+            g_isDragging = TRUE;
+            g_rcSel.left = GET_X_LPARAM(lp);
+            g_rcSel.top  = GET_Y_LPARAM(lp);
+            g_rcSel.right = g_rcSel.left;
+            g_rcSel.bottom = g_rcSel.top;
+            SetCapture(hwnd);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
         }
-        return 0;
-    }
-    case WM_DESTROY: {
-        if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
-        if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
-        if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
-        if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
-        if (g_hdcScreen){ DeleteDC(g_hdcScreen); g_hdcScreen = NULL; }
-        g_hwndRegion = NULL;
-        if (!g_cfg.show_cursor) ShowCursor(TRUE);
-        return 0;
-    }
+        case WM_MOUSEMOVE: {
+            if (g_isDragging) {
+                g_rcSel.right = GET_X_LPARAM(lp);
+                g_rcSel.bottom = GET_Y_LPARAM(lp);
+                InvalidateRect(hwnd, NULL, FALSE);
+            }
+            return 0;
+        }
+        case WM_LBUTTONUP: {
+            if (g_isDragging) {
+                g_isDragging = FALSE;
+                ReleaseCapture();
+                RECT r = g_rcSel;
+                if (r.left > r.right) { int t = r.left; r.left = r.right; r.right = t; }
+                if (r.top > r.bottom) { int t = r.top; r.top = r.bottom; r.bottom = t; }
+                DestroyWindow(hwnd);
+                if ((r.right - r.left) > 0 && (r.bottom - r.top) > 0) {
+                    crop_and_encode_region(&r);
+                }
+            }
+            return 0;
+        }
+        case WM_KEYDOWN: {
+            if (wp == VK_ESCAPE) {
+                g_isDragging = FALSE;
+                ReleaseCapture();
+                DestroyWindow(hwnd);
+            }
+            return 0;
+        }
+        case WM_DESTROY: {
+            if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
+            if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
+            if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
+            if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
+            if (g_hdcScreen){ DeleteDC(g_hdcScreen); g_hdcScreen = NULL; }
+            g_hwndRegion = NULL;
+            if (!g_cfg.show_cursor) ShowCursor(TRUE);
+            return 0;
+        }
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
 static void start_region_capture(void) {
-    if (g_hwndRegion) return; 
+    if (g_hwndRegion) return;
     g_screenW = GetSystemMetrics(SM_CXSCREEN);
     g_screenH = GetSystemMetrics(SM_CYSCREEN);
     g_hdcScreen = GetDC(NULL);
@@ -243,25 +350,33 @@ static void start_region_capture(void) {
 /* ------------------------------------------------------------------ */
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-    case WM_TRAYICON:
-        if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) {
-            show_tray_menu(hwnd);
-        }
-        break;
-    case WM_COMMAND:
-        switch (LOWORD(wp)) {
-        case IDM_FULL:   execute_full_capture(); break;
-        case IDM_REGION: start_region_capture(); break;
-        case IDM_EXIT:   PostQuitMessage(0); break;
-        }
-        break;
-    case WM_DESTROY:
-        g_nid.uFlags = 0;
-        Shell_NotifyIconW(NIM_DELETE, &g_nid);
-        PostQuitMessage(0);
-        break;
-    default:
-        return DefWindowProcW(hwnd, msg, wp, lp);
+        case WM_TRAYICON:
+            if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) {
+                show_tray_menu(hwnd);
+            }
+            break;
+        case WM_HOTKEY:
+            reload_config(); // Ensure latest config before action
+            if (wp == IDM_FULL) execute_full_capture();
+            else if (wp == IDM_REGION) start_region_capture();
+            break;
+        case WM_COMMAND:
+            reload_config(); // Ensure latest config before action
+            switch (LOWORD(wp)) {
+                case IDM_FULL:    execute_full_capture(); break;
+                case IDM_REGION:  start_region_capture(); break;
+                case IDM_SETPATH: execute_set_path(); break;
+                case IDM_ABOUT:   execute_about(); break;
+                case IDM_EXIT:    PostQuitMessage(0); break;
+            }
+            break;
+        case WM_DESTROY:
+            g_nid.uFlags = 0;
+            Shell_NotifyIconW(NIM_DELETE, &g_nid);
+            PostQuitMessage(0);
+            break;
+        default:
+            return DefWindowProcW(hwnd, msg, wp, lp);
     }
     return 0;
 }
@@ -273,8 +388,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     init_config();
     dbg_init();
     
+    // Initialize INI time tracking and register initial hotkeys
+    get_ini_file_time(&g_last_ini_time);
+    register_hotkeys();
+    
     dbg("jxlshot_tray application started successfully.");
-
+    
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = TrayWndProc;
@@ -292,12 +411,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     g_nid.hIcon = LoadIcon(NULL, IDI_INFORMATION);
     wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
-
+    
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    
+    // Cleanup hotkeys on exit
+    UnregisterHotKey(NULL, IDM_FULL);
+    UnregisterHotKey(NULL, IDM_REGION);
     
     dbg("jxlshot_tray application exiting.");
     return (int)msg.wParam;
