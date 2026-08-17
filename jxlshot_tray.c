@@ -5,7 +5,7 @@
  * jxlshot.ini located next to the executable.
  *
  * Build (MSYS2 / MinGW-w64):
- *   gcc -O2 -mwindows -o jxlshot_tray.exe jxlshot_tray.c -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32
+ *   gcc -O2 -mwindows -o jxlshot_tray.exe jxlshot_tray.c -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
  *
  * Note: Ensure the WinMain in jxlshot.c is commented out or guarded 
  * with #ifndef JXLSHOT_TRAY_BUILD to prevent duplicate symbol errors.
@@ -22,15 +22,18 @@
 #include <shellapi.h>
 #include <commctrl.h>
 #include <windowsx.h>
+#include <shlobj.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
+#include <time.h>
+#include <stdarg.h>
 
 /* Include the core logic. Ensure jxlshot.c's WinMain is disabled. */
 #include "jxlshot.c"
 
 /* ------------------------------------------------------------------ */
-/* Configuration (INI)                                                */
+/* Configuration (INI) & Paths                                        */
 /* ------------------------------------------------------------------ */
 
 typedef struct {
@@ -41,14 +44,48 @@ typedef struct {
 
 static AppConfig g_cfg;
 static wchar_t   g_ini_path[MAX_PATH];
+static wchar_t   g_pictures_path[MAX_PATH];
+static wchar_t   g_debug_log_path[MAX_PATH];
+
+/* 
+ * Writes formatted debug messages to the temporary log file.
+ * Uses append mode to preserve previous log entries.
+ */
+static void debug_log(const char* fmt, ...) {
+    FILE* f = _wfopen(g_debug_log_path, L"a");
+    if (f) {
+        va_list args;
+        va_start(args, fmt);
+        vfprintf(f, fmt, args);
+        va_end(args);
+        fprintf(f, "\n");
+        fclose(f);
+    }
+}
 
 static void init_config_paths(void) {
     wchar_t tmp[MAX_PATH];
+    
+    /* 1. Initialize INI path (located in the same directory as the executable) */
     GetModuleFileNameW(NULL, tmp, MAX_PATH);
     wchar_t *slash = wcsrchr(tmp, L'\\');
     if (slash) *slash = 0;
     _snwprintf(g_ini_path, MAX_PATH, L"%s\\jxlshot.ini", tmp);
     g_ini_path[MAX_PATH - 1] = 0;
+
+    /* 2. Initialize Windows Pictures folder path */
+    if (FAILED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, SHGFP_TYPE_CURRENT, g_pictures_path))) {
+        /* Fallback to User Profile directory if the Pictures folder cannot be resolved */
+        GetEnvironmentVariableW(L"USERPROFILE", g_pictures_path, MAX_PATH);
+        wcscat_s(g_pictures_path, MAX_PATH, L"\\Pictures");
+    }
+
+    /* 3. Initialize Debug log path in the system Temp directory */
+    GetTempPathW(MAX_PATH, g_debug_log_path);
+    wcscat_s(g_debug_log_path, MAX_PATH, L"jxlshot_debug.log");
+    
+    debug_log("Initialized Pictures path: %ls", g_pictures_path);
+    debug_log("Initialized debug log path: %ls", g_debug_log_path);
 }
 
 static void ensure_default_ini(void) {
@@ -61,8 +98,11 @@ static void ensure_default_ini(void) {
             fprintf(f, "; Lossy distance (0.0 - 25.0, lower is better)\n");
             fprintf(f, "Distance=1.0\n");
             fprintf(f, "; Show mouse cursor in region capture (1=yes, 0=no)\n");
-            fprintf(f, "ShowCursor=0\n");
+            fprintf(f, "ShowCursor=1\n");
             fclose(f);
+            debug_log("Created default configuration file at: %ls", g_ini_path);
+        } else {
+            debug_log("ERROR: Failed to create default configuration file at: %ls", g_ini_path);
         }
     }
 }
@@ -76,6 +116,29 @@ static void load_config(void) {
     g_cfg.distance = (float)wcstod(dist_str, NULL);
     if (g_cfg.distance < 0.0f) g_cfg.distance = 0.0f;
     if (g_cfg.distance > 25.0f) g_cfg.distance = 25.0f;
+    
+    debug_log("Configuration loaded: Lossless=%d, Distance=%.2f, ShowCursor=%d", 
+              g_cfg.lossless, g_cfg.distance, g_cfg.show_cursor);
+}
+
+/* 
+ * Generates a timestamped file path within the Pictures folder for image export.
+ * out_path: Buffer to receive the generated path.
+ * out_size: Size of the out_path buffer.
+ * extension: The desired file extension (e.g., L"jxl").
+ */
+static void get_export_image_path(wchar_t* out_path, size_t out_size, const wchar_t* extension) {
+    time_t now = time(NULL);
+    struct tm t;
+    localtime_s(&t, &now);
+    
+    wchar_t timestamp[64];
+    wcsftime(timestamp, sizeof(timestamp) / sizeof(wchar_t), L"%Y%m%d_%H%M%S", &t);
+    
+    _snwprintf(out_path, out_size, L"%ls\\jxlshot_%ls.%ls", g_pictures_path, timestamp, extension);
+    out_path[out_size - 1] = 0;
+    
+    debug_log("Generated export path: %ls", out_path);
 }
 
 /* ------------------------------------------------------------------ */
@@ -112,14 +175,18 @@ static void execute_full_capture(void) {
     if (!grab_primary_monitor(&g)) {
         free_grab(&g);
         MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
+        debug_log("ERROR: Full screen capture failed.");
         return;
     }
 
     wchar_t out_path[MAX_PATH];
-    build_out_path(out_path, MAX_PATH);
+    get_export_image_path(out_path, MAX_PATH, L"jxl");
 
     if (!save_bgra_as_jxl(g.bits, g.w, g.h, g_cfg.lossless, g_cfg.distance, out_path)) {
         MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
+        debug_log("ERROR: Full screen encoding/saving failed for path: %ls", out_path);
+    } else {
+        debug_log("Successfully saved full screen capture to: %ls", out_path);
     }
     free_grab(&g);
 }
@@ -142,6 +209,7 @@ static void crop_and_encode_region(RECT *r) {
     Grab g;
     if (!grab_primary_monitor(&g)) {
         free_grab(&g);
+        debug_log("ERROR: Region capture failed to grab primary monitor.");
         return;
     }
 
@@ -157,6 +225,7 @@ static void crop_and_encode_region(RECT *r) {
     uint8_t *crop_bits = (uint8_t *)malloc((size_t)rw * rh * 4);
     if (!crop_bits) {
         free_grab(&g);
+        debug_log("ERROR: Failed to allocate memory for region crop.");
         return;
     }
 
@@ -167,8 +236,13 @@ static void crop_and_encode_region(RECT *r) {
     }
 
     wchar_t out_path[MAX_PATH];
-    build_out_path(out_path, MAX_PATH);
-    save_bgra_as_jxl(crop_bits, rw, rh, g_cfg.lossless, g_cfg.distance, out_path);
+    get_export_image_path(out_path, MAX_PATH, L"jxl");
+    
+    if (!save_bgra_as_jxl(crop_bits, rw, rh, g_cfg.lossless, g_cfg.distance, out_path)) {
+        debug_log("ERROR: Region encoding/saving failed for path: %ls", out_path);
+    } else {
+        debug_log("Successfully saved region capture to: %ls", out_path);
+    }
     
     free(crop_bits);
     free_grab(&g);
@@ -356,6 +430,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     ensure_default_ini();
     load_config();
     dbg_init();
+    
+    debug_log("jxlshot_tray application started successfully.");
 
     /* Create hidden message-only window for tray icon */
     WNDCLASSEXW wc = {0};
@@ -387,5 +463,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
         DispatchMessage(&msg);
     }
 
+    debug_log("jxlshot_tray application exiting.");
     return (int)msg.wParam;
 }
