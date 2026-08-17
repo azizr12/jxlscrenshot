@@ -297,13 +297,17 @@ static void start_region_capture(void) {
 /* ------------------------------------------------------------------ */
 /* Tray Window Procedure & Entry Point                                */
 /* ------------------------------------------------------------------ */
-LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-        case WM_TRAYICON:
-            if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) {
+LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) 
+{
+    switch (msg) 
+    {
+        case WM_TRAYICON: // Ensure WM_TRAYICON is defined (e.g., #define WM_TRAYICON (WM_USER + 1))
+            // CORRECTED: 'lp' changed to 'lParam'
+            if (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP) {
                 show_tray_menu(hwnd);
             }
             break;
+            
         case WM_COMMAND:
             reload_config(); // Ensure latest config before action
             switch (LOWORD(wp)) {
@@ -314,13 +318,15 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_EXIT:    PostQuitMessage(0); break;
             }
             break;
+            
         case WM_DESTROY:
             g_nid.uFlags = 0;
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
             PostQuitMessage(0);
             break;
+            
         default:
-            return DefWindowProcW(hwnd, msg, wp, lp);
+            return DefWindowProcW(hwnd, msg, wp, lParam);
     }
     return 0;
 }
