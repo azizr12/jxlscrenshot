@@ -472,8 +472,6 @@ static void usage(const char *argv0) {
 #ifndef JXLSHOT_TRAY_BUILD
 int main(int argc, char **argv);
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
-    extern int __argc;
-    extern char **__argv;
     return main(__argc, __argv);
 }
 
