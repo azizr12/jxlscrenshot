@@ -1,2 +1,2 @@
-Small c project to capture monitor screenshot using jxl image codec 
-just run and it export a screenshot in same exe path
+- Small c project to capture monitor screenshot using jxl image codec.
+- just run and it export a screenshot in same exe path
