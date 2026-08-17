@@ -121,7 +121,7 @@ static void execute_about(void) {
         L"JXL Screenshot Tool\n"
         L"Version 1.1-17-08-2026\n\n"
         L"A minimal command-line and tray screenshot tool\n"
-        L"using the JPEG XL image codec.\n\n"
+        L"using the JPEG XL image codec.\n\n";
     
     MessageBoxW(NULL, about_text, L"About JXL Screenshot Tool", MB_OK | MB_ICONINFORMATION);
 }
