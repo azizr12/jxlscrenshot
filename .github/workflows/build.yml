@@ -29,17 +29,27 @@ jobs:
 
       - name: Compile and bundle runtime DLLs
         run: |
+          # 1. Compile the command-line interface (CLI) version
           gcc -O2 -mwindows -o jxlshot.exe jxlshot.c \
               -ljxl -lgdi32 -luser32 -lshell32
 
-          mkdir -p dist
-          cp jxlshot.exe dist/
+          # 2. Compile the system tray version
+          # Requires additional libraries for shell notifications, 
+          # common controls, and alpha blending.
+          gcc -O2 -mwindows -o jxlshot_tray.exe jxlshot_tray.c \
+              -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32
 
-          # Copy the MinGW/libjxl DLLs the executable depends on.
-          ldd jxlshot.exe | grep -o '/mingw64/bin/[^ )]*' | sort -u | while read -r dll; do
+          # 3. Prepare distribution directory
+          mkdir -p dist
+          cp jxlshot.exe jxlshot_tray.exe dist/
+
+          # 4. Extract and copy required MinGW/libjxl DLLs
+          # Running ldd on both executables ensures all unique dependencies are captured.
+          ldd jxlshot.exe jxlshot_tray.exe | grep -o '/mingw64/bin/[^ )]*' | sort -u | while read -r dll; do
             cp "$dll" dist/
           done
 
+          # 5. Create the release archive
           (cd dist && zip -9 -r ../jxlshot-windows-x64.zip .)
           ls -la dist/
 
