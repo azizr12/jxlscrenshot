@@ -1,68 +1,95 @@
-/* jxlshot_hotkeys.c — global keyboard shortcut handling for jxlshot_tray.
- *
- * Registers two system-wide hotkeys, read from jxlshot.ini via g_cfg
- * (see jxlshot.c / init_config()):
- *
- *   HotkeyFull   (default: PrintScreen)      -> full monitor capture
- *   HotkeyRegion (default: Ctrl+PrintScreen) -> region capture
- *
- * This file is included directly into jxlshot_tray.c, the same way
- * jxlshot_tray.c already includes jxlshot.c, so it shares g_cfg, dbg(),
- * execute_full_capture() and start_region_capture() with the rest of
- * the tray app. It is not a separate process — the hotkeys are handled
- * on the tray app's own message loop via WM_HOTKEY.
- */
+/* jxlshot_hotkeys.c — global keyboard shortcut handling for jxlshot_tray. */
 #ifndef JXLSHOT_HOTKEYS_C
 #define JXLSHOT_HOTKEYS_C
 
-#define HOTKEY_ID_FULL   1
-#define HOTKEY_ID_REGION 2
+#include <windows.h>
+#include <stdio.h>
+#include <stdarg.h>
 
-/* Registers the full-capture and region-capture hotkeys against hwnd.
- * Returns TRUE only if both hotkeys registered successfully. */
-static BOOL register_hotkeys(HWND hwnd) {
-    BOOL ok_full = RegisterHotKey(hwnd, HOTKEY_ID_FULL,
-                                   g_cfg.hk_full_mod | MOD_NOREPEAT,
-                                   g_cfg.hk_full_vk);
-    if (!ok_full) {
-        dbg("register_hotkeys: failed to register full-capture hotkey, GetLastError=%lu",
-            GetLastError());
+static HHOOK g_hhkKeyboard = NULL;
+
+/* File-based logger for background tray apps */
+static void debug_log(const char* fmt, ...) {
+    FILE* f = fopen("jxlshot_debug.log", "a");
+    if (f) {
+        va_list args;
+        va_start(args, fmt);
+        vfprintf(f, fmt, args);
+        va_end(args);
+        fprintf(f, "\n");
+        fclose(f);
     }
-
-    BOOL ok_region = RegisterHotKey(hwnd, HOTKEY_ID_REGION,
-                                     g_cfg.hk_region_mod | MOD_NOREPEAT,
-                                     g_cfg.hk_region_vk);
-    if (!ok_region) {
-        dbg("register_hotkeys: failed to register region-capture hotkey, GetLastError=%lu",
-            GetLastError());
-    }
-
-    dbg("register_hotkeys: full=%s region=%s",
-        ok_full ? "ok" : "FAILED", ok_region ? "ok" : "FAILED");
-    return ok_full && ok_region;
 }
 
-/* Unregisters both hotkeys. Safe to call even if registration failed. */
-static void unregister_hotkeys(HWND hwnd) {
-    UnregisterHotKey(hwnd, HOTKEY_ID_FULL);
-    UnregisterHotKey(hwnd, HOTKEY_ID_REGION);
+static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    if (nCode == HC_ACTION && wParam == WM_KEYDOWN)
+    {
+        KBDLLHOOKSTRUCT *pKB = (KBDLLHOOKSTRUCT *)lParam;
+        
+        // TEMPORARY: Log ALL keys to verify the hook is alive and receiving events
+        debug_log("Key pressed: vkCode=0x%02X", pKB->vkCode);
+
+        if (pKB->vkCode == VK_SNAPSHOT)
+        {
+            // GetAsyncKeyState is required for reliable modifier checking in hooks
+            if (GetAsyncKeyState(VK_CONTROL) & 0x8000)
+            {
+                debug_log("ACTION: Ctrl+PrintScreen pressed -> triggering region capture");
+                start_region_capture();
+            }
+            else
+            {
+                debug_log("ACTION: PrintScreen pressed -> triggering full capture");
+                execute_full_capture();
+            }
+
+            // CRITICAL: Return 1 to block the key from reaching Windows/Snipping Tool
+            return 1; 
+        }
+    }
+
+    return CallNextHookEx(g_hhkKeyboard, nCode, wParam, lParam);
 }
 
-/* Dispatches a WM_HOTKEY message (wParam = hotkey id) to the matching
- * capture action. Called from TrayWndProc. */
-static void handle_hotkey_message(WPARAM wp) {
-    switch (wp) {
-        case HOTKEY_ID_FULL:
-            dbg("handle_hotkey_message: full-capture hotkey pressed");
-            execute_full_capture();
-            break;
-        case HOTKEY_ID_REGION:
-            dbg("handle_hotkey_message: region-capture hotkey pressed");
-            start_region_capture();
-            break;
-        default:
-            break;
+static BOOL register_hotkeys(HWND hwnd)
+{
+    (void)hwnd; // Unused in WH_KEYBOARD_LL
+
+    if (g_hhkKeyboard != NULL) {
+        debug_log("register_hotkeys: Hook already installed.");
+        return TRUE;
     }
+
+    HINSTANCE hInst = GetModuleHandle(NULL);
+    g_hhkKeyboard = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInst, 0);
+
+    if (!g_hhkKeyboard)
+    {
+        debug_log("register_hotkeys: FAILED to install hook, GetLastError=%lu", GetLastError());
+        return FALSE;
+    }
+
+    debug_log("register_hotkeys: Hook installed successfully.");
+    return TRUE;
+}
+
+static void unregister_hotkeys(HWND hwnd)
+{
+    (void)hwnd;
+
+    if (g_hhkKeyboard != NULL)
+    {
+        BOOL result = UnhookWindowsHookEx(g_hhkKeyboard);
+        debug_log("unregister_hotkeys: Unhook result=%d", result);
+        g_hhkKeyboard = NULL;
+    }
+}
+
+/* Stub to prevent compilation errors if still referenced */
+static void handle_hotkey_message(WPARAM wp)
+{
+    (void)wp; 
 }
 
 #endif /* JXLSHOT_HOTKEYS_C */

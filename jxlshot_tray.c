@@ -1,8 +1,8 @@
 /* jxlshot_tray.c — System tray extension for jxlshot.
-*
-* Build (MSYS2 / MinGW-w64):
-*   gcc -O2 -mwindows -o jxlshot_tray.exe jxlshot_tray.c -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
-*/
+ *
+ * Build (MSYS2 / MinGW-w64):
+ *   gcc -O2 -mwindows -o jxlshot_tray.exe jxlshot_tray.c -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
+ */
 #define UNICODE
 #define _UNICODE
 #define WINVER 0x0601
@@ -17,13 +17,17 @@
 #include <stdlib.h>
 #include <wchar.h>
 #include <time.h>
+#include <stdarg.h>
 
 #include "jxlshot.c"
 
 /* ------------------------------------------------------------------ */
-/* Menu IDs                                                           */
+/* Menu IDs & Custom Messages                                         */
 /* ------------------------------------------------------------------ */
-#define WM_TRAYICON   (WM_USER + 1)
+#define WM_TRAYICON            (WM_USER + 1)
+#define WM_HOOK_FULL_CAPTURE   (WM_USER + 10)
+#define WM_HOOK_REGION_CAPTURE (WM_USER + 11)
+
 #define ID_TRAY       1
 #define IDM_FULL      101
 #define IDM_REGION    102
@@ -38,18 +42,34 @@ static NOTIFYICONDATAW g_nid;
 static HWND            g_hwndTray = NULL;
 
 /* ------------------------------------------------------------------ */
+/* Debug Logger (File-based for reliable background tracing)          */
+/* ------------------------------------------------------------------ */
+static void debug_log(const char* fmt, ...) {
+    FILE* f = fopen("jxlshot_debug.log", "a");
+    if (f) {
+        va_list args;
+        va_start(args, fmt);
+        vfprintf(f, fmt, args);
+        va_end(args);
+        fprintf(f, "\n");
+        fclose(f);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Forward Declarations                                               */
 /* ------------------------------------------------------------------ */
 static void execute_full_capture(void);
 static void start_region_capture(void);
 static void execute_set_path(void);
 static void execute_about(void);
+static void install_keyboard_hook(void);
+static void uninstall_keyboard_hook(void);
 
 /* ------------------------------------------------------------------ */
-/* Config Reloading (No Hotkey Registration)                          */
+/* Config Reloading                                                   */
 /* ------------------------------------------------------------------ */
 static void reload_config(void) {
-    // Re-read INI to ensure export paths and encoding settings are current
     init_config();
 }
 
@@ -78,16 +98,16 @@ static void execute_full_capture(void) {
     if (!grab_primary_monitor(&g)) {
         free_grab(&g);
         MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
-        dbg("ERROR: Full screen capture failed.");
+        debug_log("ERROR: Full screen capture failed.");
         return;
     }
     wchar_t out_path[MAX_PATH];
     build_out_path(out_path, MAX_PATH);
     if (!save_bgra_as_jxl(g.bits, g.w, g.h, g_cfg.lossless, g_cfg.distance, out_path)) {
         MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
-        dbg("ERROR: Full screen encoding/saving failed for path: %ls", out_path);
+        debug_log("ERROR: Full screen encoding/saving failed for path: %ls", out_path);
     } else {
-        dbg("Successfully saved full screen capture to: %ls", out_path);
+        debug_log("Successfully saved full screen capture to: %ls", out_path);
     }
     free_grab(&g);
 }
@@ -109,7 +129,7 @@ static void execute_set_path(void) {
             _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
             WritePrivateProfileStringW(L"Capture", L"ExportPath", path, ini_path);
             
-            dbg("Export path updated to: %ls", path);
+            debug_log("Export path updated to: %ls", path);
             MessageBoxW(NULL, L"Export path updated successfully.", L"jxlshot", MB_ICONINFORMATION);
         }
         CoTaskMemFree(pidl);
@@ -119,7 +139,7 @@ static void execute_set_path(void) {
 static void execute_about(void) {
     const wchar_t* about_text = 
         L"JXL Screenshot Tool\n"
-        L"Version 1.1-17-08-2026\n\n"
+        L"Version 1.1-18-08-2026\n\n"
         L"A minimal command-line and tray screenshot tool\n"
         L"using the JPEG XL image codec.\n\n";
     
@@ -127,7 +147,7 @@ static void execute_about(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Interactive Region Selection (Unchanged)                           */
+/* Interactive Region Selection                                       */
 /* ------------------------------------------------------------------ */
 static HWND   g_hwndRegion = NULL;
 static HDC    g_hdcScreen  = NULL;
@@ -143,7 +163,7 @@ static void crop_and_encode_region(RECT *r) {
     Grab g;
     if (!grab_primary_monitor(&g)) {
         free_grab(&g);
-        dbg("ERROR: Region capture failed to grab primary monitor.");
+        debug_log("ERROR: Region capture failed to grab primary monitor.");
         return;
     }
     int rw = r->right - r->left;
@@ -155,7 +175,7 @@ static void crop_and_encode_region(RECT *r) {
     uint8_t *crop_bits = (uint8_t *)malloc((size_t)rw * rh * 4);
     if (!crop_bits) {
         free_grab(&g);
-        dbg("ERROR: Failed to allocate memory for region crop.");
+        debug_log("ERROR: Failed to allocate memory for region crop.");
         return;
     }
     for (int y = 0; y < rh; y++) {
@@ -166,9 +186,9 @@ static void crop_and_encode_region(RECT *r) {
     wchar_t out_path[MAX_PATH];
     build_out_path(out_path, MAX_PATH);
     if (!save_bgra_as_jxl(crop_bits, rw, rh, g_cfg.lossless, g_cfg.distance, out_path)) {
-        dbg("ERROR: Region encoding/saving failed for path: %ls", out_path);
+        debug_log("ERROR: Region encoding/saving failed for path: %ls", out_path);
     } else {
-        dbg("Successfully saved region capture to: %ls", out_path);
+        debug_log("Successfully saved region capture to: %ls", out_path);
     }
     free(crop_bits);
     free_grab(&g);
@@ -295,15 +315,89 @@ static void start_region_capture(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Low-Level Keyboard Hook for PrintScreen Interception               */
+/* ------------------------------------------------------------------ */
+static HHOOK g_hhkKeyboard = NULL;
+
+static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    if (nCode == HC_ACTION && wParam == WM_KEYDOWN)
+    {
+        KBDLLHOOKSTRUCT *pKB = (KBDLLHOOKSTRUCT *)lParam;
+        
+        // Log EVERY key to verify the hook is alive and receiving events
+        debug_log("Key pressed: vkCode=0x%02X", pKB->vkCode);
+
+        if (pKB->vkCode == VK_SNAPSHOT)
+        {
+            // GetAsyncKeyState is required for reliable modifier checking in hooks
+            if (GetAsyncKeyState(VK_CONTROL) & 0x8000)
+            {
+                debug_log("ACTION: Ctrl+PrintScreen pressed -> posting region capture message");
+                // POST MESSAGE: Keeps the hook thread fast, preventing Windows from killing it
+                PostMessageW(g_hwndTray, WM_HOOK_REGION_CAPTURE, 0, 0);
+            }
+            else
+            {
+                debug_log("ACTION: PrintScreen pressed -> posting full capture message");
+                PostMessageW(g_hwndTray, WM_HOOK_FULL_CAPTURE, 0, 0);
+            }
+
+            // CRITICAL: Return 1 to block the key from reaching Windows/Snipping Tool
+            return 1; 
+        }
+    }
+
+    return CallNextHookEx(g_hhkKeyboard, nCode, wParam, lParam);
+}
+
+static void install_keyboard_hook(void) {
+    if (g_hhkKeyboard != NULL) {
+        debug_log("install_keyboard_hook: Hook already installed.");
+        return;
+    }
+
+    HINSTANCE hInst = GetModuleHandle(NULL);
+    g_hhkKeyboard = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, hInst, 0);
+
+    if (!g_hhkKeyboard) {
+        debug_log("install_keyboard_hook: FAILED to install hook, GetLastError=%lu", GetLastError());
+    } else {
+        debug_log("install_keyboard_hook: Hook installed successfully.");
+    }
+}
+
+static void uninstall_keyboard_hook(void) {
+    if (g_hhkKeyboard != NULL) {
+        BOOL result = UnhookWindowsHookEx(g_hhkKeyboard);
+        debug_log("uninstall_keyboard_hook: Unhook result=%d", result);
+        g_hhkKeyboard = NULL;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Tray Window Procedure & Entry Point                                */
 /* ------------------------------------------------------------------ */
-LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
+LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) 
+{
+    switch (msg) 
+    {
         case WM_TRAYICON:
-            if (lp == WM_RBUTTONUP || lp == WM_LBUTTONUP) {
+            if (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP) {
                 show_tray_menu(hwnd);
             }
             break;
+            
+        case WM_HOOK_FULL_CAPTURE:
+            debug_log("TrayWndProc: Executing full capture from hook message");
+            execute_full_capture();
+            break;
+            
+        case WM_HOOK_REGION_CAPTURE:
+            debug_log("TrayWndProc: Executing region capture from hook message");
+            start_region_capture();
+            break;
+
         case WM_COMMAND:
             reload_config(); // Ensure latest config before action
             switch (LOWORD(wp)) {
@@ -314,13 +408,16 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDM_EXIT:    PostQuitMessage(0); break;
             }
             break;
+            
         case WM_DESTROY:
+            uninstall_keyboard_hook(); // Ensure hook is removed on exit
             g_nid.uFlags = 0;
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
             PostQuitMessage(0);
             break;
+            
         default:
-            return DefWindowProcW(hwnd, msg, wp, lp);
+            return DefWindowProcW(hwnd, msg, wp, lParam);
     }
     return 0;
 }
@@ -332,7 +429,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     init_config();
     dbg_init();
     
-    dbg("jxlshot_tray application started successfully (Hotkeys managed externally).");
+    debug_log("=== jxlshot_tray application started ===");
     
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
@@ -354,12 +451,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
     
+    // INSTALL THE HOOK HERE
+    install_keyboard_hook();
+    
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
     
-    dbg("jxlshot_tray application exiting.");
+    // Cleanup is handled in WM_DESTROY, but good practice to ensure
+    uninstall_keyboard_hook();
+    
+    debug_log("=== jxlshot_tray application exiting ===");
     return (int)msg.wParam;
 }
