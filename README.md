@@ -13,3 +13,5 @@
 - and nothing fancy just do what it should do !
 
      Why JXL? Because its the modern image format and take less space than other file format and has great compression.
+
+  ENJOY!
