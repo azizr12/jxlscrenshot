@@ -1,9 +1,5 @@
 /* jxlshot_tray.c — System tray extension for jxlshot.
 *
-* Adds a resident tray icon with a context menu for full-screen and
-* interactive region capture. Reads persistent configuration from
-* jxlshot.ini located next to the executable.
-*
 * Build (MSYS2 / MinGW-w64):
 *   gcc -O2 -mwindows -o jxlshot_tray.exe jxlshot_tray.c -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
 */
@@ -22,11 +18,10 @@
 #include <wchar.h>
 #include <time.h>
 
-/* Include the core logic. */
 #include "jxlshot.c"
 
 /* ------------------------------------------------------------------ */
-/* Menu & Hotkey IDs                                                  */
+/* Menu IDs                                                           */
 /* ------------------------------------------------------------------ */
 #define WM_TRAYICON   (WM_USER + 1)
 #define ID_TRAY       1
@@ -41,58 +36,21 @@
 /* ------------------------------------------------------------------ */
 static NOTIFYICONDATAW g_nid;
 static HWND            g_hwndTray = NULL;
-static FILETIME        g_last_ini_time;
 
 /* ------------------------------------------------------------------ */
 /* Forward Declarations                                               */
 /* ------------------------------------------------------------------ */
-static void register_hotkeys(void);
 static void execute_full_capture(void);
 static void start_region_capture(void);
 static void execute_set_path(void);
 static void execute_about(void);
 
 /* ------------------------------------------------------------------ */
-/* Config Reloading & Hotkey Management                               */
+/* Config Reloading (No Hotkey Registration)                          */
 /* ------------------------------------------------------------------ */
-static BOOL get_ini_file_time(FILETIME* ft) {
-    wchar_t ini_path[MAX_PATH];
-    _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-    WIN32_FIND_DATAW fd;
-    HANDLE hFind = FindFirstFileW(ini_path, &fd);
-    if (hFind != INVALID_HANDLE_VALUE) {
-        *ft = fd.ftLastWriteTime;
-        FindClose(hFind);
-        return TRUE;
-    }
-    return FALSE;
-}
-
 static void reload_config(void) {
-    FILETIME current_time;
-    if (get_ini_file_time(&current_time)) {
-        if (CompareFileTime(&current_time, &g_last_ini_time) != 0) {
-            g_last_ini_time = current_time;
-            
-            UnregisterHotKey(g_hwndTray, IDM_FULL);
-            UnregisterHotKey(g_hwndTray, IDM_REGION);
-            
-            init_config();
-            register_hotkeys();
-            dbg("Configuration reloaded from INI.");
-        }
-    }
-}
-
-static void register_hotkeys(void) {
-    if (g_cfg.hk_full_vk) {
-        BOOL res = RegisterHotKey(g_hwndTray, IDM_FULL, g_cfg.hk_full_mod, g_cfg.hk_full_vk);
-        dbg("RegisterHotKey(Full): %d (mod=%u, vk=%u)", res, g_cfg.hk_full_mod, g_cfg.hk_full_vk);
-    }
-    if (g_cfg.hk_region_vk) {
-        BOOL res = RegisterHotKey(g_hwndTray, IDM_REGION, g_cfg.hk_region_mod, g_cfg.hk_region_vk);
-        dbg("RegisterHotKey(Region): %d (mod=%u, vk=%u)", res, g_cfg.hk_region_mod, g_cfg.hk_region_vk);
-    }
+    // Re-read INI to ensure export paths and encoding settings are current
+    init_config();
 }
 
 /* ------------------------------------------------------------------ */
@@ -151,8 +109,6 @@ static void execute_set_path(void) {
             _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
             WritePrivateProfileStringW(L"Capture", L"ExportPath", path, ini_path);
             
-            get_ini_file_time(&g_last_ini_time);
-            
             dbg("Export path updated to: %ls", path);
             MessageBoxW(NULL, L"Export path updated successfully.", L"jxlshot", MB_ICONINFORMATION);
         }
@@ -163,31 +119,15 @@ static void execute_set_path(void) {
 static void execute_about(void) {
     const wchar_t* about_text = 
         L"JXL Screenshot Tool\n"
-        L"Version 1.1\n\n"
+        L"Version 1.1-17-08-2026\n\n"
         L"A minimal command-line and tray screenshot tool\n"
         L"using the JPEG XL image codec.\n\n"
-        L"Copyright (c) 2024\n\n"
-        L"Permission is hereby granted, free of charge, to any person obtaining a copy\n"
-        L"of this software and associated documentation files (the \"Software\"), to deal\n"
-        L"in the Software without restriction, including without limitation the rights\n"
-        L"to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n"
-        L"copies of the Software, and to permit persons to whom the Software is\n"
-        L"furnished to do so, subject to the following conditions:\n\n"
-        L"The above copyright notice and this permission notice shall be included in all\n"
-        L"copies or substantial portions of the Software.\n\n"
-        L"THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n"
-        L"IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n"
-        L"FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n"
-        L"AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n"
-        L"LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n"
-        L"OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n"
-        L"SOFTWARE.";
     
     MessageBoxW(NULL, about_text, L"About JXL Screenshot Tool", MB_OK | MB_ICONINFORMATION);
 }
 
 /* ------------------------------------------------------------------ */
-/* Interactive Region Selection                                       */
+/* Interactive Region Selection (Unchanged)                           */
 /* ------------------------------------------------------------------ */
 static HWND   g_hwndRegion = NULL;
 static HDC    g_hdcScreen  = NULL;
@@ -364,13 +304,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 show_tray_menu(hwnd);
             }
             break;
-        case WM_HOTKEY:
-            reload_config();
-            if (wp == IDM_FULL) execute_full_capture();
-            else if (wp == IDM_REGION) start_region_capture();
-            break;
         case WM_COMMAND:
-            reload_config();
+            reload_config(); // Ensure latest config before action
             switch (LOWORD(wp)) {
                 case IDM_FULL:    execute_full_capture(); break;
                 case IDM_REGION:  start_region_capture(); break;
@@ -397,10 +332,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     init_config();
     dbg_init();
     
-    get_ini_file_time(&g_last_ini_time);
-    register_hotkeys();
-    
-    dbg("jxlshot_tray application started successfully.");
+    dbg("jxlshot_tray application started successfully (Hotkeys managed externally).");
     
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
@@ -408,8 +340,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     wc.hInstance = hInst;
     wc.lpszClassName = L"JxlShotTrayClass";
     RegisterClassExW(&wc);
+    
     g_hwndTray = CreateWindowExW(0, L"JxlShotTrayClass", L"", 0, 0, 0, 0, 0,
                                  HWND_MESSAGE, NULL, hInst, NULL);
+    
     ZeroMemory(&g_nid, sizeof(g_nid));
     g_nid.cbSize = sizeof(g_nid);
     g_nid.hWnd = g_hwndTray;
@@ -425,9 +359,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    
-    UnregisterHotKey(g_hwndTray, IDM_FULL);
-    UnregisterHotKey(g_hwndTray, IDM_REGION);
     
     dbg("jxlshot_tray application exiting.");
     return (int)msg.wParam;
