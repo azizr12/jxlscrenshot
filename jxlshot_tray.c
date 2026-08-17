@@ -51,7 +51,16 @@ static BOOL get_ini_file_time(FILETIME* ft) {
     return FALSE;
 }
 
-static void register_hotkeys(void); // Forward declaration
+static void register_hotkeys(void) {
+    if (g_cfg.hk_full_vk) {
+        BOOL res = RegisterHotKey(g_hwndTray, IDM_FULL, g_cfg.hk_full_mod, g_cfg.hk_full_vk);
+        dbg("RegisterHotKey(Full): %d (mod=%u, vk=%u)", res, g_cfg.hk_full_mod, g_cfg.hk_full_vk);
+    }
+    if (g_cfg.hk_region_vk) {
+        BOOL res = RegisterHotKey(g_hwndTray, IDM_REGION, g_cfg.hk_region_mod, g_cfg.hk_region_vk);
+        dbg("RegisterHotKey(Region): %d (mod=%u, vk=%u)", res, g_cfg.hk_region_mod, g_cfg.hk_region_vk);
+    }
+}
 
 static void reload_config(void) {
     FILETIME current_time;
@@ -60,8 +69,8 @@ static void reload_config(void) {
             g_last_ini_time = current_time;
             
             // Unregister old hotkeys before re-reading config
-            UnregisterHotKey(NULL, IDM_FULL);
-            UnregisterHotKey(NULL, IDM_REGION);
+            UnregisterHotKey(g_hwndTray, IDM_FULL);   // <-- Changed from NULL
+            UnregisterHotKey(g_hwndTray, IDM_REGION); // <-- Changed from NULL
             
             init_config(); // Re-read INI
             
@@ -419,9 +428,11 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
         DispatchMessage(&msg);
     }
     
+    // ... (Message loop ends) ...
+    
     // Cleanup hotkeys on exit
-    UnregisterHotKey(NULL, IDM_FULL);
-    UnregisterHotKey(NULL, IDM_REGION);
+    UnregisterHotKey(g_hwndTray, IDM_FULL);   // <-- Changed from NULL
+    UnregisterHotKey(g_hwndTray, IDM_REGION); // <-- Changed from NULL
     
     dbg("jxlshot_tray application exiting.");
     return (int)msg.wParam;
