@@ -235,7 +235,10 @@ static int encode_jxl(const uint8_t *rgba, int w, int h,
     JxlEncoder *enc = JxlEncoderCreate(NULL);
     if (!enc) { dbg("encode_jxl: JxlEncoderCreate returned NULL"); return 0; }
 
-    JxlEncoderSetCodestreamLevel(enc, -1);
+    /* Temporarily disabled for API_USAGE diagnosis.
+       Some libjxl versions reject this call before SetBasicInfo.
+       JxlEncoderSetCodestreamLevel(enc, -1);
+    */
 
     JxlBasicInfo info;
     JxlEncoderInitBasicInfo(&info);
