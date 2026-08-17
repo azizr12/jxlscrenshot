@@ -12,6 +12,13 @@
  *     -a       capture all monitors instead of the primary one
  *     -w       wait N milliseconds before capturing
  *
+ * Debug log:
+ *   Every run appends a step-by-step trace to "jxlshot_debug.log" next to
+ *   the exe (created automatically). In CLI mode the same lines are echoed
+ *   to the console. If a capture/save ever fails, check that file first —
+ *   it records the return code of every capture/GDI/libjxl call, so you can
+ *   see exactly which one failed instead of just "encoding or saving failed".
+ *
  * Build (MSYS2 / MinGW-w64):
  *   gcc -O2 -mwindows -o jxlshot.exe jxlshot.c -ljxl -lgdi32 -luser32 -lshell32
  */
@@ -29,6 +36,8 @@
 #include <string.h>
 #include <stdint.h>
 #include <wchar.h>
+#include <stdarg.h>
+#include <errno.h>
 
 #include <jxl/encode.h>
 
@@ -71,6 +80,67 @@ static Grab  g_grab;
 static struct { int have; int x0, y0, x1, y1; } g_drag;
 
 /* ------------------------------------------------------------------ */
+/* Debug logging                                                      */
+/*                                                                     */
+/* Writes to jxlshot_debug.log next to the exe on every run, and also */
+/* echoes to the console when one is attached (CLI mode). Every       */
+/* meaningful GDI/libjxl/file call in the capture pipeline logs its   */
+/* return value here, so a failure can be traced to the exact step.   */
+/* ------------------------------------------------------------------ */
+
+static FILE *g_dbg = NULL;
+static int   g_console_active = 0;
+
+static void dbg(const char *fmt, ...) {
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf(buf, sizeof buf - 1, fmt, ap);
+    va_end(ap);
+    buf[sizeof buf - 1] = 0;
+
+    if (g_dbg) {
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        fprintf(g_dbg, "[%02d:%02d:%02d.%03d] %s\n",
+                st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
+        fflush(g_dbg);
+    }
+    if (g_console_active) {
+        fprintf(stderr, "[jxlshot] %s\n", buf);
+    }
+}
+
+static void dbg_init(void) {
+    wchar_t path[MAX_PATH];
+    _snwprintf(path, MAX_PATH, L"%s\\jxlshot_debug.log", g_exe_dir);
+    path[MAX_PATH - 1] = 0;
+
+    g_dbg = _wfopen(path, L"a");
+    if (!g_dbg) return;
+
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fprintf(g_dbg, "\n===== jxlshot run started %04d-%02d-%02d %02d:%02d:%02d =====\n",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    fflush(g_dbg);
+}
+
+/* Human-readable name for a JxlEncoderError code, for the log. */
+static const char *jxl_enc_err_name(JxlEncoderError e) {
+    switch (e) {
+        case JXL_ENC_ERR_OK:            return "OK";
+        case JXL_ENC_ERR_GENERIC:       return "GENERIC";
+        case JXL_ENC_ERR_OOM:           return "OUT_OF_MEMORY";
+        case JXL_ENC_ERR_JBRD:          return "JPEG_BITSTREAM_RECONSTRUCTION_DATA";
+        case JXL_ENC_ERR_BAD_INPUT:     return "BAD_INPUT";
+        case JXL_ENC_ERR_NOT_SUPPORTED: return "NOT_SUPPORTED";
+        case JXL_ENC_ERR_API_USAGE:     return "API_USAGE";
+        default:                        return "UNKNOWN";
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Settings (jxlshot.ini)                                             */
 /* ------------------------------------------------------------------ */
 
@@ -104,7 +174,7 @@ static void write_default_ini(void) {
         "Directory=\r\n"
         "; 1 = lossless (recommended for screenshots), 0 = lossy\r\n"
         "Lossless=1\r\n"
-        "; Lossy quality distance 0.5-3.0, lower = better (ignored when Lossless=1)\r\n"
+        "; Lossy quality distance 0.0-25.0, lower = better (ignored when Lossless=1)\r\n"
         "Distance=1.0\r\n";
 
     HANDLE f = CreateFileW(g_ini_path, GENERIC_WRITE, 0, NULL,
@@ -133,12 +203,19 @@ static void load_settings(void) {
     wchar_t dstr[32];
     GetPrivateProfileStringW(L"Output", L"Distance", L"1.0", dstr, 32, g_ini_path);
     g_set.distance = (float)wcstod(dstr, NULL);
+    if (g_set.distance < 0.0f || g_set.distance > 25.0f) {
+        dbg("load_settings: Distance=%.3f out of range, clamping to 1.0", g_set.distance);
+        g_set.distance = 1.0f;
+    }
 
     /* Create the folder if needed; fall back if impossible. */
     if (GetFileAttributesW(g_set.dir) == INVALID_FILE_ATTRIBUTES) {
         if (!CreateDirectoryW(g_set.dir, NULL))
             default_output_dir(g_set.dir, MAX_PATH);
     }
+
+    dbg("load_settings: dir=%S lossless=%d distance=%.3f",
+        g_set.dir, g_set.lossless, g_set.distance);
 }
 
 /* ------------------------------------------------------------------ */
@@ -150,9 +227,13 @@ static int encode_jxl(const uint8_t *rgba, int w, int h,
                       uint8_t **out_buf, size_t *out_size) {
     int ok = 0;
     uint8_t *buf = NULL;
+    JxlEncoderStatus st;
+
+    dbg("encode_jxl: start w=%d h=%d lossless=%d distance=%.3f",
+        w, h, lossless, distance);
 
     JxlEncoder *enc = JxlEncoderCreate(NULL);
-    if (!enc) return 0;
+    if (!enc) { dbg("encode_jxl: JxlEncoderCreate returned NULL"); return 0; }
 
     JxlEncoderSetCodestreamLevel(enc, -1);
 
@@ -164,46 +245,85 @@ static int encode_jxl(const uint8_t *rgba, int w, int h,
     info.exponent_bits_per_sample = 0;
     info.alpha_bits         = 8;
     info.num_color_channels = 3;
-    if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) goto done;
+    /* Bit-exact lossless requires the encoder to skip the XYB colour
+     * transform. Without this, "lossless" screenshots are not actually
+     * pixel-exact even though JxlEncoderSetFrameLossless is set below. */
+    info.uses_original_profile = lossless ? JXL_TRUE : JXL_FALSE;
+
+    st = JxlEncoderSetBasicInfo(enc, &info);
+    dbg("encode_jxl: JxlEncoderSetBasicInfo -> %d", (int)st);
+    if (st != JXL_ENC_SUCCESS) {
+        dbg("encode_jxl: SetBasicInfo error = %s", jxl_enc_err_name(JxlEncoderGetError(enc)));
+        goto done;
+    }
+
+    /* Explicitly tag the data as sRGB. Screen captures are sRGB, and
+     * some libjxl versions behave inconsistently (or reject the frame
+     * later) if the color encoding is never set at all. */
+    {
+        JxlColorEncoding color_encoding;
+        JxlColorEncodingSetToSRGB(&color_encoding, JXL_FALSE);
+        st = JxlEncoderSetColorEncoding(enc, &color_encoding);
+        dbg("encode_jxl: JxlEncoderSetColorEncoding -> %d", (int)st);
+        if (st != JXL_ENC_SUCCESS) {
+            dbg("encode_jxl: SetColorEncoding error = %s", jxl_enc_err_name(JxlEncoderGetError(enc)));
+            goto done;
+        }
+    }
 
     JxlEncoderFrameSettings *fs = JxlEncoderFrameSettingsCreate(enc, NULL);
-    if (!fs) goto done;
+    if (!fs) { dbg("encode_jxl: JxlEncoderFrameSettingsCreate returned NULL"); goto done; }
+
     if (lossless) {
-        JxlEncoderSetFrameLossless(fs, JXL_TRUE);
+        st = JxlEncoderSetFrameLossless(fs, JXL_TRUE);
+        dbg("encode_jxl: JxlEncoderSetFrameLossless(TRUE) -> %d", (int)st);
         JxlEncoderSetFrameDistance(fs, 0.0f);
     } else {
-        JxlEncoderSetFrameDistance(fs, distance);
+        st = JxlEncoderSetFrameDistance(fs, distance);
+        dbg("encode_jxl: JxlEncoderSetFrameDistance(%.3f) -> %d", distance, (int)st);
     }
 
     JxlPixelFormat fmt = {4, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
-    if (JxlEncoderAddImageFrame(fs, &fmt, rgba, (size_t)w * h * 4)
-        != JXL_ENC_SUCCESS) goto done;
+    st = JxlEncoderAddImageFrame(fs, &fmt, rgba, (size_t)w * h * 4);
+    dbg("encode_jxl: JxlEncoderAddImageFrame -> %d", (int)st);
+    if (st != JXL_ENC_SUCCESS) {
+        dbg("encode_jxl: AddImageFrame error = %s", jxl_enc_err_name(JxlEncoderGetError(enc)));
+        goto done;
+    }
     JxlEncoderCloseInput(enc);
 
     size_t cap = 1 << 20;
     buf = (uint8_t *)malloc(cap);
-    if (!buf) goto done;
+    if (!buf) { dbg("encode_jxl: malloc(%lu) failed", (unsigned long)cap); goto done; }
     uint8_t *next = buf;
     size_t avail = cap;
 
     for (;;) {
-        JxlEncoderStatus st = JxlEncoderProcessOutput(enc, &next, &avail);
+        st = JxlEncoderProcessOutput(enc, &next, &avail);
+        dbg("encode_jxl: JxlEncoderProcessOutput -> %d (cap=%lu avail=%lu)",
+            (int)st, (unsigned long)cap, (unsigned long)avail);
         if (st == JXL_ENC_SUCCESS) break;
         if (st == JXL_ENC_NEED_MORE_OUTPUT) {
             size_t used = (size_t)(next - buf);
             cap *= 2;
             uint8_t *nb = (uint8_t *)realloc(buf, cap);
-            if (!nb) { free(buf); buf = NULL; goto done; }
+            if (!nb) {
+                dbg("encode_jxl: realloc(%lu) failed", (unsigned long)cap);
+                free(buf); buf = NULL;
+                goto done;
+            }
             buf  = nb;
             next = buf + used;
             avail = cap - used;
             continue;
         }
+        dbg("encode_jxl: ProcessOutput error = %s", jxl_enc_err_name(JxlEncoderGetError(enc)));
         free(buf); buf = NULL;
         goto done;
     }
     *out_buf  = buf;
     *out_size = cap - avail;
+    dbg("encode_jxl: success, %lu bytes", (unsigned long)*out_size);
     buf = NULL;
     ok = 1;
 
@@ -249,11 +369,26 @@ static int save_rgba_as_jxl(const uint8_t *rgba, int w, int h,
     uint8_t *buf = NULL;
     size_t   size = 0;
     int ok = 0;
-    if (!encode_jxl(rgba, w, h, lossless, distance, &buf, &size)) return 0;
+
+    dbg("save_rgba_as_jxl: target=%S", path);
+
+    if (!encode_jxl(rgba, w, h, lossless, distance, &buf, &size)) {
+        dbg("save_rgba_as_jxl: encode_jxl failed, nothing written");
+        return 0;
+    }
+
+    errno = 0;
     FILE *f = _wfopen(path, L"wb");
     if (f) {
-        ok = (fwrite(buf, 1, size, f) == size);
+        size_t written = fwrite(buf, 1, size, f);
+        dbg("save_rgba_as_jxl: fwrite %lu/%lu bytes to %S",
+            (unsigned long)written, (unsigned long)size, path);
+        ok = (written == size);
+        if (!ok) dbg("save_rgba_as_jxl: short write, disk full or I/O error?");
         fclose(f);
+    } else {
+        dbg("save_rgba_as_jxl: _wfopen(%S) failed, errno=%d (%s)",
+            path, errno, strerror(errno));
     }
     free(buf);
     return ok;
@@ -289,10 +424,24 @@ static int grab_screen(Grab *g, int all_monitors) {
         g->w = GetSystemMetrics(SM_CXSCREEN);
         g->h = GetSystemMetrics(SM_CYSCREEN);
     }
-    if (g->w <= 0 || g->h <= 0) return 0;
+    dbg("grab_screen: all_monitors=%d region=(%d,%d) %dx%d",
+        all_monitors, g->x, g->y, g->w, g->h);
+    if (g->w <= 0 || g->h <= 0) {
+        dbg("grab_screen: invalid dimensions, aborting");
+        return 0;
+    }
 
     HDC sdc = GetDC(NULL);
-    g->hdc  = CreateCompatibleDC(sdc);
+    if (!sdc) {
+        dbg("grab_screen: GetDC(NULL) failed, GetLastError=%lu", GetLastError());
+        return 0;
+    }
+    g->hdc = CreateCompatibleDC(sdc);
+    if (!g->hdc) {
+        dbg("grab_screen: CreateCompatibleDC failed, GetLastError=%lu", GetLastError());
+        ReleaseDC(NULL, sdc);
+        return 0;
+    }
 
     BITMAPINFO bi;
     ZeroMemory(&bi, sizeof bi);
@@ -304,17 +453,26 @@ static int grab_screen(Grab *g, int all_monitors) {
     bi.bmiHeader.biCompression = BI_RGB;
 
     g->hbmp = CreateDIBSection(sdc, &bi, DIB_RGB_COLORS, (void **)&g->bits, NULL, 0);
-    if (!g->hbmp) { DeleteDC(g->hdc); ReleaseDC(NULL, sdc); return 0; }
+    if (!g->hbmp) {
+        dbg("grab_screen: CreateDIBSection (main) failed, GetLastError=%lu", GetLastError());
+        DeleteDC(g->hdc); g->hdc = NULL;
+        ReleaseDC(NULL, sdc);
+        return 0;
+    }
     SelectObject(g->hdc, g->hbmp);
 
     if (!BitBlt(g->hdc, 0, 0, g->w, g->h, sdc, g->x, g->y, SRCCOPY)) {
+        dbg("grab_screen: BitBlt failed, GetLastError=%lu", GetLastError());
         ReleaseDC(NULL, sdc);
         return 0;
     }
     GdiFlush();
-    ReleaseDC(NULL, sdc);
+    dbg("grab_screen: main capture ok");
 
-    /* Darkened copy for the overlay background (~45% brightness). */
+    /* Darkened copy for the overlay background (~45% brightness).
+     * NOTE: this must happen before sdc is released below — it used to
+     * be created from an already-released DC, which is undefined
+     * behaviour and could intermittently fail. */
     uint8_t *darkbits = NULL;
     g->hbmpDark = CreateDIBSection(sdc, &bi, DIB_RGB_COLORS, (void **)&darkbits, NULL, 0);
     if (g->hbmpDark) {
@@ -327,7 +485,13 @@ static int grab_screen(Grab *g, int all_monitors) {
             darkbits[4*i + 2] = (uint8_t)(g->bits[4*i + 2] * 115 / 256);
             darkbits[4*i + 3] = 0xFF;
         }
+    } else {
+        dbg("grab_screen: CreateDIBSection (dark overlay) failed, GetLastError=%lu",
+            GetLastError());
+        /* Non-fatal: only the region-select overlay dimming is affected. */
     }
+
+    ReleaseDC(NULL, sdc);
     return 1;
 }
 
@@ -345,7 +509,12 @@ static void free_grab(Grab *g) {
 
 static void do_full_capture(void) {
     Grab g;
-    if (!grab_screen(&g, 1)) { show_balloon(L"JXL Screenshot", L"Capture failed."); return; }
+    if (!grab_screen(&g, 1)) {
+        dbg("do_full_capture: grab_screen failed");
+        free_grab(&g);   /* grab_screen may have partially allocated GDI objects */
+        show_balloon(L"JXL Screenshot", L"Capture failed.");
+        return;
+    }
 
     uint8_t *rgba = (uint8_t *)malloc((size_t)g.w * g.h * 4);
     if (rgba) {
@@ -357,6 +526,8 @@ static void do_full_capture(void) {
         else
             show_balloon(L"JXL Screenshot", L"Encoding or saving failed.");
         free(rgba);
+    } else {
+        dbg("do_full_capture: malloc for rgba buffer failed");
     }
     free_grab(&g);
 }
@@ -364,6 +535,8 @@ static void do_full_capture(void) {
 static void begin_region(void) {
     if (g_overlay) return;
     if (!grab_screen(&g_grab, 1)) {
+        dbg("begin_region: grab_screen failed");
+        free_grab(&g_grab);
         show_balloon(L"JXL Screenshot", L"Capture failed.");
         return;
     }
@@ -372,7 +545,11 @@ static void begin_region(void) {
                                 L"jxlshot_overlay", L"", WS_POPUP,
                                 g_grab.x, g_grab.y, g_grab.w, g_grab.h,
                                 NULL, NULL, g_hinst, NULL);
-    if (!g_overlay) { free_grab(&g_grab); return; }
+    if (!g_overlay) {
+        dbg("begin_region: CreateWindowExW(overlay) failed, GetLastError=%lu", GetLastError());
+        free_grab(&g_grab);
+        return;
+    }
     ShowWindow(g_overlay, SW_SHOW);
     UpdateWindow(g_overlay);
     SetForegroundWindow(g_overlay);
@@ -386,6 +563,7 @@ static void cancel_region(void) {
 
 static void finish_region(const RECT *r) {
     int w = r->right - r->left, h = r->bottom - r->top;
+    dbg("finish_region: %dx%d", w, h);
     uint8_t *rgba = (uint8_t *)malloc((size_t)w * h * 4);
     if (rgba) {
         for (int yy = 0; yy < h; yy++) {
@@ -400,6 +578,8 @@ static void finish_region(const RECT *r) {
         else
             show_balloon(L"JXL Screenshot", L"Encoding or saving failed.");
         free(rgba);
+    } else {
+        dbg("finish_region: malloc for rgba buffer failed");
     }
     cancel_region();
 }
@@ -626,6 +806,7 @@ static int run_cli(int argc, wchar_t **argv) {
     dummy = freopen("CONOUT$", "wb", stderr);
     dummy = freopen("CONIN$",  "rb", stdin);
     (void)dummy;
+    g_console_active = 1;
 
     const wchar_t *out_path = NULL;
     float distance = 1.0f;
@@ -639,6 +820,7 @@ static int run_cli(int argc, wchar_t **argv) {
         else if (!wcscmp(argv[i], L"-w") && i + 1 < argc) wait_ms = (DWORD)wcstol(argv[++i], NULL, 10);
         else if (argv[i][0] != L'-' && !out_path) out_path = argv[i];
         else {
+            dbg("run_cli: unrecognized/duplicate argument at index %d", i);
             fwprintf(stderr,
                 L"Usage: jxlshot.exe <output.jxl> [-l] [-d distance] [-a] [-w ms]\n"
                 L"Run without arguments for tray mode.\n");
@@ -650,10 +832,15 @@ static int run_cli(int argc, wchar_t **argv) {
         return 2;
     }
 
+    dbg("run_cli: out_path=%S lossless=%d distance=%.3f all_monitors=%d wait_ms=%lu",
+        out_path, lossless, distance, all_monitors, (unsigned long)wait_ms);
+
     if (wait_ms) Sleep(wait_ms);
 
     Grab g;
     if (!grab_screen(&g, all_monitors)) {
+        dbg("run_cli: grab_screen failed");
+        free_grab(&g);
         fwprintf(stderr, L"error: screen capture failed\n");
         return 1;
     }
@@ -667,9 +854,14 @@ static int run_cli(int argc, wchar_t **argv) {
                      lossless ? L"lossless" : L"lossy");
             rc = 0;
         } else {
-            fwprintf(stderr, L"error: encoding or saving failed\n");
+            fwprintf(stderr,
+                L"error: encoding or saving failed (see %s\\jxlshot_debug.log for details)\n",
+                g_exe_dir);
         }
         free(rgba);
+    } else {
+        dbg("run_cli: malloc for rgba buffer failed");
+        fwprintf(stderr, L"error: out of memory\n");
     }
     free_grab(&g);
 
@@ -689,16 +881,23 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
 
     set_dpi_aware();
 
+    /* Needed in both CLI and tray mode, so the debug log always ends up
+     * next to the exe regardless of which mode we end up running. */
+    init_paths();
+    dbg_init();
+
     int argc = 0;
     wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
-    if (argv && argc >= 2)
+    if (argv && argc >= 2) {
+        dbg("WinMain: CLI mode, argc=%d", argc);
         return run_cli(argc, argv);
+    }
+    dbg("WinMain: tray mode");
 
     /* Tray mode: single instance. */
     HANDLE mtx = CreateMutexW(NULL, TRUE, L"Local\\jxlshot.single");
     if (mtx && GetLastError() == ERROR_ALREADY_EXISTS) return 0;
 
-    init_paths();
     load_settings();
     g_hinst = hInst;
 
@@ -719,7 +918,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
 
     g_hwnd = CreateWindowExW(0, L"jxlshot_tray", L"", WS_POPUP,
                              0, 0, 0, 0, NULL, NULL, hInst, NULL);
-    if (!g_hwnd) return 1;
+    if (!g_hwnd) { dbg("WinMain: CreateWindowExW(tray) failed"); return 1; }
 
     g_icon = make_icon();
     tray_add();
@@ -733,5 +932,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int nShow) {
     tray_remove();
     if (g_icon) DestroyIcon(g_icon);
     if (mtx) CloseHandle(mtx);
+    dbg("WinMain: exiting normally");
     return 0;
 }
