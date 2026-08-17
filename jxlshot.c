@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <wchar.h>
+#include <ctype.h>
 #include <stdarg.h>
 #include <errno.h>
 #include <jxl/encode.h>
@@ -39,6 +40,10 @@ typedef struct {
     float   distance;
     int     show_cursor;
     wchar_t export_path[MAX_PATH];
+    UINT    hk_full_mod;
+    UINT    hk_full_vk;
+    UINT    hk_region_mod;
+    UINT    hk_region_vk;
 } AppConfig;
 
 static AppConfig g_cfg;
@@ -51,6 +56,56 @@ static void init_paths(void) {
     if (slash) *slash = 0;
     wcsncpy(g_exe_dir, tmp, MAX_PATH - 1);
     g_exe_dir[MAX_PATH - 1] = 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Hotkey Parsing Logic                                               */
+/* ------------------------------------------------------------------ */
+static UINT parse_vk(const wchar_t* key) {
+    if (_wcsicmp(key, L"PrintScreen") == 0 || _wcsicmp(key, L"ImprEcran") == 0) return VK_SNAPSHOT;
+    if (_wcsicmp(key, L"ScrollLock") == 0) return VK_SCROLL;
+    if (_wcsicmp(key, L"Pause") == 0) return VK_PAUSE;
+    
+    if (key[0] == L'F' && key[1] != L'\0' && key[2] == L'\0') {
+        int n = key[1] - L'0';
+        if (n >= 1 && n <= 12) return VK_F1 + n - 1;
+    }
+    
+    if (key[1] == L'\0') return (UINT)towupper(key[0]);
+    return 0;
+}
+
+static BOOL parse_hotkey(const wchar_t* str, UINT* mod, UINT* vk) {
+    *mod = 0; *vk = 0;
+    if (!str || !*str) return FALSE;
+
+    wchar_t buf[256];
+    wcsncpy(buf, str, 255); buf[255] = 0;
+    
+    wchar_t* p = buf;
+    wchar_t* token;
+    
+    while (1) {
+        token = wcschr(p, L'+');
+        if (token) *token = L'\0';
+        
+        // Trim spaces
+        while (*p == L' ') p++;
+        wchar_t* end = p + wcslen(p) - 1;
+        while (end > p && *end == L' ') { *end = L'\0'; end--; }
+
+        if (_wcsicmp(p, L"Ctrl") == 0) *mod |= MOD_CONTROL;
+        else if (_wcsicmp(p, L"Shift") == 0) *mod |= MOD_SHIFT;
+        else if (_wcsicmp(p, L"Alt") == 0) *mod |= MOD_ALT;
+        else if (_wcsicmp(p, L"Win") == 0) *mod |= MOD_WIN;
+        else {
+            *vk = parse_vk(p);
+        }
+        
+        if (!token) break;
+        p = token + 1;
+    }
+    return (*vk != 0);
 }
 
 static void ensure_default_ini(void) {
@@ -70,6 +125,9 @@ static void ensure_default_ini(void) {
             fprintf(f, "ShowCursor=1\n");
             fprintf(f, "; Export path for screenshots (leave empty for default Pictures folder)\n");
             fprintf(f, "ExportPath=\n");
+            fprintf(f, "; Hotkeys (Modifiers: Ctrl, Shift, Alt, Win. Keys: PrintScreen, F1-F12, etc.)\n");
+            fprintf(f, "HotkeyFull=PrintScreen\n");
+            fprintf(f, "HotkeyRegion=Ctrl+PrintScreen\n");
             fclose(f);
         }
     }
@@ -78,12 +136,14 @@ static void ensure_default_ini(void) {
 static void init_config(void) {
     wchar_t ini_path[MAX_PATH];
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-
+    
     // Defaults
     g_cfg.debug_enabled = 1;
     g_cfg.lossless = 1;
     g_cfg.distance = 1.0f;
     g_cfg.show_cursor = 1;
+    g_cfg.hk_full_mod = 0; g_cfg.hk_full_vk = VK_SNAPSHOT;
+    g_cfg.hk_region_mod = MOD_CONTROL; g_cfg.hk_region_vk = VK_SNAPSHOT;
 
     // Default export path: Windows Pictures folder
     if (FAILED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, SHGFP_TYPE_CURRENT, g_cfg.export_path))) {
@@ -95,7 +155,7 @@ static void init_config(void) {
     g_cfg.debug_enabled = GetPrivateProfileIntW(L"Capture", L"Debug", 1, ini_path);
     g_cfg.lossless = GetPrivateProfileIntW(L"Capture", L"Lossless", 1, ini_path);
     g_cfg.show_cursor = GetPrivateProfileIntW(L"Capture", L"ShowCursor", 1, ini_path);
-
+    
     wchar_t dist_str[64];
     GetPrivateProfileStringW(L"Capture", L"Distance", L"1.0", dist_str, 64, ini_path);
     g_cfg.distance = (float)wcstod(dist_str, NULL);
@@ -108,13 +168,20 @@ static void init_config(void) {
         wcsncpy(g_cfg.export_path, path_buf, MAX_PATH - 1);
         g_cfg.export_path[MAX_PATH - 1] = L'\0';
     }
+
+    // Read Hotkeys
+    wchar_t hk_full_str[128], hk_region_str[128];
+    GetPrivateProfileStringW(L"Capture", L"HotkeyFull", L"PrintScreen", hk_full_str, 128, ini_path);
+    GetPrivateProfileStringW(L"Capture", L"HotkeyRegion", L"Ctrl+PrintScreen", hk_region_str, 128, ini_path);
+    
+    parse_hotkey(hk_full_str, &g_cfg.hk_full_mod, &g_cfg.hk_full_vk);
+    parse_hotkey(hk_region_str, &g_cfg.hk_region_mod, &g_cfg.hk_region_vk);
 }
 
 /* ------------------------------------------------------------------ */
 /* Debug logging                                                      */
 /* ------------------------------------------------------------------ */
 static FILE *g_dbg = NULL;
-
 static void dbg_init(void) {
     if (!g_cfg.debug_enabled) {
         g_dbg = NULL;
@@ -124,10 +191,8 @@ static void dbg_init(void) {
     GetTempPathW(MAX_PATH, temp_dir);
     wchar_t log_path[MAX_PATH];
     _snwprintf(log_path, MAX_PATH, L"%sjxlshot_debug.log", temp_dir);
-    
     g_dbg = _wfopen(log_path, L"a");
     if (!g_dbg) return;
-    
     SYSTEMTIME st;
     GetLocalTime(&st);
     fprintf(g_dbg, "\n===== jxlshot run started %04d-%02d-%02d %02d:%02d:%02d =====\n",
@@ -137,14 +202,12 @@ static void dbg_init(void) {
 
 static void dbg(const char *fmt, ...) {
     if (!g_cfg.debug_enabled) return;
-    
     char buf[1024];
     va_list ap;
     va_start(ap, fmt);
     _vsnprintf(buf, sizeof buf - 1, fmt, ap);
     va_end(ap);
     buf[sizeof buf - 1] = 0;
-    
     if (g_dbg) {
         SYSTEMTIME st;
         GetLocalTime(&st);
@@ -157,14 +220,14 @@ static void dbg(const char *fmt, ...) {
 
 static const char *jxl_enc_err_name(JxlEncoderError e) {
     switch (e) {
-    case JXL_ENC_ERR_OK:            return "OK";
-    case JXL_ENC_ERR_GENERIC:       return "GENERIC";
-    case JXL_ENC_ERR_OOM:           return "OUT_OF_MEMORY";
-    case JXL_ENC_ERR_JBRD:          return "JPEG_BITSTREAM_RECONSTRUCTION_DATA";
-    case JXL_ENC_ERR_BAD_INPUT:     return "BAD_INPUT";
-    case JXL_ENC_ERR_NOT_SUPPORTED: return "NOT_SUPPORTED";
-    case JXL_ENC_ERR_API_USAGE:     return "API_USAGE";
-    default:                        return "UNKNOWN";
+        case JXL_ENC_ERR_OK:            return "OK";
+        case JXL_ENC_ERR_GENERIC:       return "GENERIC";
+        case JXL_ENC_ERR_OOM:           return "OUT_OF_MEMORY";
+        case JXL_ENC_ERR_JBRD:          return "JPEG_BITSTREAM_RECONSTRUCTION_DATA";
+        case JXL_ENC_ERR_BAD_INPUT:     return "BAD_INPUT";
+        case JXL_ENC_ERR_NOT_SUPPORTED: return "NOT_SUPPORTED";
+        case JXL_ENC_ERR_API_USAGE:     return "API_USAGE";
+        default:                        return "UNKNOWN";
     }
 }
 
@@ -264,10 +327,8 @@ static int encode_jxl(const uint8_t *bgra, int w, int h,
     uint8_t *buf = NULL;
     JxlEncoderStatus st;
     dbg("encode_jxl: w=%d h=%d lossless=%d distance=%.3f", w, h, lossless, distance);
-    
     JxlEncoder *enc = JxlEncoderCreate(NULL);
     if (!enc) { dbg("encode_jxl: JxlEncoderCreate returned NULL"); return 0; }
-    
     JxlBasicInfo info;
     JxlEncoderInitBasicInfo(&info);
     info.xsize                     = w;
@@ -277,14 +338,12 @@ static int encode_jxl(const uint8_t *bgra, int w, int h,
     info.num_color_channels        = 3;
     info.alpha_bits                = 0;
     info.uses_original_profile     = lossless ? JXL_TRUE : JXL_FALSE;
-    
     st = JxlEncoderSetBasicInfo(enc, &info);
     dbg("encode_jxl: JxlEncoderSetBasicInfo -> %d", (int)st);
     if (st != JXL_ENC_SUCCESS) {
         dbg("encode_jxl: SetBasicInfo error = %s", jxl_enc_err_name(JxlEncoderGetError(enc)));
         goto done;
     }
-    
     {
         JxlColorEncoding ce;
         JxlColorEncodingSetToSRGB(&ce, JXL_FALSE);
@@ -295,10 +354,8 @@ static int encode_jxl(const uint8_t *bgra, int w, int h,
             goto done;
         }
     }
-    
     JxlEncoderFrameSettings *fs = JxlEncoderFrameSettingsCreate(enc, NULL);
     if (!fs) { dbg("encode_jxl: JxlEncoderFrameSettingsCreate returned NULL"); goto done; }
-    
     if (lossless) {
         st = JxlEncoderSetFrameLossless(fs, JXL_TRUE);
         dbg("encode_jxl: JxlEncoderSetFrameLossless(TRUE) -> %d", (int)st);
@@ -315,7 +372,6 @@ static int encode_jxl(const uint8_t *bgra, int w, int h,
             goto done;
         }
     }
-    
     {
         size_t npix = (size_t)w * h;
         rgb = (uint8_t *)malloc(npix * 3);
@@ -336,7 +392,6 @@ static int encode_jxl(const uint8_t *bgra, int w, int h,
             goto done;
         }
     }
-    
     JxlEncoderCloseInput(enc);
     {
         size_t cap = 1 << 20;
@@ -406,17 +461,16 @@ static int save_bgra_as_jxl(const uint8_t *bgra, int w, int h,
 /* ------------------------------------------------------------------ */
 static void usage(const char *argv0) {
     fprintf(stderr,
-        "Usage: %s [-q] [-d distance] [-w ms]\n"
-        "  -q            lossy encoding (default: lossless)\n"
-        "  -d distance   lossy distance 0.0-25.0, lower = better (default 1.0, implies -q)\n"
-        "  -w ms         wait N milliseconds before capturing\n"
-        "\nConfiguration and export paths are managed via jxlshot.ini.\n",
-        argv0);
+            "Usage: %s [-q] [-d distance] [-w ms]\n"
+            "  -q            lossy encoding (default: lossless)\n"
+            "  -d distance   lossy distance 0.0-25.0, lower = better (default 1.0, implies -q)\n"
+            "  -w ms         wait N milliseconds before capturing\n"
+            "\nConfiguration and export paths are managed via jxlshot.ini.\n",
+            argv0);
 }
 
 #ifndef JXLSHOT_TRAY_BUILD
 int main(int argc, char **argv);
-
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     extern int __argc;
     extern char **__argv;
@@ -425,9 +479,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
 
 int main(int argc, char **argv) {
     DWORD wait_ms = 0;
-    int cli_lossless = -1; 
+    int cli_lossless = -1;
     float cli_distance = -1.0f;
-
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "-q")) cli_lossless = 0;
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) {
@@ -446,28 +499,21 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
-
     set_dpi_aware();
     init_paths();
     ensure_default_ini();
     init_config();
-
-    // CLI arguments override INI configuration
     if (cli_lossless != -1) g_cfg.lossless = cli_lossless;
     if (cli_distance >= 0.0f) g_cfg.distance = cli_distance;
-
     dbg_init();
     dbg("main: lossless=%d distance=%.3f wait_ms=%lu", g_cfg.lossless, g_cfg.distance, (unsigned long)wait_ms);
-
     if (wait_ms) Sleep(wait_ms);
-
     Grab g;
     if (!grab_primary_monitor(&g)) {
         free_grab(&g);
         fwprintf(stderr, L"error: screen capture failed (see jxlshot_debug.log)\n");
         return 1;
     }
-
     wchar_t out_path[MAX_PATH];
     build_out_path(out_path, MAX_PATH);
     int rc = 1;
