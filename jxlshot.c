@@ -18,9 +18,10 @@
  * the exact step instead of just "encoding or saving failed".
  *
  * Build (MSYS2 / MinGW-w64):
- *   gcc -O2 -municode -o jxlshot.exe jxlshot.c -ljxl -lgdi32 -luser32
+ *   gcc -O2 -mwindows -o jxlshot.exe jxlshot.c -ljxl -lgdi32 -luser32
  *
- * (-municode is required because main() takes wchar_t argv[].)
+ * (A WinMain wrapper is used so that -municode is not required, while
+ * still allowing main() to take standard char *argv[].)
  */
 
 #define UNICODE
@@ -362,39 +363,50 @@ static int save_bgra_as_jxl(const uint8_t *bgra, int w, int h,
 }
 
 /* ------------------------------------------------------------------ */
-/* main                                                                */
+/* Entry points & main                                                */
 /* ------------------------------------------------------------------ */
 
-static void usage(const wchar_t *argv0) {
-    fwprintf(stderr,
-        L"Usage: %s [-q] [-d distance] [-w ms]\n"
-        L"  -q            lossy encoding (default: lossless)\n"
-        L"  -d distance   lossy distance 0.0-25.0, lower = better (default 1.0, implies -q)\n"
-        L"  -w ms         wait N milliseconds before capturing\n"
-        L"No output filename is needed: the file is named from the current\n"
-        L"date/time and saved next to jxlshot.exe.\n",
+static void usage(const char *argv0) {
+    fprintf(stderr,
+        "Usage: %s [-q] [-d distance] [-w ms]\n"
+        "  -q            lossy encoding (default: lossless)\n"
+        "  -d distance   lossy distance 0.0-25.0, lower = better (default 1.0, implies -q)\n"
+        "  -w ms         wait N milliseconds before capturing\n"
+        "No output filename is needed: the file is named from the current\n"
+        "date/time and saved next to jxlshot.exe.\n",
         argv0);
 }
 
-int wmain(int argc, wchar_t **argv) {
+/* Forward declaration */
+int main(int argc, char **argv);
+
+/* WinMain wrapper to satisfy the linker when compiling with -mwindows 
+ * without -municode. It forwards to standard main() using MinGW globals. */
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
+    extern int __argc;
+    extern char **__argv;
+    return main(__argc, __argv);
+}
+
+int main(int argc, char **argv) {
     int   lossless = 1;
     float distance = 1.0f;
     DWORD wait_ms  = 0;
 
     for (int i = 1; i < argc; i++) {
-        if      (!wcscmp(argv[i], L"-q")) lossless = 0;
-        else if (!wcscmp(argv[i], L"-d") && i + 1 < argc) {
-            distance = (float)wcstod(argv[++i], NULL);
+        if      (!strcmp(argv[i], "-q")) lossless = 0;
+        else if (!strcmp(argv[i], "-d") && i + 1 < argc) {
+            distance = (float)strtod(argv[++i], NULL);
             lossless = 0;
         }
-        else if (!wcscmp(argv[i], L"-w") && i + 1 < argc) {
-            wait_ms = (DWORD)wcstol(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "-w") && i + 1 < argc) {
+            wait_ms = (DWORD)strtol(argv[++i], NULL, 10);
         }
-        else if (!wcscmp(argv[i], L"-h") || !wcscmp(argv[i], L"--help")) {
+        else if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
             usage(argv[0]); return 0;
         }
         else {
-            fwprintf(stderr, L"error: unrecognized argument '%s'\n", argv[i]);
+            fprintf(stderr, "error: unrecognized argument '%s'\n", argv[i]);
             usage(argv[0]);
             return 2;
         }
@@ -419,7 +431,7 @@ int wmain(int argc, wchar_t **argv) {
 
     int rc = 1;
     if (save_bgra_as_jxl(g.bits, g.w, g.h, lossless, distance, out_path)) {
-        wprintf(L"saved %s (%dx%d, %s)\n", out_path, g.w, g.h, lossless ? L"lossless" : L"lossy");
+        fwprintf(stdout, L"saved %s (%dx%d, %s)\n", out_path, g.w, g.h, lossless ? L"lossless" : L"lossy");
         rc = 0;
     } else {
         fwprintf(stderr, L"error: encoding or saving failed (see jxlshot_debug.log for details)\n");
