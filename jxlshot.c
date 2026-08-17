@@ -377,6 +377,8 @@ static void usage(const char *argv0) {
         argv0);
 }
 
+#ifndef JXLSHOT_TRAY_BUILD
+
 /* Forward declaration */
 int main(int argc, char **argv);
 
@@ -440,3 +442,6 @@ int main(int argc, char **argv) {
     free_grab(&g);
     return rc;
 }
+
+#endif /* JXLSHOT_TRAY_BUILD */
+
