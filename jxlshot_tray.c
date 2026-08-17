@@ -25,6 +25,9 @@
 /* Include the core logic. */
 #include "jxlshot.c"
 
+/* ------------------------------------------------------------------ */
+/* Menu & Hotkey IDs                                                  */
+/* ------------------------------------------------------------------ */
 #define WM_TRAYICON   (WM_USER + 1)
 #define ID_TRAY       1
 #define IDM_FULL      101
@@ -34,10 +37,24 @@
 #define IDM_ABOUT     105
 
 /* ------------------------------------------------------------------ */
+/* Global Variables                                                   */
+/* ------------------------------------------------------------------ */
+static NOTIFYICONDATAW g_nid;
+static HWND            g_hwndTray = NULL;
+static FILETIME        g_last_ini_time;
+
+/* ------------------------------------------------------------------ */
+/* Forward Declarations                                               */
+/* ------------------------------------------------------------------ */
+static void register_hotkeys(void);
+static void execute_full_capture(void);
+static void start_region_capture(void);
+static void execute_set_path(void);
+static void execute_about(void);
+
+/* ------------------------------------------------------------------ */
 /* Config Reloading & Hotkey Management                               */
 /* ------------------------------------------------------------------ */
-static FILETIME g_last_ini_time;
-
 static BOOL get_ini_file_time(FILETIME* ft) {
     wchar_t ini_path[MAX_PATH];
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
@@ -51,6 +68,22 @@ static BOOL get_ini_file_time(FILETIME* ft) {
     return FALSE;
 }
 
+static void reload_config(void) {
+    FILETIME current_time;
+    if (get_ini_file_time(&current_time)) {
+        if (CompareFileTime(&current_time, &g_last_ini_time) != 0) {
+            g_last_ini_time = current_time;
+            
+            UnregisterHotKey(g_hwndTray, IDM_FULL);
+            UnregisterHotKey(g_hwndTray, IDM_REGION);
+            
+            init_config();
+            register_hotkeys();
+            dbg("Configuration reloaded from INI.");
+        }
+    }
+}
+
 static void register_hotkeys(void) {
     if (g_cfg.hk_full_vk) {
         BOOL res = RegisterHotKey(g_hwndTray, IDM_FULL, g_cfg.hk_full_mod, g_cfg.hk_full_vk);
@@ -62,41 +95,9 @@ static void register_hotkeys(void) {
     }
 }
 
-static void reload_config(void) {
-    FILETIME current_time;
-    if (get_ini_file_time(&current_time)) {
-        if (CompareFileTime(&current_time, &g_last_ini_time) != 0) {
-            g_last_ini_time = current_time;
-            
-            // Unregister old hotkeys before re-reading config
-            UnregisterHotKey(g_hwndTray, IDM_FULL);   // <-- Changed from NULL
-            UnregisterHotKey(g_hwndTray, IDM_REGION); // <-- Changed from NULL
-            
-            init_config(); // Re-read INI
-            
-            // Re-register hotkeys
-            register_hotkeys();
-            dbg("Configuration reloaded from INI.");
-        }
-    }
-}
-
-static void register_hotkeys(void) {
-    if (g_cfg.hk_full_vk) {
-        RegisterHotKey(NULL, IDM_FULL, g_cfg.hk_full_mod, g_cfg.hk_full_vk);
-    }
-    if (g_cfg.hk_region_vk) {
-        RegisterHotKey(NULL, IDM_REGION, g_cfg.hk_region_mod, g_cfg.hk_region_vk);
-    }
-}
-
 /* ------------------------------------------------------------------ */
 /* Tray Icon & Context Menu                                           */
 /* ------------------------------------------------------------------ */
-
-static NOTIFYICONDATAW g_nid;
-static HWND            g_hwndTray = NULL;
-
 static void show_tray_menu(HWND hwnd) {
     POINT pt;
     GetCursorPos(&pt);
@@ -146,12 +147,10 @@ static void execute_set_path(void) {
             wcsncpy(g_cfg.export_path, path, MAX_PATH - 1);
             g_cfg.export_path[MAX_PATH - 1] = L'\0';
             
-            // Write to INI
             wchar_t ini_path[MAX_PATH];
             _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
             WritePrivateProfileStringW(L"Capture", L"ExportPath", path, ini_path);
             
-            // Update file timestamp to prevent immediate redundant reload
             get_ini_file_time(&g_last_ini_time);
             
             dbg("Export path updated to: %ls", path);
@@ -366,12 +365,12 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             break;
         case WM_HOTKEY:
-            reload_config(); // Ensure latest config before action
+            reload_config();
             if (wp == IDM_FULL) execute_full_capture();
             else if (wp == IDM_REGION) start_region_capture();
             break;
         case WM_COMMAND:
-            reload_config(); // Ensure latest config before action
+            reload_config();
             switch (LOWORD(wp)) {
                 case IDM_FULL:    execute_full_capture(); break;
                 case IDM_REGION:  start_region_capture(); break;
@@ -398,7 +397,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     init_config();
     dbg_init();
     
-    // Initialize INI time tracking and register initial hotkeys
     get_ini_file_time(&g_last_ini_time);
     register_hotkeys();
     
@@ -428,11 +426,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
         DispatchMessage(&msg);
     }
     
-    // ... (Message loop ends) ...
-    
-    // Cleanup hotkeys on exit
-    UnregisterHotKey(g_hwndTray, IDM_FULL);   // <-- Changed from NULL
-    UnregisterHotKey(g_hwndTray, IDM_REGION); // <-- Changed from NULL
+    UnregisterHotKey(g_hwndTray, IDM_FULL);
+    UnregisterHotKey(g_hwndTray, IDM_REGION);
     
     dbg("jxlshot_tray application exiting.");
     return (int)msg.wParam;
