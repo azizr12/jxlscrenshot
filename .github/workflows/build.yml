@@ -18,23 +18,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ---------------------------------------------------------
-      # 1. Build the Python Hotkey Listener (Native Windows Python)
-      # ---------------------------------------------------------
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Python dependencies and build binary
-        shell: pwsh
-        run: |
-          pip install keyboard pywin32 pyinstaller
-          # Build the standalone exe. We use --distpath to output to 'py_bin' 
-          # to avoid conflicts with the MSYS2 'dist' folder later.
-          pyinstaller --onefile --noconsole --name jxlshot_hotkeys --distpath ./py_bin jxlshot_hotkeys.py
-
-      # ---------------------------------------------------------
-      # 2. Build the C Applications (MSYS2 / MinGW-w64)
+      # Build the C Applications (MSYS2 / MinGW-w64)
       # ---------------------------------------------------------
       - name: Set up MSYS2 (MinGW-w64)
         uses: msys2/setup-msys2@v2
@@ -52,29 +36,27 @@ jobs:
           gcc -O2 -mwindows -o jxlshot.exe jxlshot.c \
               -ljxl -lgdi32 -luser32 -lshell32 -lole32
 
-          # 2. Compile the system tray version
+          # 2. Compile the system tray version (also pulls in
+          #    jxlshot_hotkeys.c for the PrintScreen / Ctrl+PrintScreen
+          #    global keyboard shortcuts via #include)
           gcc -O2 -mwindows -o jxlshot_tray.exe jxlshot_tray.c \
               -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
 
           # 3. Prepare distribution directory
           mkdir -p dist
           cp jxlshot.exe jxlshot_tray.exe dist/
-          
-          # 4. Copy the Python hotkey listener binary into the dist folder
-          # $GITHUB_WORKSPACE maps the repo root correctly in MSYS2 (e.g., /d/a/repo/repo)
-          cp "$GITHUB_WORKSPACE/py_bin/jxlshot_hotkeys.exe" dist/
 
-          # 5. Extract and copy required MinGW/libjxl DLLs
+          # 4. Extract and copy required MinGW/libjxl DLLs
           ldd jxlshot.exe jxlshot_tray.exe | grep -o '/mingw64/bin/[^ )]*' | sort -u | while read -r dll; do
             cp "$dll" dist/
           done
 
-          # 6. Create the release archive
+          # 5. Create the release archive
           (cd dist && zip -9 -r ../jxlshot-windows-x64.zip .)
           ls -la dist/
 
       # ---------------------------------------------------------
-      # 3. Upload and Publish
+      # Upload and Publish
       # ---------------------------------------------------------
       - name: Upload artifact
         uses: actions/upload-artifact@v4
