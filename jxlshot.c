@@ -89,7 +89,6 @@ static BOOL parse_hotkey(const wchar_t* str, UINT* mod, UINT* vk) {
         token = wcschr(p, L'+');
         if (token) *token = L'\0';
         
-        // Trim spaces
         while (*p == L' ') p++;
         wchar_t* end = p + wcslen(p) - 1;
         while (end > p && *end == L' ') { *end = L'\0'; end--; }
@@ -137,7 +136,6 @@ static void init_config(void) {
     wchar_t ini_path[MAX_PATH];
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
     
-    // Defaults
     g_cfg.debug_enabled = 1;
     g_cfg.lossless = 1;
     g_cfg.distance = 1.0f;
@@ -145,13 +143,11 @@ static void init_config(void) {
     g_cfg.hk_full_mod = 0; g_cfg.hk_full_vk = VK_SNAPSHOT;
     g_cfg.hk_region_mod = MOD_CONTROL; g_cfg.hk_region_vk = VK_SNAPSHOT;
 
-    // Default export path: Windows Pictures folder
     if (FAILED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, SHGFP_TYPE_CURRENT, g_cfg.export_path))) {
         GetEnvironmentVariableW(L"USERPROFILE", g_cfg.export_path, MAX_PATH);
         wcscat_s(g_cfg.export_path, MAX_PATH, L"\\Pictures");
     }
 
-    // Read INI
     g_cfg.debug_enabled = GetPrivateProfileIntW(L"Capture", L"Debug", 1, ini_path);
     g_cfg.lossless = GetPrivateProfileIntW(L"Capture", L"Lossless", 1, ini_path);
     g_cfg.show_cursor = GetPrivateProfileIntW(L"Capture", L"ShowCursor", 1, ini_path);
@@ -169,7 +165,6 @@ static void init_config(void) {
         g_cfg.export_path[MAX_PATH - 1] = L'\0';
     }
 
-    // Read Hotkeys
     wchar_t hk_full_str[128], hk_region_str[128];
     GetPrivateProfileStringW(L"Capture", L"HotkeyFull", L"PrintScreen", hk_full_str, 128, ini_path);
     GetPrivateProfileStringW(L"Capture", L"HotkeyRegion", L"Ctrl+PrintScreen", hk_region_str, 128, ini_path);
@@ -472,6 +467,7 @@ static void usage(const char *argv0) {
 #ifndef JXLSHOT_TRAY_BUILD
 int main(int argc, char **argv);
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
+    // MinGW provides __argc and __argv globally; explicit extern declarations cause dllimport warnings.
     return main(__argc, __argv);
 }
 
