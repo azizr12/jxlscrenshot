@@ -61,7 +61,7 @@ static void ensure_default_ini(void) {
         if (f) {
             fprintf(f, "[Capture]\n");
             fprintf(f, "; 1 for debug on, 0 for debug off\n");
-            fprintf(f, "Debug=1\n");
+            fprintf(f, "Debug=0\n");
             fprintf(f, "; 1 for lossless, 0 for lossy\n");
             fprintf(f, "Lossless=1\n");
             fprintf(f, "; Lossy distance (0.0 - 25.0, lower is better)\n");
