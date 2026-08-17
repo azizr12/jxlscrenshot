@@ -25,6 +25,14 @@
 /* Include the core logic. */
 #include "jxlshot.c"
 
+#define WM_TRAYICON   (WM_USER + 1)
+#define ID_TRAY       1
+#define IDM_FULL      101
+#define IDM_REGION    102
+#define IDM_EXIT      103
+#define IDM_SETPATH   104
+#define IDM_ABOUT     105
+
 /* ------------------------------------------------------------------ */
 /* Config Reloading & Hotkey Management                               */
 /* ------------------------------------------------------------------ */
@@ -76,13 +84,6 @@ static void register_hotkeys(void) {
 /* ------------------------------------------------------------------ */
 /* Tray Icon & Context Menu                                           */
 /* ------------------------------------------------------------------ */
-#define WM_TRAYICON   (WM_USER + 1)
-#define ID_TRAY       1
-#define IDM_FULL      101
-#define IDM_REGION    102
-#define IDM_EXIT      103
-#define IDM_SETPATH   104
-#define IDM_ABOUT     105
 
 static NOTIFYICONDATAW g_nid;
 static HWND            g_hwndTray = NULL;
