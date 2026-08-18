@@ -301,13 +301,34 @@ static void start_region_capture(void) {
 /* ------------------------------------------------------------------ */
 /* Low-Level Keyboard Hook                                            */
 /* ------------------------------------------------------------------ */
+
+/* Helper function to verify if the required modifier keys are currently pressed */
+static BOOL check_modifiers(UINT mod) {
+    if ((mod & MOD_CONTROL) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000)) return FALSE;
+    if ((mod & MOD_SHIFT)   && !(GetAsyncKeyState(VK_SHIFT)   & 0x8000)) return FALSE;
+    if ((mod & MOD_ALT)     && !(GetAsyncKeyState(VK_MENU)    & 0x8000)) return FALSE;
+    if ((mod & MOD_WIN)     && !(GetAsyncKeyState(VK_LWIN) & 0x8000 || GetAsyncKeyState(VK_RWIN) & 0x8000)) return FALSE;
+    return TRUE;
+}
+
 static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION && wParam == WM_KEYDOWN) {
         KBDLLHOOKSTRUCT *pKB = (KBDLLHOOKSTRUCT *)lParam;
-        if (pKB->vkCode == VK_SNAPSHOT) {
-            if (GetAsyncKeyState(VK_CONTROL) & 0x8000) PostMessageW(g_hwndTray, WM_HOOK_REGION_CAPTURE, 0, 0);
-            else PostMessageW(g_hwndTray, WM_HOOK_FULL_CAPTURE, 0, 0);
-            return 1; // Block key
+        
+        /* Check Full Capture Hotkey */
+        if (g_cfg.hk_full_vk != 0 && pKB->vkCode == g_cfg.hk_full_vk) {
+            if (check_modifiers(g_cfg.hk_full_mod)) {
+                PostMessageW(g_hwndTray, WM_HOOK_FULL_CAPTURE, 0, 0);
+                return 1; // Block key from propagating
+            }
+        }
+        
+        /* Check Region Capture Hotkey */
+        if (g_cfg.hk_region_vk != 0 && pKB->vkCode == g_cfg.hk_region_vk) {
+            if (check_modifiers(g_cfg.hk_region_mod)) {
+                PostMessageW(g_hwndTray, WM_HOOK_REGION_CAPTURE, 0, 0);
+                return 1; // Block key from propagating
+            }
         }
     }
     return CallNextHookEx(g_hhkKeyboard, nCode, wParam, lParam);
