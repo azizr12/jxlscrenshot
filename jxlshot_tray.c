@@ -146,12 +146,12 @@ static void execute_about(void) {
 /* ------------------------------------------------------------------ */
 /* Interactive Region Selection (Optimized & Ghosting Fixed)          */
 /* ------------------------------------------------------------------ */
-static HWND   g_hwndRegion = NULL;
-static HDC    g_hdcMem = NULL, g_hdcBlack = NULL;
+static HWND    g_hwndRegion = NULL;
+static HDC     g_hdcMem = NULL, g_hdcBlack = NULL;
 static HBITMAP g_hbmScreen = NULL, g_hbmBlack = NULL;
-static int    g_screenW, g_screenH;
-static RECT   g_rcSel;
-static BOOL   g_isDragging = FALSE;
+static int     g_screenW, g_screenH;
+static RECT    g_rcSel;
+static BOOL    g_isDragging = FALSE;
 
 static void crop_and_encode_region(RECT *r) {
     Grab g;
@@ -191,15 +191,22 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             EndPaint(hwnd, &ps); return 0;
         }
         case WM_LBUTTONDOWN: {
-            g_isDragging = TRUE; g_rcSel.left = GET_X_LPARAM(lp); g_rcSel.top = GET_Y_LPARAM(lp);
-            g_rcSel.right = g_rcSel.left; g_rcSel.bottom = g_rcSel.top;
-            SetCapture(hwnd); InvalidateRect(hwnd, NULL, FALSE); return 0;
+            g_isDragging = TRUE; 
+            g_rcSel.left = GET_X_LPARAM(lp); 
+            g_rcSel.top = GET_Y_LPARAM(lp);
+            g_rcSel.right = g_rcSel.left; 
+            g_rcSel.bottom = g_rcSel.top;
+            SetCapture(hwnd); 
+            InvalidateRect(hwnd, NULL, FALSE); 
+            return 0;
         }
         case WM_MOUSEMOVE: {
             if (g_isDragging) {
-                g_rcSel.right = GET_X_LPARAM(lp); g_rcSel.bottom = GET_Y_LPARAM(lp);
+                g_rcSel.right = GET_X_LPARAM(lp); 
+                g_rcSel.bottom = GET_Y_LPARAM(lp);
                 InvalidateRect(hwnd, NULL, FALSE);
-            } return 0;
+            } 
+            return 0;
         }
         case WM_LBUTTONUP: {
             if (g_isDragging) {
@@ -212,8 +219,9 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         
                 ShowWindow(hwnd, SW_HIDE);
                 DestroyWindow(hwnd);
-                RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-                Sleep(50); 
+                
+                // Force desktop to repaint immediately to clear any ghosting artifacts
+                RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
 
                 if ((r.right - r.left) > 0 && (r.bottom - r.top) > 0) {
                     crop_and_encode_region(&r);
@@ -228,8 +236,9 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         
                 ShowWindow(hwnd, SW_HIDE);
                 DestroyWindow(hwnd);
-                RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-                Sleep(50); 
+                
+                // Force desktop to repaint immediately to clear any ghosting artifacts
+                RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
             } 
             return 0;
         }
@@ -238,7 +247,12 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
             if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
             if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
+            
+            // Completely clear all region selection state so the app remembers nothing
             g_hwndRegion = NULL;
+            g_isDragging = FALSE;
+            g_rcSel.left = g_rcSel.top = g_rcSel.right = g_rcSel.bottom = 0;
+            
             if (!g_cfg.show_cursor) ShowCursor(TRUE);
             return 0;
         }
@@ -249,6 +263,10 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 static void start_region_capture(void) {
     if (g_hwndRegion) return;
     reload_config();
+
+    // Ensure a completely clean slate before starting a new capture
+    g_isDragging = FALSE;
+    g_rcSel.left = g_rcSel.top = g_rcSel.right = g_rcSel.bottom = 0;
 
     g_screenW = GetSystemMetrics(SM_CXSCREEN); g_screenH = GetSystemMetrics(SM_CYSCREEN);
     HDC g_hdcScreen = GetDC(NULL);
