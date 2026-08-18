@@ -14,6 +14,8 @@
 #define _WIN32_WINNT 0x0601
 #define WIN32_LEAN_AND_MEAN
 #define JXLSHOT_TRAY_BUILD
+
+
 #include "resource.h"
 #include <windows.h>
 #include <shellapi.h>
@@ -28,8 +30,8 @@
 #define WM_HOOK_FULL_CAPTURE   (WM_USER + 10)
 #define WM_HOOK_REGION_CAPTURE (WM_USER + 11)
 #define ID_TRAY       1
-#define IDM_FULL      101
-#define IDM_REGION    102
+#define IDM_FULL      1
+#define IDM_REGION    2
 #define IDM_EXIT      103
 #define IDM_SETPATH   104
 #define IDM_ABOUT     105
