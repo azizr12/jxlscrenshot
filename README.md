@@ -1,3 +1,6 @@
+
+<img alt="Logo" src="icon.ico" />
+
 - Small c project to capture monitor screenshot using jxl image codec.
   
 - just run jxlshot.exe and it export a screenshot in same exe path
