@@ -1,0 +1,4 @@
+#include "resource.h"
+
+// Embed the icon with ID 1001
+IDI_APP_ICON ICON "icon.ico"
