@@ -1,5 +1,7 @@
+
 /*
 * Captures the primary monitor and saves it as JPEG XL (.jxl).
+* Supports both SDR (8-bit) and HDR (16-bit float) via DXGI Desktop Duplication.
 *
 * Usage:
 *   jxlshot.exe                capture, lossless (default)
@@ -10,17 +12,14 @@
 * Configuration is read from jxlshot.ini located next to the executable.
 * Debug logs are written to %TEMP%\jxlshot_debug.log.
 *
-*
-* jxlshot.c — minimal command-line screenshot tool for Windows.
-*
 * Build (MSYS2 / MinGW-w64) - Optimized for size:
 *   gcc -Os -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
-*       -mwindows -o jxlshot.exe jxlshot.c -ljxl -lgdi32 -luser32 -lshell32 -lole32
+*       -mwindows -o jxlshot.exe jxlshot.c -ld3d11 -ldxgi -ljxl -ljxl_threads -lgdi32 -luser32 -lshell32 -lole32
 */
 #define UNICODE
 #define _UNICODE
-#define WINVER 0x0601
-#define _WIN32_WINNT 0x0601
+#define WINVER 0x0A00
+#define _WIN32_WINNT 0x0A00 // Windows 10+ for IDXGIOutput6
 #define WIN32_LEAN_AND_MEAN
 
 #include <windows.h>
@@ -33,32 +32,29 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <errno.h>
-#include <jxl/encode.h>
-
-
-/*-----------------------------------*/
 
 #define COBJMACROS
-#define _WIN32_WINNT 0x0A00 // Windows 10+ for IDXGIOutput6
 #include <d3d11.h>
 #include <dxgi1_6.h>
+#include <jxl/encode.h>
 #include <jxl/color_encoding.h>
 
+#ifdef _MSC_VER
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "jxl.lib")
 #pragma comment(lib, "jxl_threads.lib")
+#endif
 
+/* ------------------------------------------------------------------ */
+/* HDR Screen Capture using DXGI Desktop Duplication                  */
+/* ------------------------------------------------------------------ */
 typedef struct {
     uint8_t* bits;
     int w, h;
     int is_hdr; // 1 if HDR (16-bit float), 0 if SDR (8-bit)
 } GrabHDR;
 
-/* 
- * HDR Screen Capture using DXGI Desktop Duplication 
- * Captures in DXGI_FORMAT_R16G16B16A16_FLOAT for HDR, falls back to 8-bit if needed.
- */
 static int grab_hdr_monitor(GrabHDR* g) {
     ZeroMemory(g, sizeof(GrabHDR));
     
@@ -67,11 +63,13 @@ static int grab_hdr_monitor(GrabHDR* g) {
     IDXGIFactory1* factory = NULL;
     IDXGIAdapter1* adapter = NULL;
     IDXGIOutput* output = NULL;
+    IDXGIOutput1* output1 = NULL;
     IDXGIOutput6* output6 = NULL;
     IDXGIOutputDuplication* dup = NULL;
     IDXGIResource* resource = NULL;
     ID3D11Texture2D* texture = NULL;
     ID3D11Texture2D* staging_texture = NULL;
+    IDXGIDevice* dxgi_device = NULL;
 
     // 1. Create D3D11 Device
     if (FAILED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, 
@@ -80,8 +78,8 @@ static int grab_hdr_monitor(GrabHDR* g) {
     }
 
     // 2. Get DXGI Factory and Adapter
-    if (FAILED(ID3D11Device_QueryInterface(device, &IID_IDXGIDevice, (void**)&device))) goto cleanup;
-    if (FAILED(IDXGIDevice_GetParent((IDXGIDevice*)device, &IID_IDXGIAdapter1, (void**)&adapter))) goto cleanup;
+    if (FAILED(ID3D11Device_QueryInterface(device, &IID_IDXGIDevice, (void**)&dxgi_device))) goto cleanup;
+    if (FAILED(IDXGIDevice_GetParent(dxgi_device, &IID_IDXGIAdapter1, (void**)&adapter))) goto cleanup;
     if (FAILED(IDXGIAdapter1_GetParent(adapter, &IID_IDXGIFactory1, (void**)&factory))) goto cleanup;
     if (FAILED(IDXGIAdapter1_EnumOutputs(adapter, 0, &output))) goto cleanup;
 
@@ -96,9 +94,8 @@ static int grab_hdr_monitor(GrabHDR* g) {
     }
 
     // 4. Create Desktop Duplication
-    if (FAILED(IDXGIOutput1_DuplicateOutput((IDXGIOutput1*)output, (IUnknown*)device, &dup))) {
-        goto cleanup;
-    }
+    if (FAILED(IDXGIOutput_QueryInterface(output, &IID_IDXGIOutput1, (void**)&output1))) goto cleanup;
+    if (FAILED(IDXGIOutput1_DuplicateOutput(output1, (IUnknown*)device, &dup))) goto cleanup;
 
     // 5. Acquire Next Frame
     DXGI_OUTDUPL_FRAME_INFO frame_info;
@@ -132,47 +129,56 @@ static int grab_hdr_monitor(GrabHDR* g) {
     D3D11_MAPPED_SUBRESOURCE mapped;
     if (SUCCEEDED(ID3D11DeviceContext_Map(context, (ID3D11Resource*)staging_texture, 0, D3D11_MAP_READ, 0, &mapped))) {
         size_t pixel_size = is_hdr ? 8 : 4; // 8 bytes for R16G16B16A16_FLOAT, 4 bytes for R8G8B8A8
-        size_t total_size = g->w * g->h * pixel_size;
+        size_t total_size = (size_t)g->w * g->h * pixel_size;
         g->bits = (uint8_t*)malloc(total_size);
         
-        // Copy row by row to handle pitch/stride correctly
-        for (int y = 0; y < g->h; y++) {
-            memcpy(g->bits + (y * g->w * pixel_size), 
-                   (uint8_t*)mapped.pData + (y * mapped.RowPitch), 
-                   g->w * pixel_size);
+        if (g->bits) {
+            // Copy row by row to handle pitch/stride correctly
+            for (int y = 0; y < g->h; y++) {
+                memcpy(g->bits + (y * g->w * pixel_size), 
+                       (uint8_t*)mapped.pData + (y * mapped.RowPitch), 
+                       g->w * pixel_size);
+            }
         }
         ID3D11DeviceContext_Unmap(context, (ID3D11Resource*)staging_texture, 0);
     }
 
 cleanup_frame:
-    IDXGIOutputDuplication_ReleaseFrame(dup);
+    if (dup) IDXGIOutputDuplication_ReleaseFrame(dup);
 cleanup:
     if (staging_texture) ID3D11Texture2D_Release(staging_texture);
     if (texture) ID3D11Texture2D_Release(texture);
     if (resource) IDXGIResource_Release(resource);
     if (dup) IDXGIOutputDuplication_Release(dup);
+    if (output1) IDXGIOutput1_Release(output1);
     if (output6) IDXGIOutput6_Release(output6);
     if (output) IDXGIOutput_Release(output);
     if (adapter) IDXGIAdapter1_Release(adapter);
     if (factory) IDXGIFactory1_Release(factory);
+    if (dxgi_device) IDXGIDevice_Release(dxgi_device);
     if (context) ID3D11DeviceContext_Release(context);
     if (device) ID3D11Device_Release(device);
 
     return (g->bits != NULL) ? 1 : 0;
 }
 
-/* 
- * JPEG XL Encoding (HDR/SDR Aware)
- */
+/* ------------------------------------------------------------------ */
+/* JPEG XL Encoding (HDR/SDR Aware)                                   */
+/* ------------------------------------------------------------------ */
 static int encode_jxl(const uint8_t* bits, int w, int h, int is_hdr, int lossless, float distance, uint8_t** out_buf, size_t* out_size) {
     int ok = 0;
+    uint8_t* rgb_data = NULL;
+    uint8_t* buf = NULL;
+    JxlEncoderStatus st;
     JxlEncoder* enc = JxlEncoderCreate(NULL);
     if (!enc) return 0;
 
     JxlEncoderFrameSettings* frame_settings = JxlEncoderFrameSettingsCreate(enc, NULL);
+    if (!frame_settings) goto done;
+
     if (lossless) {
-        JxlEncoderFrameSettingsSetOption(frame_settings, JXL_ENC_FRAME_SETTING_EFFORT, 7);
-        JxlEncoderFrameSettingsSetOption(frame_settings, JXL_ENC_FRAME_SETTING_DECODING_SPEED, 0);
+        JxlEncoderSetFrameLossless(frame_settings, JXL_TRUE);
+        JxlEncoderSetFrameDistance(frame_settings, 0.0f);
     } else {
         JxlEncoderSetFrameDistance(frame_settings, distance);
     }
@@ -183,11 +189,9 @@ static int encode_jxl(const uint8_t* bits, int w, int h, int is_hdr, int lossles
     info.ysize = h;
     
     if (is_hdr) {
-        // 16-bit half-precision float (matches DXGI_FORMAT_R16G16B16A16_FLOAT)
         info.bits_per_sample = 16;
-        info.exponent_bits_per_sample = 5; 
+        info.exponent_bits_per_sample = 5; // Half-precision float
     } else {
-        // Standard 8-bit SDR
         info.bits_per_sample = 8;
         info.exponent_bits_per_sample = 0;
     }
@@ -198,14 +202,13 @@ static int encode_jxl(const uint8_t* bits, int w, int h, int is_hdr, int lossles
 
     if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) goto done;
 
-    // Configure Color Space
     JxlColorEncoding ce;
-    JxlColorEncodingSetToSRGB(&ce, JXL_FALSE); // Initialize defaults
+    JxlColorEncodingSetToSRGB(&ce, JXL_FALSE);
     
     if (is_hdr) {
         ce.color_space = JXL_COLOR_SPACE_RGB;
         ce.white_point = JXL_WHITE_POINT_D65;
-        ce.primaries = JXL_PRIMARIES_2100;          // Rec. 2020
+        ce.primaries = JXL_PRIMARIES_2100;           // Rec. 2020
         ce.transfer_function = JXL_TRANSFER_FUNCTION_PQ; // SMPTE ST 2084 (HDR)
         ce.rendering_intent = JXL_RENDERING_INTENT_PERCEPTUAL;
     } else {
@@ -218,68 +221,83 @@ static int encode_jxl(const uint8_t* bits, int w, int h, int is_hdr, int lossles
 
     if (JxlEncoderSetColorEncoding(enc, &ce) != JXL_ENC_SUCCESS) goto done;
 
-    // Pixel Format Configuration
+    // Convert 4-channel (RGBA) source to 3-channel (RGB) to save space and match JxlPixelFormat
+    size_t dst_stride = is_hdr ? 6 : 3;
+    size_t total_dst_size = (size_t)w * h * dst_stride;
+    rgb_data = (uint8_t*)malloc(total_dst_size);
+    if (!rgb_data) goto done;
+
+    if (is_hdr) {
+        const uint16_t* src = (const uint16_t*)bits;
+        uint16_t* dst = (uint16_t*)rgb_data;
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            dst[0] = src[0]; // R
+            dst[1] = src[1]; // G
+            dst[2] = src[2]; // B
+            src += 4;
+            dst += 3;
+        }
+    } else {
+        const uint32_t* src = (const uint32_t*)bits;
+        uint8_t* dst = rgb_data;
+        for (size_t i = 0; i < (size_t)w * h; i++) {
+            uint32_t pixel = src[i];
+            dst[0] = (pixel >> 16) & 0xFF; // R
+            dst[1] = (pixel >> 8)  & 0xFF; // G
+            dst[2] = pixel & 0xFF;         // B
+            dst += 3;
+        }
+    }
+    
     JxlPixelFormat pixel_format = {
         3, // num_channels (RGB)
         is_hdr ? JXL_TYPE_FLOAT16 : JXL_TYPE_UINT8,
         JXL_LITTLE_ENDIAN,
-        0  // align
+        0
     };
 
-    if (JxlEncoderAddImageFrame(frame_settings, &pixel_format, bits, w * h * (is_hdr ? 8 : 3)) != JXL_ENC_SUCCESS) {
+    if (JxlEncoderAddImageFrame(frame_settings, &pixel_format, rgb_data, total_dst_size) != JXL_ENC_SUCCESS) {
         goto done;
     }
 
     JxlEncoderCloseInput(enc);
 
-    // Allocate output buffer
-    *out_size = 1024;
-    *out_buf = (uint8_t*)malloc(*out_size);
-    if (!*out_buf) goto done;
-
-    uint8_t* next_out = *out_buf;
-    size_t avail_out = *out_size;
+    size_t cap = total_dst_size; 
+    if (cap < (4 << 20)) cap = (4 << 20); // Minimum 4MB buffer
+    
+    buf = (uint8_t*)malloc(cap);
+    if (!buf) goto done;
+    
+    uint8_t* next_out = buf;
+    size_t avail_out = cap;
 
     JxlEncoderStatus process_result = JXL_ENC_NEED_MORE_OUTPUT;
     while (process_result == JXL_ENC_NEED_MORE_OUTPUT) {
         process_result = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
         if (process_result == JXL_ENC_NEED_MORE_OUTPUT) {
-            size_t offset = next_out - *out_buf;
-            *out_size *= 2;
-            *out_buf = (uint8_t*)realloc(*out_buf, *out_size);
-            if (!*out_buf) goto done;
-            next_out = *out_buf + offset;
-            avail_out = *out_size - offset;
+            size_t used = next_out - buf;
+            cap *= 2;
+            uint8_t* nb = (uint8_t*)realloc(buf, cap);
+            if (!nb) goto done;
+            buf = nb;
+            next_out = buf + used;
+            avail_out = cap - used;
         }
     }
 
     if (process_result == JXL_ENC_SUCCESS) {
-        *out_size = next_out - *out_buf;
+        *out_size = next_out - buf;
+        *out_buf = buf;
+        buf = NULL; // Prevent freeing in done block
         ok = 1;
     }
 
 done:
+    free(rgb_data);
+    free(buf);
     JxlEncoderDestroy(enc);
-    if (!ok && *out_buf) {
-        free(*out_buf);
-        *out_buf = NULL;
-        *out_size = 0;
-    }
     return ok;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-/*--------------------------------------*/
 
 /* ------------------------------------------------------------------ */
 /* Configuration (INI)                                                */
@@ -311,27 +329,14 @@ static void init_paths(void) {
 /* ------------------------------------------------------------------ */
 /* Hotkey Parsing Logic                                               */
 /* ------------------------------------------------------------------ */
-/* ------------------------------------------------------------------ */
-/* Hotkey Parsing Logic (Upgraded for Full Key Support)               */
-/* ------------------------------------------------------------------ */
-
-/* ------------------------------------------------------------------ */
-/* Hotkey Parsing Logic (Upgraded for Full Key Support)               */
-/* ------------------------------------------------------------------ */
-
 static UINT parse_vk(const wchar_t* key) {
     if (!key || !*key) return 0;
 
-    /* 1. Special Named Keys (Case-Insensitive) */
     if (_wcsicmp(key, L"PrintScreen") == 0 || _wcsicmp(key, L"ImprEcran") == 0 || _wcsicmp(key, L"PrtScn") == 0) return VK_SNAPSHOT;
     if (_wcsicmp(key, L"ScrollLock") == 0) return VK_SCROLL;
     if (_wcsicmp(key, L"Pause") == 0 || _wcsicmp(key, L"Break") == 0) return VK_PAUSE;
-    
-    /* Caps Lock and Toggles */
     if (_wcsicmp(key, L"CapsLock") == 0) return VK_CAPITAL;
     if (_wcsicmp(key, L"NumLock") == 0) return VK_NUMLOCK;
-    
-    /* Navigation and Editing Keys */
     if (_wcsicmp(key, L"Space") == 0 || _wcsicmp(key, L"Spacebar") == 0) return VK_SPACE;
     if (_wcsicmp(key, L"Escape") == 0 || _wcsicmp(key, L"Esc") == 0) return VK_ESCAPE;
     if (_wcsicmp(key, L"Enter") == 0 || _wcsicmp(key, L"Return") == 0) return VK_RETURN;
@@ -343,26 +348,20 @@ static UINT parse_vk(const wchar_t* key) {
     if (_wcsicmp(key, L"End") == 0) return VK_END;
     if (_wcsicmp(key, L"PageUp") == 0 || _wcsicmp(key, L"PgUp") == 0) return VK_PRIOR;
     if (_wcsicmp(key, L"PageDown") == 0 || _wcsicmp(key, L"PgDn") == 0) return VK_NEXT;
-
-    /* Arrow Keys */
     if (_wcsicmp(key, L"Up") == 0) return VK_UP;
     if (_wcsicmp(key, L"Down") == 0) return VK_DOWN;
     if (_wcsicmp(key, L"Left") == 0) return VK_LEFT;
     if (_wcsicmp(key, L"Right") == 0) return VK_RIGHT;
 
-    /* 2. Function Keys (F1 through F24) 
-     * Fixes the original bug where F10, F11, and F12 were ignored */
     if (towupper(key[0]) == L'F') {
         int n = _wtoi(key + 1);
         if (n >= 1 && n <= 24) return VK_F1 + n - 1;
     }
 
-    /* 3. Single Character Keys (Letters, Numbers, Symbols) */
     if (key[1] == L'\0') {
         return (UINT)towupper(key[0]);
     }
 
-    /* 4. Numpad Keys */
     if (_wcsicmp(key, L"NumPad0") == 0) return VK_NUMPAD0;
     if (_wcsicmp(key, L"NumPad1") == 0) return VK_NUMPAD1;
     if (_wcsicmp(key, L"NumPad2") == 0) return VK_NUMPAD2;
@@ -379,12 +378,12 @@ static UINT parse_vk(const wchar_t* key) {
     if (_wcsicmp(key, L"Decimal") == 0) return VK_DECIMAL;
     if (_wcsicmp(key, L"Divide") == 0) return VK_DIVIDE;
 
-    return 0; // Unrecognized key
+    return 0;
 }
 
 static BOOL parse_hotkey(const wchar_t* str, UINT* mod, UINT* vk) {
     *mod = 0; *vk = 0;
-    if (!str || !*str) return FALSE; // Correctly handles blank INI values (disables hotkey)
+    if (!str || !*str) return FALSE;
     
     wchar_t buf[256];
     wcsncpy(buf, str, 255); buf[255] = 0;
@@ -395,9 +394,7 @@ static BOOL parse_hotkey(const wchar_t* str, UINT* mod, UINT* vk) {
         token = wcschr(p, L'+');
         if (token) *token = L'\0';
         
-        // Trim leading spaces
         while (*p == L' ') p++;
-        // Trim trailing spaces
         wchar_t* end = p + wcslen(p) - 1;
         while (end > p && *end == L' ') { *end = L'\0'; end--; }
         
@@ -413,8 +410,6 @@ static BOOL parse_hotkey(const wchar_t* str, UINT* mod, UINT* vk) {
     return (*vk != 0);
 }
 
-
-
 static void ensure_default_ini(void) {
     wchar_t ini_path[MAX_PATH];
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
@@ -423,54 +418,13 @@ static void ensure_default_ini(void) {
         FILE *f = _wfopen(ini_path, L"w");
         if (f) {
             fprintf(f, "[Capture]\n");
-            fprintf(f, "; ---------------------------------------------------------\n");
-            fprintf(f, "; GENERAL SETTINGS\n");
-            fprintf(f, "; ---------------------------------------------------------\n");
-            fprintf(f, "; Debug Mode: Set to 1 to create a log file in your Temp folder\n");
-            fprintf(f, "; (helpful for troubleshooting). Set to 0 to disable.\n");
-            fprintf(f, "Debug=0\n\n");
-            
-            fprintf(f, "; Image Quality:\n");
-            fprintf(f, "; Set to 1 for Lossless (perfect quality, larger file size).\n");
-            fprintf(f, "; Set to 0 for Lossy (smaller file size, slightly reduced quality).\n");
-            fprintf(f, "Lossless=1\n\n");
-            
-            fprintf(f, "; Lossy Quality Distance (Only used if Lossless=0):\n");
-            fprintf(f, "; Range is 0.0 to 25.0. Lower numbers mean better quality.\n");
-            fprintf(f, "; 1.0 is a good balance. 0.0 is visually lossless.\n");
-            fprintf(f, "Distance=1.0\n\n");
-            
-            fprintf(f, "; Show Mouse Cursor:\n");
-            fprintf(f, "; Set to 1 to include the mouse cursor in Region captures.\n");
-            fprintf(f, "; Set to 0 to hide it.\n");
-            fprintf(f, "ShowCursor=1\n\n");
-            
-            fprintf(f, "; Export Folder Path:\n");
-            fprintf(f, "; Type the full folder path where you want to save screenshots.\n");
-            fprintf(f, "; Example: C:\\Users\\YourName\\Pictures\\Screenshots\n");
-            fprintf(f, "; Leave this completely blank to use the default Windows Pictures folder.\n");
-            fprintf(f, "ExportPath=\n\n");
-            
-            fprintf(f, "; ---------------------------------------------------------\n");
-            fprintf(f, "; HOTKEY SETTINGS\n");
-            fprintf(f, "; ---------------------------------------------------------\n");
-            fprintf(f, "; You can customize the keyboard shortcuts here.\n");
-            fprintf(f, "; Format: [Modifier]+[Key] or just [Key]\n");
-            fprintf(f, ";\n");
-            fprintf(f, "; Supported Modifiers: Ctrl, Shift, Alt, Win\n");
-            fprintf(f, "; Supported Keys: A-Z, 0-9, F1-F24, PrintScreen, CapsLock,\n");
-            fprintf(f, "; Space, Escape, Enter, Tab, Backspace, Insert, Delete,\n");
-            fprintf(f, "; Home, End, PageUp, PageDown, Up, Down, Left, Right, etc.\n");
-            fprintf(f, ";\n");
-            fprintf(f, "; Examples: PrintScreen, Ctrl+Shift+S, F12, Alt+CapsLock\n");
-            fprintf(f, "; Note: To DISABLE a hotkey, just leave it blank (e.g., HotkeyFull=)\n\n");
-            
-            fprintf(f, "; Hotkey to capture the ENTIRE screen:\n");
-            fprintf(f, "HotkeyFull=PrintScreen\n\n");
-            
-            fprintf(f, "; Hotkey to capture a SPECIFIC REGION (click and drag):\n");
+            fprintf(f, "Debug=0\n");
+            fprintf(f, "Lossless=1\n");
+            fprintf(f, "Distance=1.0\n");
+            fprintf(f, "ShowCursor=1\n");
+            fprintf(f, "ExportPath=\n");
+            fprintf(f, "HotkeyFull=PrintScreen\n");
             fprintf(f, "HotkeyRegion=Ctrl+PrintScreen\n");
-            
             fclose(f);
         }
     }
@@ -546,15 +500,6 @@ static void dbg(const char *fmt, ...) {
     fflush(g_dbg);
 }
 
-static const char *jxl_enc_err_name(JxlEncoderError e) {
-    switch (e) {
-        case JXL_ENC_ERR_OK: return "OK"; case JXL_ENC_ERR_GENERIC: return "GENERIC";
-        case JXL_ENC_ERR_OOM: return "OUT_OF_MEMORY"; case JXL_ENC_ERR_JBRD: return "JPEG_BITSTREAM_RECONSTRUCTION_DATA";
-        case JXL_ENC_ERR_BAD_INPUT: return "BAD_INPUT"; case JXL_ENC_ERR_NOT_SUPPORTED: return "NOT_SUPPORTED";
-        case JXL_ENC_ERR_API_USAGE: return "API_USAGE"; default: return "UNKNOWN";
-    }
-}
-
 /* ------------------------------------------------------------------ */
 /* Output Paths & DPI awareness                                       */
 /* ------------------------------------------------------------------ */
@@ -572,125 +517,6 @@ static void set_dpi_aware(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Screen capture                                                     */
-/* ------------------------------------------------------------------ */
-typedef struct { HBITMAP hbmp; HDC hdc; uint8_t *bits; int w, h; } Grab;
-
-static int grab_primary_monitor(Grab *g) {
-    ZeroMemory(g, sizeof *g);
-    g->w = GetSystemMetrics(SM_CXSCREEN); g->h = GetSystemMetrics(SM_CYSCREEN);
-    dbg("grab_primary_monitor: %dx%d", g->w, g->h);
-    if (g->w <= 0 || g->h <= 0) return 0;
-
-    HDC sdc = GetDC(NULL);
-    if (!sdc) return 0;
-    g->hdc = CreateCompatibleDC(sdc);
-    if (!g->hdc) { ReleaseDC(NULL, sdc); return 0; }
-
-    BITMAPINFO bi = {0};
-    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = g->w; bi.bmiHeader.biHeight = -g->h;
-    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
-    
-    g->hbmp = CreateDIBSection(sdc, &bi, DIB_RGB_COLORS, (void **)&g->bits, NULL, 0);
-    if (!g->hbmp) { DeleteDC(g->hdc); ReleaseDC(NULL, sdc); return 0; }
-
-    SelectObject(g->hdc, g->hbmp);
-    if (!BitBlt(g->hdc, 0, 0, g->w, g->h, sdc, 0, 0, SRCCOPY)) {
-        ReleaseDC(NULL, sdc); return 0;
-    }
-    GdiFlush(); ReleaseDC(NULL, sdc);
-    return 1;
-}
-
-static void free_grab(Grab *g) {
-    if (g->hdc) DeleteDC(g->hdc);
-    if (g->hbmp) DeleteObject(g->hbmp);
-    ZeroMemory(g, sizeof *g);
-}
-
-/* ------------------------------------------------------------------ */
-/* JPEG XL encoding                                                   */
-/* ------------------------------------------------------------------ */
-static int encode_jxl(const uint8_t *bgra, int w, int h, int lossless, float distance, uint8_t **out_buf, size_t *out_size) {
-    int ok = 0; uint8_t *rgb = NULL, *buf = NULL; JxlEncoderStatus st;
-    JxlEncoder *enc = JxlEncoderCreate(NULL);
-    if (!enc) return 0;
-
-    JxlBasicInfo info; JxlEncoderInitBasicInfo(&info);
-    info.xsize = w; info.ysize = h; info.bits_per_sample = 8;
-    info.exponent_bits_per_sample = 0; info.num_color_channels = 3;
-    info.alpha_bits = 0; info.uses_original_profile = lossless ? JXL_TRUE : JXL_FALSE;
-    
-    if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) goto done;
-    
-    JxlColorEncoding ce; JxlColorEncodingSetToSRGB(&ce, JXL_FALSE);
-    if (JxlEncoderSetColorEncoding(enc, &ce) != JXL_ENC_SUCCESS) goto done;
-
-    JxlEncoderFrameSettings *fs = JxlEncoderFrameSettingsCreate(enc, NULL);
-    if (!fs) goto done;
-
-    if (lossless) { JxlEncoderSetFrameLossless(fs, JXL_TRUE); JxlEncoderSetFrameDistance(fs, 0.0f); }
-    else { JxlEncoderSetFrameDistance(fs, distance); }
-
-    size_t npix = (size_t)w * h;
-    rgb = (uint8_t *)malloc(npix * 3);
-    if (!rgb) goto done;
-    
-    const uint32_t *src = (const uint32_t *)bgra;
-    uint8_t *dst = rgb;
-    for (size_t i = 0; i < npix; i++) {
-        uint32_t pixel = src[i]; // Reads B, G, R, A in one cycle
-        dst[0] = (pixel >> 16) & 0xFF; // R
-        dst[1] = (pixel >> 8)  & 0xFF; // G
-        dst[2] = pixel & 0xFF;         // B
-        dst += 3;
-    }
-    
-    JxlPixelFormat fmt = {3, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
-    if (JxlEncoderAddImageFrame(fs, &fmt, rgb, npix * 3) != JXL_ENC_SUCCESS) goto done;
-    
-    JxlEncoderCloseInput(enc);
-    // Estimate a larger initial capacity to avoid multiple reallocs.
-    // Lossless JXL can approach raw size, while lossy is much smaller.
-    size_t cap = (size_t)w * h; 
-    if (cap < (4 << 20)) cap = (4 << 20); // Enforce a minimum of 4MB
-    // maybe ?
-    buf = (uint8_t *)malloc(cap);
-    if (!buf) goto done;
-    
-    uint8_t *next = buf; size_t avail = cap;
-    for (;;) {
-        st = JxlEncoderProcessOutput(enc, &next, &avail);
-        if (st == JXL_ENC_SUCCESS) break;
-        if (st == JXL_ENC_NEED_MORE_OUTPUT) {
-            size_t used = (size_t)(next - buf); cap *= 2;
-            uint8_t *nb = (uint8_t *)realloc(buf, cap);
-            if (!nb) { free(buf); buf = NULL; goto done; }
-            buf = nb; next = buf + used; avail = cap - used; continue;
-        }
-        free(buf); buf = NULL; goto done;
-    }
-    *out_buf = buf; *out_size = cap - avail; buf = NULL; ok = 1;
-
-done:
-    free(rgb); free(buf); JxlEncoderDestroy(enc);
-    return ok;
-}
-
-static int save_bgra_as_jxl(const uint8_t *bgra, int w, int h, int lossless, float distance, const wchar_t *path) {
-    uint8_t *buf = NULL; size_t size = 0;
-    if (!encode_jxl(bgra, w, h, lossless, distance, &buf, &size)) return 0;
-    
-    int ok = 0; FILE *f = _wfopen(path, L"wb");
-    if (f) {
-        size_t written = fwrite(buf, 1, size, f);
-        ok = (written == size); fclose(f);
-    }
-    free(buf); return ok;
-}
-
-/* ------------------------------------------------------------------ */
 /* Entry points & main                                                */
 /* ------------------------------------------------------------------ */
 #ifndef JXLSHOT_TRAY_BUILD
@@ -704,16 +530,55 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-d") && i + 1 < argc) { cli_distance = (float)strtod(argv[++i], NULL); cli_lossless = 0; }
         else if (!strcmp(argv[i], "-w") && i + 1 < argc) { wait_ms = (DWORD)strtol(argv[++i], NULL, 10); }
     }
-    set_dpi_aware(); init_paths(); ensure_default_ini(); init_config();
+    
+    set_dpi_aware(); 
+    init_paths(); 
+    ensure_default_ini(); 
+    init_config();
+    
     if (cli_lossless != -1) g_cfg.lossless = cli_lossless;
     if (cli_distance >= 0.0f) g_cfg.distance = cli_distance;
+    
     dbg_init();
     if (wait_ms) Sleep(wait_ms);
 
-    Grab g;
-    if (!grab_primary_monitor(&g)) { free_grab(&g); return 1; }
-    wchar_t out_path[MAX_PATH]; build_out_path(out_path, MAX_PATH);
-    int rc = save_bgra_as_jxl(g.bits, g.w, g.h, g_cfg.lossless, g_cfg.distance, out_path) ? 0 : 1;
-    free_grab(&g); return rc;
+    GrabHDR g;
+    if (!grab_hdr_monitor(&g)) { 
+        dbg("Failed to capture monitor");
+        if (g.bits) free(g.bits);
+        return 1; 
+    }
+    
+    dbg("Capture successful: %dx%d, HDR=%d", g.w, g.h, g.is_hdr);
+
+    wchar_t out_path[MAX_PATH]; 
+    build_out_path(out_path, MAX_PATH);
+    
+    uint8_t *buf = NULL; 
+    size_t size = 0;
+    int ok = encode_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, &buf, &size);
+    
+    if (ok) {
+        FILE *f = _wfopen(out_path, L"wb");
+        if (f) {
+            size_t written = fwrite(buf, 1, size, f);
+            if (written == size) {
+                dbg("Saved successfully to: %ls", out_path);
+            } else {
+                dbg("Write failed");
+                ok = 0;
+            }
+            fclose(f);
+        } else {
+            dbg("Failed to open file for writing: %ls", out_path);
+            ok = 0;
+        }
+        free(buf);
+    } else {
+        dbg("Encoding failed");
+    }
+    
+    free(g.bits);
+    return ok ? 0 : 1;
 }
 #endif
