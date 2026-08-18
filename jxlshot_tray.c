@@ -1,5 +1,9 @@
 /* jxlshot_tray.c — System tray extension for jxlshot.
  *
+ * Configuration is read from jxlshot.ini located next to the executable.
+ * Debug logs are written to %TEMP%\jxlshot_debug.log.
+ *
+ *
  * Build (MSYS2 / MinGW-w64) - Optimized for size:
  *   gcc -Os -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
  *       -mwindows -o jxlshot_tray.exe jxlshot_tray.c -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
@@ -312,3 +316,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     uninstall_keyboard_hook();
     return (int)msg.wParam;
 }
+
+/* its just a vibe code bullshit
+ * there is no malware or monkey
+ * leave the app if you are paranoid
+ */
+
+
