@@ -303,11 +303,31 @@ static void start_region_capture(void) {
 /* ------------------------------------------------------------------ */
 
 /* Helper function to verify if the required modifier keys are currently pressed */
-static BOOL check_modifiers(UINT mod) {
-    if ((mod & MOD_CONTROL) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000)) return FALSE;
-    if ((mod & MOD_SHIFT)   && !(GetAsyncKeyState(VK_SHIFT)   & 0x8000)) return FALSE;
-    if ((mod & MOD_ALT)     && !(GetAsyncKeyState(VK_MENU)    & 0x8000)) return FALSE;
-    if ((mod & MOD_WIN)     && !(GetAsyncKeyState(VK_LWIN) & 0x8000 || GetAsyncKeyState(VK_RWIN) & 0x8000)) return FALSE;
+/* ------------------------------------------------------------------ */
+/* Low-Level Keyboard Hook (Strict INI Enforcement)                   */
+/* ------------------------------------------------------------------ */
+
+/* Helper function to verify EXACT modifier match. 
+ * If the INI requires Ctrl, Ctrl must be pressed. 
+ * If the INI does NOT require Ctrl, Ctrl must NOT be pressed. */
+
+static BOOL check_modifiers(UINT required_mod) {
+    BOOL ctrl_pressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    BOOL shift_pressed = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    BOOL alt_pressed = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+    BOOL win_pressed = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+
+    BOOL req_ctrl = (required_mod & MOD_CONTROL) != 0;
+    BOOL req_shift = (required_mod & MOD_SHIFT) != 0;
+    BOOL req_alt = (required_mod & MOD_ALT) != 0;
+    BOOL req_win = (required_mod & MOD_WIN) != 0;
+
+    // All required modifiers must match the pressed state exactly
+    if (ctrl_pressed != req_ctrl) return FALSE;
+    if (shift_pressed != req_shift) return FALSE;
+    if (alt_pressed != req_alt) return FALSE;
+    if (win_pressed != req_win) return FALSE;
+
     return TRUE;
 }
 
@@ -315,29 +335,28 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     if (nCode == HC_ACTION && wParam == WM_KEYDOWN) {
         KBDLLHOOKSTRUCT *pKB = (KBDLLHOOKSTRUCT *)lParam;
         
-        /* DEBUG: Log every key press and the configured hotkey values */
-        dbg("Key pressed: vkCode=%d | Configured Full: %d | Configured Region: %d", 
-            pKB->vkCode, g_cfg.hk_full_vk, g_cfg.hk_region_vk);
-
-        /* Check Full Capture Hotkey */
-        /* CRITICAL: Must use && (AND), not || (OR) */
+        /* 1. Check Full Capture Hotkey 
+         * Condition: Key is defined (!= 0) AND pressed key matches AND modifiers match exactly */
         if (g_cfg.hk_full_vk != 0 && pKB->vkCode == g_cfg.hk_full_vk) {
             if (check_modifiers(g_cfg.hk_full_mod)) {
-                dbg("MATCH: Triggering FULL capture");
+                dbg("MATCH: Triggering FULL capture (VK=%d, MOD=%d)", g_cfg.hk_full_vk, g_cfg.hk_full_mod);
                 PostMessageW(g_hwndTray, WM_HOOK_FULL_CAPTURE, 0, 0);
-                return 1; // Block key from propagating
+                return 1; // Block key from propagating to other apps
             }
         }
         
-        /* Check Region Capture Hotkey */
+        /* 2. Check Region Capture Hotkey 
+         * Condition: Key is defined (!= 0) AND pressed key matches AND modifiers match exactly */
         if (g_cfg.hk_region_vk != 0 && pKB->vkCode == g_cfg.hk_region_vk) {
             if (check_modifiers(g_cfg.hk_region_mod)) {
-                dbg("MATCH: Triggering REGION capture");
+                dbg("MATCH: Triggering REGION capture (VK=%d, MOD=%d)", g_cfg.hk_region_vk, g_cfg.hk_region_mod);
                 PostMessageW(g_hwndTray, WM_HOOK_REGION_CAPTURE, 0, 0);
-                return 1; // Block key from propagating
+                return 1; // Block key from propagating to other apps
             }
         }
     }
+    
+    // If no match, or if the configured VK is 0 (null/disabled), pass the key to the OS normally
     return CallNextHookEx(g_hhkKeyboard, nCode, wParam, lParam);
 }
 
