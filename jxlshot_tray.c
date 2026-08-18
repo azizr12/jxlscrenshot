@@ -89,7 +89,7 @@ static void execute_set_path(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* About Dialog with Clickable Hyperlink                              */
+/* About Dialog with Clickable Hyperlink and Custom Header Icon       */
 /* ------------------------------------------------------------------ */
 static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
     if (msg == TDN_HYPERLINK_CLICKED) {
@@ -100,19 +100,34 @@ static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, 
 }
 
 static void execute_about(void) {
+    // 1. Load the custom transparent icon from the application's resources
+    HICON hAppIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON));
+
     TASKDIALOGCONFIG config = {0};
     config.cbSize = sizeof(TASKDIALOGCONFIG);
     config.hwndParent = NULL;
     config.hInstance = NULL;
-    config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION;
+    
+    // 2. Add TDF_USE_HICON_MAIN to tell the dialog to use the hMainIcon union member
+    config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_HICON_MAIN;
+    
     config.pszWindowTitle = L"About";
-    config.pszMainIcon = TD_INFORMATION_ICON;
+    
+    // 3. Assign the loaded HICON to the pszMainIcon union member (requires cast)
+    config.pszMainIcon = (PCWSTR)hAppIcon; 
+    
     config.pszMainInstruction = L"JXL Screenshot Tool";
     config.pszContent = L"Minimal tray screenshot tool using JPEG XL.\n\n"
                         L"<a href=\"https://github.com/azizr12/jxlscrenshot\">https://github.com/azizr12/jxlscrenshot</a>";
     config.pfCallback = AboutDialogCallback;
 
+    // Display the dialog
     TaskDialogIndirect(&config, NULL, NULL, NULL);
+
+    // 4. Clean up the icon handle. TaskDialog does not take ownership of custom HICONs.
+    if (hAppIcon) {
+        DestroyIcon(hAppIcon);
+    }
 }
 
 
@@ -333,24 +348,41 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
-    set_dpi_aware(); init_paths(); ensure_default_ini(); init_config();
+    set_dpi_aware(); 
+    init_paths(); 
+    ensure_default_ini(); 
+    init_config();
     dbg_init(); // Initialize the unified logger
 
-    WNDCLASSEXW wc = {0}; wc.cbSize = sizeof(wc); wc.lpfnWndProc = TrayWndProc;
-    wc.hInstance = hInst; wc.lpszClassName = L"JxlShotTrayClass"; RegisterClassExW(&wc);
+    WNDCLASSEXW wc = {0}; 
+    wc.cbSize = sizeof(wc); 
+    wc.lpfnWndProc = TrayWndProc;
+    wc.hInstance = hInst; 
+    wc.lpszClassName = L"JxlShotTrayClass"; 
+    RegisterClassExW(&wc);
     
     g_hwndTray = CreateWindowExW(0, L"JxlShotTrayClass", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInst, NULL);
     
     ZeroMemory(&g_nid, sizeof(g_nid));
-    g_nid.cbSize = sizeof(g_nid); g_nid.hWnd = g_hwndTray; g_nid.uID = ID_TRAY;
-    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; g_nid.uCallbackMessage = WM_TRAYICON;
-    g_nid.hIcon = LoadIcon(NULL, IDI_INFORMATION); wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
+    g_nid.cbSize = sizeof(g_nid); 
+    g_nid.hWnd = g_hwndTray; 
+    g_nid.uID = ID_TRAY;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; 
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    
+    // Load the custom transparent icon from resources instead of the generic system icon
+    g_nid.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON)); 
+    wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
     install_keyboard_hook();
 
     MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0)) { TranslateMessage(&msg); DispatchMessage(&msg); }
+    while (GetMessage(&msg, NULL, 0, 0)) { 
+        TranslateMessage(&msg); 
+        DispatchMessage(&msg); 
+    }
+    
     uninstall_keyboard_hook();
     return (int)msg.wParam;
 }
