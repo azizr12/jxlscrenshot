@@ -65,29 +65,89 @@ static void init_paths(void) {
 /* ------------------------------------------------------------------ */
 /* Hotkey Parsing Logic                                               */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* Hotkey Parsing Logic (Upgraded for Full Key Support)               */
+/* ------------------------------------------------------------------ */
+
 static UINT parse_vk(const wchar_t* key) {
-    if (_wcsicmp(key, L"PrintScreen") == 0 || _wcsicmp(key, L"ImprEcran") == 0) return VK_SNAPSHOT;
+    if (!key || !*key) return 0;
+
+    /* 1. Special Named Keys (Case-Insensitive) */
+    if (_wcsicmp(key, L"PrintScreen") == 0 || _wcsicmp(key, L"ImprEcran") == 0 || _wcsicmp(key, L"PrtScn") == 0) return VK_SNAPSHOT;
     if (_wcsicmp(key, L"ScrollLock") == 0) return VK_SCROLL;
-    if (_wcsicmp(key, L"Pause") == 0) return VK_PAUSE;
-    if (key[0] == L'F' && key[1] != L'\0' && key[2] == L'\0') {
-        int n = key[1] - L'0';
-        if (n >= 1 && n <= 12) return VK_F1 + n - 1;
+    if (_wcsicmp(key, L"Pause") == 0 || _wcsicmp(key, L"Break") == 0) return VK_PAUSE;
+    
+    /* Caps Lock and Toggles */
+    if (_wcsicmp(key, L"CapsLock") == 0) return VK_CAPITAL;
+    if (_wcsicmp(key, L"NumLock") == 0) return VK_NUMLOCK;
+    
+    /* Navigation and Editing Keys */
+    if (_wcsicmp(key, L"Space") == 0 || _wcsicmp(key, L"Spacebar") == 0) return VK_SPACE;
+    if (_wcsicmp(key, L"Escape") == 0 || _wcsicmp(key, L"Esc") == 0) return VK_ESCAPE;
+    if (_wcsicmp(key, L"Enter") == 0 || _wcsicmp(key, L"Return") == 0) return VK_RETURN;
+    if (_wcsicmp(key, L"Tab") == 0) return VK_TAB;
+    if (_wcsicmp(key, L"Backspace") == 0 || _wcsicmp(key, L"Back") == 0) return VK_BACK;
+    if (_wcsicmp(key, L"Insert") == 0 || _wcsicmp(key, L"Ins") == 0) return VK_INSERT;
+    if (_wcsicmp(key, L"Delete") == 0 || _wcsicmp(key, L"Del") == 0) return VK_DELETE;
+    if (_wcsicmp(key, L"Home") == 0) return VK_HOME;
+    if (_wcsicmp(key, L"End") == 0) return VK_END;
+    if (_wcsicmp(key, L"PageUp") == 0 || _wcsicmp(key, L"PgUp") == 0) return VK_PRIOR;
+    if (_wcsicmp(key, L"PageDown") == 0 || _wcsicmp(key, L"PgDn") == 0) return VK_NEXT;
+
+    /* Arrow Keys */
+    if (_wcsicmp(key, L"Up") == 0) return VK_UP;
+    if (_wcsicmp(key, L"Down") == 0) return VK_DOWN;
+    if (_wcsicmp(key, L"Left") == 0) return VK_LEFT;
+    if (_wcsicmp(key, L"Right") == 0) return VK_RIGHT;
+
+    /* 2. Function Keys (F1 through F24) 
+     * Fixes the original bug where F10, F11, and F12 were ignored */
+    if (towupper(key[0]) == L'F') {
+        int n = _wtoi(key + 1);
+        if (n >= 1 && n <= 24) return VK_F1 + n - 1;
     }
-    if (key[1] == L'\0') return (UINT)towupper(key[0]);
-    return 0;
+
+    /* 3. Single Character Keys (Letters, Numbers, Symbols) */
+    if (key[1] == L'\0') {
+        return (UINT)towupper(key[0]);
+    }
+
+    /* 4. Numpad Keys */
+    if (_wcsicmp(key, L"NumPad0") == 0) return VK_NUMPAD0;
+    if (_wcsicmp(key, L"NumPad1") == 0) return VK_NUMPAD1;
+    if (_wcsicmp(key, L"NumPad2") == 0) return VK_NUMPAD2;
+    if (_wcsicmp(key, L"NumPad3") == 0) return VK_NUMPAD3;
+    if (_wcsicmp(key, L"NumPad4") == 0) return VK_NUMPAD4;
+    if (_wcsicmp(key, L"NumPad5") == 0) return VK_NUMPAD5;
+    if (_wcsicmp(key, L"NumPad6") == 0) return VK_NUMPAD6;
+    if (_wcsicmp(key, L"NumPad7") == 0) return VK_NUMPAD7;
+    if (_wcsicmp(key, L"NumPad8") == 0) return VK_NUMPAD8;
+    if (_wcsicmp(key, L"NumPad9") == 0) return VK_NUMPAD9;
+    if (_wcsicmp(key, L"Multiply") == 0) return VK_MULTIPLY;
+    if (_wcsicmp(key, L"Add") == 0) return VK_ADD;
+    if (_wcsicmp(key, L"Subtract") == 0) return VK_SUBTRACT;
+    if (_wcsicmp(key, L"Decimal") == 0) return VK_DECIMAL;
+    if (_wcsicmp(key, L"Divide") == 0) return VK_DIVIDE;
+
+    return 0; // Unrecognized key
 }
 
 static BOOL parse_hotkey(const wchar_t* str, UINT* mod, UINT* vk) {
     *mod = 0; *vk = 0;
-    if (!str || !*str) return FALSE;
+    if (!str || !*str) return FALSE; // Correctly handles blank INI values (disables hotkey)
+    
     wchar_t buf[256];
     wcsncpy(buf, str, 255); buf[255] = 0;
     wchar_t* p = buf;
     wchar_t* token;
+    
     while (1) {
         token = wcschr(p, L'+');
         if (token) *token = L'\0';
+        
+        // Trim leading spaces
         while (*p == L' ') p++;
+        // Trim trailing spaces
         wchar_t* end = p + wcslen(p) - 1;
         while (end > p && *end == L' ') { *end = L'\0'; end--; }
         
