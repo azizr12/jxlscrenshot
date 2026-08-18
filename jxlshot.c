@@ -35,6 +35,252 @@
 #include <errno.h>
 #include <jxl/encode.h>
 
+
+/*-----------------------------------*/
+
+#define COBJMACROS
+#define _WIN32_WINNT 0x0A00 // Windows 10+ for IDXGIOutput6
+#include <d3d11.h>
+#include <dxgi1_6.h>
+#include <jxl/color_encoding.h>
+
+#pragma comment(lib, "d3d11.lib")
+#pragma comment(lib, "dxgi.lib")
+#pragma comment(lib, "jxl.lib")
+#pragma comment(lib, "jxl_threads.lib")
+
+typedef struct {
+    uint8_t* bits;
+    int w, h;
+    int is_hdr; // 1 if HDR (16-bit float), 0 if SDR (8-bit)
+} GrabHDR;
+
+/* 
+ * HDR Screen Capture using DXGI Desktop Duplication 
+ * Captures in DXGI_FORMAT_R16G16B16A16_FLOAT for HDR, falls back to 8-bit if needed.
+ */
+static int grab_hdr_monitor(GrabHDR* g) {
+    ZeroMemory(g, sizeof(GrabHDR));
+    
+    ID3D11Device* device = NULL;
+    ID3D11DeviceContext* context = NULL;
+    IDXGIFactory1* factory = NULL;
+    IDXGIAdapter1* adapter = NULL;
+    IDXGIOutput* output = NULL;
+    IDXGIOutput6* output6 = NULL;
+    IDXGIOutputDuplication* dup = NULL;
+    IDXGIResource* resource = NULL;
+    ID3D11Texture2D* texture = NULL;
+    ID3D11Texture2D* staging_texture = NULL;
+
+    // 1. Create D3D11 Device
+    if (FAILED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, 
+                                  D3D11_SDK_VERSION, &device, NULL, &context))) {
+        return 0;
+    }
+
+    // 2. Get DXGI Factory and Adapter
+    if (FAILED(ID3D11Device_QueryInterface(device, &IID_IDXGIDevice, (void**)&device))) goto cleanup;
+    if (FAILED(IDXGIDevice_GetParent((IDXGIDevice*)device, &IID_IDXGIAdapter1, (void**)&adapter))) goto cleanup;
+    if (FAILED(IDXGIAdapter1_GetParent(adapter, &IID_IDXGIFactory1, (void**)&factory))) goto cleanup;
+    if (FAILED(IDXGIAdapter1_EnumOutputs(adapter, 0, &output))) goto cleanup;
+
+    // 3. Check for HDR support (requires IDXGIOutput6)
+    DXGI_OUTPUT_DESC1 desc1;
+    int is_hdr = 0;
+    if (SUCCEEDED(IDXGIOutput_QueryInterface(output, &IID_IDXGIOutput6, (void**)&output6))) {
+        IDXGIOutput6_GetDesc1(output6, &desc1);
+        if (desc1.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) {
+            is_hdr = 1;
+        }
+    }
+
+    // 4. Create Desktop Duplication
+    if (FAILED(IDXGIOutput1_DuplicateOutput((IDXGIOutput1*)output, (IUnknown*)device, &dup))) {
+        goto cleanup;
+    }
+
+    // 5. Acquire Next Frame
+    DXGI_OUTDUPL_FRAME_INFO frame_info;
+    if (FAILED(IDXGIOutputDuplication_AcquireNextFrame(dup, 1000, &frame_info, &resource))) {
+        goto cleanup;
+    }
+
+    if (FAILED(IDXGIResource_QueryInterface(resource, &IID_ID3D11Texture2D, (void**)&texture))) {
+        goto cleanup_frame;
+    }
+
+    D3D11_TEXTURE2D_DESC tex_desc;
+    ID3D11Texture2D_GetDesc(texture, &tex_desc);
+    g->w = tex_desc.Width;
+    g->h = tex_desc.Height;
+    g->is_hdr = is_hdr;
+
+    // 6. Create Staging Texture for CPU Read
+    D3D11_TEXTURE2D_DESC staging_desc = tex_desc;
+    staging_desc.Usage = D3D11_USAGE_STAGING;
+    staging_desc.BindFlags = 0;
+    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    staging_desc.MiscFlags = 0;
+
+    if (FAILED(ID3D11Device_CreateTexture2D(device, &staging_desc, NULL, &staging_texture))) {
+        goto cleanup_frame;
+    }
+
+    ID3D11DeviceContext_CopyResource(context, (ID3D11Resource*)staging_texture, (ID3D11Resource*)texture);
+
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(context, (ID3D11Resource*)staging_texture, 0, D3D11_MAP_READ, 0, &mapped))) {
+        size_t pixel_size = is_hdr ? 8 : 4; // 8 bytes for R16G16B16A16_FLOAT, 4 bytes for R8G8B8A8
+        size_t total_size = g->w * g->h * pixel_size;
+        g->bits = (uint8_t*)malloc(total_size);
+        
+        // Copy row by row to handle pitch/stride correctly
+        for (int y = 0; y < g->h; y++) {
+            memcpy(g->bits + (y * g->w * pixel_size), 
+                   (uint8_t*)mapped.pData + (y * mapped.RowPitch), 
+                   g->w * pixel_size);
+        }
+        ID3D11DeviceContext_Unmap(context, (ID3D11Resource*)staging_texture, 0);
+    }
+
+cleanup_frame:
+    IDXGIOutputDuplication_ReleaseFrame(dup);
+cleanup:
+    if (staging_texture) ID3D11Texture2D_Release(staging_texture);
+    if (texture) ID3D11Texture2D_Release(texture);
+    if (resource) IDXGIResource_Release(resource);
+    if (dup) IDXGIOutputDuplication_Release(dup);
+    if (output6) IDXGIOutput6_Release(output6);
+    if (output) IDXGIOutput_Release(output);
+    if (adapter) IDXGIAdapter1_Release(adapter);
+    if (factory) IDXGIFactory1_Release(factory);
+    if (context) ID3D11DeviceContext_Release(context);
+    if (device) ID3D11Device_Release(device);
+
+    return (g->bits != NULL) ? 1 : 0;
+}
+
+/* 
+ * JPEG XL Encoding (HDR/SDR Aware)
+ */
+static int encode_jxl(const uint8_t* bits, int w, int h, int is_hdr, int lossless, float distance, uint8_t** out_buf, size_t* out_size) {
+    int ok = 0;
+    JxlEncoder* enc = JxlEncoderCreate(NULL);
+    if (!enc) return 0;
+
+    JxlEncoderFrameSettings* frame_settings = JxlEncoderFrameSettingsCreate(enc, NULL);
+    if (lossless) {
+        JxlEncoderFrameSettingsSetOption(frame_settings, JXL_ENC_FRAME_SETTING_EFFORT, 7);
+        JxlEncoderFrameSettingsSetOption(frame_settings, JXL_ENC_FRAME_SETTING_DECODING_SPEED, 0);
+    } else {
+        JxlEncoderSetFrameDistance(frame_settings, distance);
+    }
+
+    JxlBasicInfo info;
+    JxlEncoderInitBasicInfo(&info);
+    info.xsize = w;
+    info.ysize = h;
+    
+    if (is_hdr) {
+        // 16-bit half-precision float (matches DXGI_FORMAT_R16G16B16A16_FLOAT)
+        info.bits_per_sample = 16;
+        info.exponent_bits_per_sample = 5; 
+    } else {
+        // Standard 8-bit SDR
+        info.bits_per_sample = 8;
+        info.exponent_bits_per_sample = 0;
+    }
+    
+    info.num_color_channels = 3;
+    info.alpha_bits = 0;
+    info.uses_original_profile = lossless ? JXL_TRUE : JXL_FALSE;
+
+    if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) goto done;
+
+    // Configure Color Space
+    JxlColorEncoding ce;
+    JxlColorEncodingSetToSRGB(&ce, JXL_FALSE); // Initialize defaults
+    
+    if (is_hdr) {
+        ce.color_space = JXL_COLOR_SPACE_RGB;
+        ce.white_point = JXL_WHITE_POINT_D65;
+        ce.primaries = JXL_PRIMARIES_2100;          // Rec. 2020
+        ce.transfer_function = JXL_TRANSFER_FUNCTION_PQ; // SMPTE ST 2084 (HDR)
+        ce.rendering_intent = JXL_RENDERING_INTENT_PERCEPTUAL;
+    } else {
+        ce.color_space = JXL_COLOR_SPACE_RGB;
+        ce.white_point = JXL_WHITE_POINT_D65;
+        ce.primaries = JXL_PRIMARIES_SRGB;
+        ce.transfer_function = JXL_TRANSFER_FUNCTION_SRGB;
+        ce.rendering_intent = JXL_RENDERING_INTENT_PERCEPTUAL;
+    }
+
+    if (JxlEncoderSetColorEncoding(enc, &ce) != JXL_ENC_SUCCESS) goto done;
+
+    // Pixel Format Configuration
+    JxlPixelFormat pixel_format = {
+        3, // num_channels (RGB)
+        is_hdr ? JXL_TYPE_FLOAT16 : JXL_TYPE_UINT8,
+        JXL_LITTLE_ENDIAN,
+        0  // align
+    };
+
+    if (JxlEncoderAddImageFrame(frame_settings, &pixel_format, bits, w * h * (is_hdr ? 8 : 3)) != JXL_ENC_SUCCESS) {
+        goto done;
+    }
+
+    JxlEncoderCloseInput(enc);
+
+    // Allocate output buffer
+    *out_size = 1024;
+    *out_buf = (uint8_t*)malloc(*out_size);
+    if (!*out_buf) goto done;
+
+    uint8_t* next_out = *out_buf;
+    size_t avail_out = *out_size;
+
+    JxlEncoderStatus process_result = JXL_ENC_NEED_MORE_OUTPUT;
+    while (process_result == JXL_ENC_NEED_MORE_OUTPUT) {
+        process_result = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
+        if (process_result == JXL_ENC_NEED_MORE_OUTPUT) {
+            size_t offset = next_out - *out_buf;
+            *out_size *= 2;
+            *out_buf = (uint8_t*)realloc(*out_buf, *out_size);
+            if (!*out_buf) goto done;
+            next_out = *out_buf + offset;
+            avail_out = *out_size - offset;
+        }
+    }
+
+    if (process_result == JXL_ENC_SUCCESS) {
+        *out_size = next_out - *out_buf;
+        ok = 1;
+    }
+
+done:
+    JxlEncoderDestroy(enc);
+    if (!ok && *out_buf) {
+        free(*out_buf);
+        *out_buf = NULL;
+        *out_size = 0;
+    }
+    return ok;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+/*--------------------------------------*/
+
 /* ------------------------------------------------------------------ */
 /* Configuration (INI)                                                */
 /* ------------------------------------------------------------------ */
