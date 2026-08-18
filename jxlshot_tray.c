@@ -246,6 +246,16 @@ static void start_region_capture(void) {
 /* ------------------------------------------------------------------ */
 /* Low-Level Keyboard Hook                                            */
 /* ------------------------------------------------------------------ */
+
+/* ofc this will get it flag as a virus
+ * because its a c code and need low level access to work
+ * there is no malware or monkey
+ * 
+ * leave the app if you are paranoid ! !
+ * trying to implement something will make this just garbage app
+ * that take megabytes of binary data for a stupid key detection
+ * fuck false postive and fuck modern antiviruses
+ */
 static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION && wParam == WM_KEYDOWN) {
         KBDLLHOOKSTRUCT *pKB = (KBDLLHOOKSTRUCT *)lParam;
