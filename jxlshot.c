@@ -172,16 +172,59 @@ static BOOL parse_hotkey(const wchar_t* str, UINT* mod, UINT* vk) {
 static void ensure_default_ini(void) {
     wchar_t ini_path[MAX_PATH];
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    
     if (GetFileAttributesW(ini_path) == INVALID_FILE_ATTRIBUTES) {
         FILE *f = _wfopen(ini_path, L"w");
         if (f) {
             fprintf(f, "[Capture]\n");
-            fprintf(f, "; 1 for debug on, 0 for debug off\nDebug=0\n");
-            fprintf(f, "; 1 for lossless, 0 for lossy\nLossless=1\n");
-            fprintf(f, "; Lossy distance (0.0 - 25.0, lower is better)\nDistance=1.0\n");
-            fprintf(f, "; Show mouse cursor in region capture (1=yes, 0=no)\nShowCursor=1\n");
-            fprintf(f, "; Export path for screenshots (leave empty for default Pictures folder)\nExportPath=\n");
-            fprintf(f, "; Hotkeys\nHotkeyFull=PrintScreen\nHotkeyRegion=Ctrl+PrintScreen\n");
+            fprintf(f, "; ---------------------------------------------------------\n");
+            fprintf(f, "; GENERAL SETTINGS\n");
+            fprintf(f, "; ---------------------------------------------------------\n");
+            fprintf(f, "; Debug Mode: Set to 1 to create a log file in your Temp folder\n");
+            fprintf(f, "; (helpful for troubleshooting). Set to 0 to disable.\n");
+            fprintf(f, "Debug=0\n\n");
+            
+            fprintf(f, "; Image Quality:\n");
+            fprintf(f, "; Set to 1 for Lossless (perfect quality, larger file size).\n");
+            fprintf(f, "; Set to 0 for Lossy (smaller file size, slightly reduced quality).\n");
+            fprintf(f, "Lossless=1\n\n");
+            
+            fprintf(f, "; Lossy Quality Distance (Only used if Lossless=0):\n");
+            fprintf(f, "; Range is 0.0 to 25.0. Lower numbers mean better quality.\n");
+            fprintf(f, "; 1.0 is a good balance. 0.0 is visually lossless.\n");
+            fprintf(f, "Distance=1.0\n\n");
+            
+            fprintf(f, "; Show Mouse Cursor:\n");
+            fprintf(f, "; Set to 1 to include the mouse cursor in Region captures.\n");
+            fprintf(f, "; Set to 0 to hide it.\n");
+            fprintf(f, "ShowCursor=1\n\n");
+            
+            fprintf(f, "; Export Folder Path:\n");
+            fprintf(f, "; Type the full folder path where you want to save screenshots.\n");
+            fprintf(f, "; Example: C:\\Users\\YourName\\Pictures\\Screenshots\n");
+            fprintf(f, "; Leave this completely blank to use the default Windows Pictures folder.\n");
+            fprintf(f, "ExportPath=\n\n");
+            
+            fprintf(f, "; ---------------------------------------------------------\n");
+            fprintf(f, "; HOTKEY SETTINGS\n");
+            fprintf(f, "; ---------------------------------------------------------\n");
+            fprintf(f, "; You can customize the keyboard shortcuts here.\n");
+            fprintf(f, "; Format: [Modifier]+[Key] or just [Key]\n");
+            fprintf(f, ";\n");
+            fprintf(f, "; Supported Modifiers: Ctrl, Shift, Alt, Win\n");
+            fprintf(f, "; Supported Keys: A-Z, 0-9, F1-F24, PrintScreen, CapsLock,\n");
+            fprintf(f, "; Space, Escape, Enter, Tab, Backspace, Insert, Delete,\n");
+            fprintf(f, "; Home, End, PageUp, PageDown, Up, Down, Left, Right, etc.\n");
+            fprintf(f, ";\n");
+            fprintf(f, "; Examples: PrintScreen, Ctrl+Shift+S, F12, Alt+CapsLock\n");
+            fprintf(f, "; Note: To DISABLE a hotkey, just leave it blank (e.g., HotkeyFull=)\n\n");
+            
+            fprintf(f, "; Hotkey to capture the ENTIRE screen:\n");
+            fprintf(f, "HotkeyFull=PrintScreen\n\n");
+            
+            fprintf(f, "; Hotkey to capture a SPECIFIC REGION (click and drag):\n");
+            fprintf(f, "HotkeyRegion=Ctrl+PrintScreen\n");
+            
             fclose(f);
         }
     }
