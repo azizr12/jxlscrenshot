@@ -52,6 +52,7 @@
 #define IDM_REGION    102
 #define IDM_SETPATH   104
 #define IDM_ABOUT     105
+#define IDM_RELOAD    106
 #define IDM_EXIT      103
 
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
@@ -73,6 +74,7 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
+    AppendMenuW(hMenu, MF_STRING, IDM_RELOAD, L"Reload Configuration");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, L"About...");
     AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
@@ -82,7 +84,6 @@ static void show_tray_menu(HWND hwnd) {
 }
 
 static void execute_full_capture(void) {
-    reload_config(); // FIX: Ensure config is fresh before capturing
     Grab g;
     if (!grab_primary_monitor(&g)) {
         free_grab(&g); MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR); return;
@@ -262,7 +263,6 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 static void start_region_capture(void) {
     if (g_hwndRegion) return;
-    reload_config();
 
     // Ensure a completely clean slate before starting a new capture
     g_isDragging = FALSE;
@@ -365,6 +365,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 case IDM_FULL: execute_full_capture(); break;
                 case IDM_REGION: start_region_capture(); break;
                 case IDM_SETPATH: execute_set_path(); break;
+                case IDM_RELOAD: reload_config(); break;
                 case IDM_ABOUT: execute_about(); break;
                 case IDM_EXIT: PostQuitMessage(0); break;
             } break;
