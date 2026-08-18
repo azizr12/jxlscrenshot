@@ -28,24 +28,25 @@ jobs:
 
       - name: Compile and bundle runtime DLLs
         run: |
-          # 1. Compile CLI version
+          # 1. Compile CLI version (Added -ld3d11 -ldxgi for HDR Desktop Duplication support)
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
               -mwindows -o jxlshot.exe jxlshot.c \
-              -ljxl -lgdi32 -luser32 -lshell32 -lole32
+              -ld3d11 -ldxgi -ljxl -lgdi32 -luser32 -lshell32 -lole32
 
-          # 2. Compile Tray version
+          # 2. Compile Tray version (Added -ld3d11 -ldxgi for consistency)
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
               -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.rc \
-              -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
+              -ld3d11 -ldxgi -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
 
           # 3. Prepare distribution directory
           mkdir -p dist
           cp jxlshot.exe jxlshot_tray.exe dist/
           
-          # Copy auxiliary files
+          # Copy auxiliary files (ignore errors if they don't exist)
           cp README.md ADD-to-START-UP.bat dist/ 2>/dev/null || true
 
           # 4. Extract and copy required MinGW/libjxl DLLs
+          # Using ldd to find dependencies and copying them to the dist folder
           ldd jxlshot.exe jxlshot_tray.exe | grep -o '/mingw64/bin/[^ )]*' | sort -u | while read -r dll; do
             cp "$dll" dist/
           done
