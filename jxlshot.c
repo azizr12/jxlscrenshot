@@ -1,11 +1,22 @@
-/* jxlshot.c — minimal command-line screenshot tool for Windows.
- *
- * Captures the primary monitor and saves it as JPEG XL (.jxl).
- *
- * Build (MSYS2 / MinGW-w64) - Optimized for size:
- *   gcc -Os -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
- *       -mwindows -o jxlshot.exe jxlshot.c -ljxl -lgdi32 -luser32 -lshell32 -lole32
- */
+/*
+* Captures the primary monitor and saves it as JPEG XL (.jxl).
+*
+* Usage:
+*   jxlshot.exe                capture, lossless (default)
+*   jxlshot.exe -q             lossy capture, default distance 1.0
+*   jxlshot.exe -q -d 3.0      lossy capture, distance 3.0 (lower = better)
+*   jxlshot.exe -w 3000        wait 3000 ms before capturing
+*
+* Configuration is read from jxlshot.ini located next to the executable.
+* Debug logs are written to %TEMP%\jxlshot_debug.log.
+*
+*
+* jxlshot.c — minimal command-line screenshot tool for Windows.
+*
+* Build (MSYS2 / MinGW-w64) - Optimized for size:
+*   gcc -Os -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
+*       -mwindows -o jxlshot.exe jxlshot.c -ljxl -lgdi32 -luser32 -lshell32 -lole32
+*/
 #define UNICODE
 #define _UNICODE
 #define WINVER 0x0601
