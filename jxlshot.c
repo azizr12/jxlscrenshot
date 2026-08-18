@@ -1,4 +1,3 @@
-
 /*
 * Captures the primary monitor and saves it as JPEG XL (.jxl).
 * Supports both SDR (8-bit) and HDR (16-bit float) via DXGI Desktop Duplication.
@@ -13,8 +12,9 @@
 * Debug logs are written to %TEMP%\jxlshot_debug.log.
 *
 * Build (MSYS2 / MinGW-w64) - Optimized for size:
-*   gcc -Os -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
-*       -mwindows -o jxlshot.exe jxlshot.c -ld3d11 -ldxgi -ljxl -ljxl_threads -lgdi32 -luser32 -lshell32 -lole32
+*   gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
+*       -mwindows -o jxlshot.exe jxlshot.c \
+*       -ld3d11 -ldxgi -ljxl -lgdi32 -luser32 -lshell32 -lole32
 */
 #define UNICODE
 #define _UNICODE
@@ -39,13 +39,24 @@
 #include <jxl/encode.h>
 #include <jxl/color_encoding.h>
 
+/* ------------------------------------------------------------------ */
+/* MinGW Compatibility: Explicitly define IIDs to prevent linker errors */
+/* ------------------------------------------------------------------ */
+const GUID IID_IDXGIDevice      = {0x54ec77fa, 0x1377, 0x44e6, {0x8c, 0x32, 0x88, 0xfd, 0x5f, 0x44, 0xc8, 0x4c}};
+const GUID IID_IDXGIAdapter1    = {0x29038f61, 0x3839, 0x4626, {0x91, 0xfd, 0x0c, 0x14, 0x0a, 0x5b, 0x84, 0xf3}};
+const GUID IID_IDXGIFactory1    = {0x770aae78, 0xf26f, 0x4dba, {0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87}};
+const GUID IID_IDXGIOutput      = {0xae02eedb, 0xc735, 0x4690, {0x8d, 0x52, 0x5a, 0x8d, 0xc2, 0x02, 0x13, 0xaa}};
+const GUID IID_IDXGIOutput1     = {0x00cddea8, 0x939b, 0x4b83, {0xa3, 0x40, 0xa6, 0x85, 0x22, 0x66, 0x66, 0xcc}};
+const GUID IID_IDXGIOutput6     = {0x068346e8, 0xaaec, 0x4b84, {0xad, 0xd7, 0x13, 0x7f, 0x51, 0x3f, 0x77, 0xa1}};
+const GUID IID_IDXGIResource    = {0x035f3ab4, 0x482e, 0x4e50, {0xb4, 0x1f, 0x8a, 0x7f, 0x8b, 0xd8, 0x96, 0x0b}};
+const GUID IID_ID3D11Texture2D  = {0x6f15aaf2, 0xd208, 0x4e89, {0x9a, 0xb4, 0x48, 0x95, 0x35, 0xd3, 0x4f, 0x9c}};
+
 #ifdef _MSC_VER
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "jxl.lib")
 #pragma comment(lib, "jxl_threads.lib")
 #endif
-
 /* ------------------------------------------------------------------ */
 /* HDR Screen Capture using DXGI Desktop Duplication                  */
 /* ------------------------------------------------------------------ */
