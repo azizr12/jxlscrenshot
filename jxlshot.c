@@ -282,15 +282,26 @@ static int encode_jxl(const uint8_t *bgra, int w, int h, int lossless, float dis
     rgb = (uint8_t *)malloc(npix * 3);
     if (!rgb) goto done;
     
+    const uint32_t *src = (const uint32_t *)bgra;
+    uint8_t *dst = rgb;
     for (size_t i = 0; i < npix; i++) {
-        rgb[3*i + 0] = bgra[4*i + 2]; rgb[3*i + 1] = bgra[4*i + 1]; rgb[3*i + 2] = bgra[4*i + 0];
+        uint32_t pixel = src[i]; // Reads B, G, R, A in one cycle
+        dst[0] = (pixel >> 16) & 0xFF; // R
+        dst[1] = (pixel >> 8)  & 0xFF; // G
+        dst[2] = pixel & 0xFF;         // B
+        dst += 3;
     }
     
     JxlPixelFormat fmt = {3, JXL_TYPE_UINT8, JXL_NATIVE_ENDIAN, 0};
     if (JxlEncoderAddImageFrame(fs, &fmt, rgb, npix * 3) != JXL_ENC_SUCCESS) goto done;
     
     JxlEncoderCloseInput(enc);
-    size_t cap = 1 << 20; buf = (uint8_t *)malloc(cap);
+    // Estimate a larger initial capacity to avoid multiple reallocs.
+    // Lossless JXL can approach raw size, while lossy is much smaller.
+    size_t cap = (size_t)w * h; 
+    if (cap < (4 << 20)) cap = (4 << 20); // Enforce a minimum of 4MB
+    // maybe ?
+    buf = (uint8_t *)malloc(cap);
     if (!buf) goto done;
     
     uint8_t *next = buf; size_t avail = cap;
