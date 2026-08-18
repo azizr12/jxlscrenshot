@@ -69,6 +69,10 @@ static void init_paths(void) {
 /* Hotkey Parsing Logic (Upgraded for Full Key Support)               */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* Hotkey Parsing Logic (Upgraded for Full Key Support)               */
+/* ------------------------------------------------------------------ */
+
 static UINT parse_vk(const wchar_t* key) {
     if (!key || !*key) return 0;
 
@@ -162,6 +166,8 @@ static BOOL parse_hotkey(const wchar_t* str, UINT* mod, UINT* vk) {
     }
     return (*vk != 0);
 }
+
+
 
 static void ensure_default_ini(void) {
     wchar_t ini_path[MAX_PATH];
