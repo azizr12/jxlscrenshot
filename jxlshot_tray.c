@@ -282,6 +282,7 @@ static void start_region_capture(void) {
  * trying to implement something will make this just garbage app
  * that take megabytes of binary data for a stupid key detection
  * fuck false postive and fuck modern antiviruses
+ * RegisterHotKey  is shit tried it and always fail
  */
 static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION && wParam == WM_KEYDOWN) {
