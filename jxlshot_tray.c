@@ -1,20 +1,37 @@
+/*       https://github.com/azizr12/jxlscrenshot/        */
+
+/* ofc this will get flag as a virus
+ * because its a c code and need low level access to work
+ * there is no malware or monkey
+ * 
+ * leave the app if you are paranoid ! !
+ * trying to implement something will make this just garbage app
+ * that take megabytes of binary data for a stupid key detection
+ * fuck false postive and fuck modern antiviruses
+ * RegisterHotKey  is shit tried it and always fail
+ *
+ * its just a vibe code bullshit
+ * there is no malware or monkey
+ * leave the app if you are paranoid
+ */
+
+
 /* jxlshot_tray.c — System tray extension for jxlshot.
  *
  * Configuration is read from jxlshot.ini located next to the executable.
  * Debug logs are written to %TEMP%\jxlshot_debug.log.
  *
- *
  * Build (MSYS2 / MinGW-w64) - Optimized for size:
  *   gcc -Os -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
- *       -mwindows -o jxlshot_tray.exe jxlshot_tray.c -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
+ *       -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.rc -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
  */
+
 #define UNICODE
 #define _UNICODE
 #define WINVER 0x0601
 #define _WIN32_WINNT 0x0601
 #define WIN32_LEAN_AND_MEAN
 #define JXLSHOT_TRAY_BUILD
-
 
 #include "resource.h"
 #include <windows.h>
@@ -29,12 +46,16 @@
 #define WM_TRAYICON            (WM_USER + 1)
 #define WM_HOOK_FULL_CAPTURE   (WM_USER + 10)
 #define WM_HOOK_REGION_CAPTURE (WM_USER + 11)
+
 #define ID_TRAY       1
-#define IDM_FULL      1
-#define IDM_REGION    2
-#define IDM_EXIT      103
+#define IDM_FULL      101
+#define IDM_REGION    102
 #define IDM_SETPATH   104
 #define IDM_ABOUT     105
+#define IDM_EXIT      103
+
+// Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
+#define IDI_APP_ICON  1001
 
 static NOTIFYICONDATAW g_nid;
 static HWND            g_hwndTray = NULL;
@@ -95,46 +116,32 @@ static void execute_set_path(void) {
 /* ------------------------------------------------------------------ */
 static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
     if (msg == TDN_HYPERLINK_CLICKED) {
-        // lParam contains the URL string extracted from the <a href="..."> tag
         ShellExecuteW(hwnd, L"open", (LPCWSTR)lParam, NULL, NULL, SW_SHOWNORMAL);
     }
     return S_OK;
 }
 
 static void execute_about(void) {
-    // 1. Load the custom transparent icon from the application's resources
     HICON hAppIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON));
 
     TASKDIALOGCONFIG config = {0};
     config.cbSize = sizeof(TASKDIALOGCONFIG);
     config.hwndParent = NULL;
     config.hInstance = NULL;
-    
-    // 2. Add TDF_USE_HICON_MAIN to tell the dialog to use the hMainIcon union member
     config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_HICON_MAIN;
-    
     config.pszWindowTitle = L"About";
-    
-    // 3. Assign the loaded HICON to the pszMainIcon union member (requires cast)
     config.pszMainIcon = (PCWSTR)hAppIcon; 
-    
     config.pszMainInstruction = L"JXL Screenshot Tool";
     config.pszContent = L"Minimal tray screenshot tool using JPEG XL.\n\n"
                         L"<a href=\"https://github.com/azizr12/jxlscrenshot\">https://github.com/azizr12/jxlscrenshot</a>";
     config.pfCallback = AboutDialogCallback;
 
-    // Display the dialog
     TaskDialogIndirect(&config, NULL, NULL, NULL);
 
-    // 4. Clean up the icon handle. TaskDialog does not take ownership of custom HICONs.
     if (hAppIcon) {
         DestroyIcon(hAppIcon);
     }
 }
-
-
-/*       https://github.com/azizr12/jxlscrenshot/        */
-
 
 /* ------------------------------------------------------------------ */
 /* Interactive Region Selection (Optimized & Ghosting Fixed)          */
@@ -168,7 +175,6 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
             BitBlt(hdc, 0, 0, g_screenW, g_screenH, g_hdcMem, 0, 0, SRCCOPY);
             
-            // OPTIMIZATION: AlphaBlend automatically stretches the 1x1 source bitmap
             BLENDFUNCTION bf = { AC_SRC_OVER, 0, 120, 0 };
             AlphaBlend(hdc, 0, 0, g_screenW, g_screenH, g_hdcBlack, 0, 0, 1, 1, bf);
 
@@ -197,44 +203,32 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_LBUTTONUP: {
             if (g_isDragging) {
-            g_isDragging = FALSE; 
-            ReleaseCapture();
+                g_isDragging = FALSE; 
+                ReleaseCapture();
         
-            RECT r = g_rcSel;
-            if (r.left > r.right) { int t = r.left; r.left = r.right; r.right = t; }
-            if (r.top > r.bottom) { int t = r.top; r.top = r.bottom; r.bottom = t; }
+                RECT r = g_rcSel;
+                if (r.left > r.right) { int t = r.left; r.left = r.right; r.right = t; }
+                if (r.top > r.bottom) { int t = r.top; r.top = r.bottom; r.bottom = t; }
         
-            // 1. Remove the window from DWM composition immediately
-            ShowWindow(hwnd, SW_HIDE);
-            DestroyWindow(hwnd);
-        
-            // 2. Force a synchronous, immediate repaint of the entire desktop
-            RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-        
-            // 3. Yield execution briefly to allow DWM to composite the clean frame
-            Sleep(50); 
+                ShowWindow(hwnd, SW_HIDE);
+                DestroyWindow(hwnd);
+                RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                Sleep(50); 
 
-            // 4. Capture the screen only after the buffer is guaranteed to be clean
-            if ((r.right - r.left) > 0 && (r.bottom - r.top) > 0) {
-                crop_and_encode_region(&r);
-            }
-        } 
-        return 0;
+                if ((r.right - r.left) > 0 && (r.bottom - r.top) > 0) {
+                    crop_and_encode_region(&r);
+                }
+            } 
+            return 0;
         }
-        
         case WM_KEYDOWN: {
             if (wp == VK_ESCAPE) {
                 g_isDragging = FALSE; 
                 ReleaseCapture();
         
-                // 1. Remove the overlay window from DWM composition immediately
                 ShowWindow(hwnd, SW_HIDE);
                 DestroyWindow(hwnd);
-        
-                // 2. Force a synchronous, immediate repaint of the entire desktop
                 RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-        
-                // 3. Yield execution briefly to allow DWM to composite the clean frame
                 Sleep(50); 
             } 
             return 0;
@@ -254,7 +248,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 static void start_region_capture(void) {
     if (g_hwndRegion) return;
-    reload_config(); // FIX: Ensure config is fresh before capturing
+    reload_config();
 
     g_screenW = GetSystemMetrics(SM_CXSCREEN); g_screenH = GetSystemMetrics(SM_CYSCREEN);
     HDC g_hdcScreen = GetDC(NULL);
@@ -267,7 +261,6 @@ static void start_region_capture(void) {
     SelectObject(g_hdcMem, g_hbmScreen);
     BitBlt(g_hdcMem, 0, 0, g_screenW, g_screenH, g_hdcScreen, 0, 0, SRCCOPY);
 
-    // OPTIMIZATION: Create a 1x1 black bitmap instead of a full-screen one to save ~33MB RAM
     g_hdcBlack = CreateCompatibleDC(g_hdcScreen);
     g_hbmBlack = CreateCompatibleBitmap(g_hdcScreen, 1, 1);
     HBITMAP hOldBmp = (HBITMAP)SelectObject(g_hdcBlack, g_hbmBlack);
@@ -290,17 +283,6 @@ static void start_region_capture(void) {
 /* ------------------------------------------------------------------ */
 /* Low-Level Keyboard Hook                                            */
 /* ------------------------------------------------------------------ */
-
-/* ofc this will get it flag as a virus
- * because its a c code and need low level access to work
- * there is no malware or monkey
- * 
- * leave the app if you are paranoid ! !
- * trying to implement something will make this just garbage app
- * that take megabytes of binary data for a stupid key detection
- * fuck false postive and fuck modern antiviruses
- * RegisterHotKey  is shit tried it and always fail
- */
 static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION && wParam == WM_KEYDOWN) {
         KBDLLHOOKSTRUCT *pKB = (KBDLLHOOKSTRUCT *)lParam;
@@ -354,7 +336,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     init_paths(); 
     ensure_default_ini(); 
     init_config();
-    dbg_init(); // Initialize the unified logger
+    dbg_init();
 
     WNDCLASSEXW wc = {0}; 
     wc.cbSize = sizeof(wc); 
@@ -372,7 +354,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; 
     g_nid.uCallbackMessage = WM_TRAYICON;
     
-    // Load the custom transparent icon from resources instead of the generic system icon
     g_nid.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON)); 
     wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
@@ -388,10 +369,5 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     uninstall_keyboard_hook();
     return (int)msg.wParam;
 }
-
-/* its just a vibe code bullshit
- * there is no malware or monkey
- * leave the app if you are paranoid
- */
 
 
