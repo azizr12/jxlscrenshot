@@ -176,11 +176,20 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         
         case WM_KEYDOWN: {
             if (wp == VK_ESCAPE) {
-                g_isDragging = FALSE; ReleaseCapture();
-                ShowWindow(hwnd, SW_HIDE); // FIX: Prevent ghosting on ESC
+                g_isDragging = FALSE; 
+                ReleaseCapture();
+        
+                // 1. Remove the overlay window from DWM composition immediately
+                ShowWindow(hwnd, SW_HIDE);
                 DestroyWindow(hwnd);
-                InvalidateRect(NULL, NULL, TRUE);
-            } return 0;
+        
+                // 2. Force a synchronous, immediate repaint of the entire desktop
+                RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        
+                // 3. Yield execution briefly to allow DWM to composite the clean frame
+                Sleep(50); 
+            } 
+            return 0;
         }
         case WM_DESTROY: {
             if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
