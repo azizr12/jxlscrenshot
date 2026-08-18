@@ -315,9 +315,15 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     if (nCode == HC_ACTION && wParam == WM_KEYDOWN) {
         KBDLLHOOKSTRUCT *pKB = (KBDLLHOOKSTRUCT *)lParam;
         
+        /* DEBUG: Log every key press and the configured hotkey values */
+        dbg("Key pressed: vkCode=%d | Configured Full: %d | Configured Region: %d", 
+            pKB->vkCode, g_cfg.hk_full_vk, g_cfg.hk_region_vk);
+
         /* Check Full Capture Hotkey */
+        /* CRITICAL: Must use && (AND), not || (OR) */
         if (g_cfg.hk_full_vk != 0 && pKB->vkCode == g_cfg.hk_full_vk) {
             if (check_modifiers(g_cfg.hk_full_mod)) {
+                dbg("MATCH: Triggering FULL capture");
                 PostMessageW(g_hwndTray, WM_HOOK_FULL_CAPTURE, 0, 0);
                 return 1; // Block key from propagating
             }
@@ -326,6 +332,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
         /* Check Region Capture Hotkey */
         if (g_cfg.hk_region_vk != 0 && pKB->vkCode == g_cfg.hk_region_vk) {
             if (check_modifiers(g_cfg.hk_region_mod)) {
+                dbg("MATCH: Triggering REGION capture");
                 PostMessageW(g_hwndTray, WM_HOOK_REGION_CAPTURE, 0, 0);
                 return 1; // Block key from propagating
             }
