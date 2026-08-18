@@ -14,7 +14,7 @@
 #define _WIN32_WINNT 0x0601
 #define WIN32_LEAN_AND_MEAN
 #define JXLSHOT_TRAY_BUILD
-
+#include "resource.h"
 #include <windows.h>
 #include <shellapi.h>
 #include <commctrl.h>
