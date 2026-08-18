@@ -149,19 +149,31 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         case WM_LBUTTONUP: {
             if (g_isDragging) {
-                g_isDragging = FALSE; ReleaseCapture();
-                RECT r = g_rcSel;
-                if (r.left > r.right) { int t = r.left; r.left = r.right; r.right = t; }
-                if (r.top > r.bottom) { int t = r.top; r.top = r.bottom; r.bottom = t; }
-                
-                // FIX: Hide window and force desktop repaint to prevent DWM ghosting
-                ShowWindow(hwnd, SW_HIDE);
-                DestroyWindow(hwnd);
-                InvalidateRect(NULL, NULL, TRUE);
+            g_isDragging = FALSE; 
+            ReleaseCapture();
+        
+            RECT r = g_rcSel;
+            if (r.left > r.right) { int t = r.left; r.left = r.right; r.right = t; }
+            if (r.top > r.bottom) { int t = r.top; r.top = r.bottom; r.bottom = t; }
+        
+            // 1. Remove the window from DWM composition immediately
+            ShowWindow(hwnd, SW_HIDE);
+            DestroyWindow(hwnd);
+        
+            // 2. Force a synchronous, immediate repaint of the entire desktop
+            RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        
+            // 3. Yield execution briefly to allow DWM to composite the clean frame
+            Sleep(50); 
 
-                if ((r.right - r.left) > 0 && (r.bottom - r.top) > 0) crop_and_encode_region(&r);
-            } return 0;
+            // 4. Capture the screen only after the buffer is guaranteed to be clean
+            if ((r.right - r.left) > 0 && (r.bottom - r.top) > 0) {
+                crop_and_encode_region(&r);
+            }
+        } 
+        return 0;
         }
+        
         case WM_KEYDOWN: {
             if (wp == VK_ESCAPE) {
                 g_isDragging = FALSE; ReleaseCapture();
