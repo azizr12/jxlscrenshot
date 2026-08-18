@@ -88,9 +88,36 @@ static void execute_set_path(void) {
     }
 }
 
-static void execute_about(void) {
-    MessageBoxW(NULL, L"JXL Screenshot Tool\nMinimal tray screenshot tool using JPEG XL.", L"About", MB_OK | MB_ICONINFORMATION);
+/* ------------------------------------------------------------------ */
+/* About Dialog with Clickable Hyperlink                              */
+/* ------------------------------------------------------------------ */
+static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
+    if (msg == TDN_HYPERLINK_CLICKED) {
+        // lParam contains the URL string extracted from the <a href="..."> tag
+        ShellExecuteW(hwnd, L"open", (LPCWSTR)lParam, NULL, NULL, SW_SHOWNORMAL);
+    }
+    return S_OK;
 }
+
+static void execute_about(void) {
+    TASKDIALOGCONFIG config = {0};
+    config.cbSize = sizeof(TASKDIALOGCONFIG);
+    config.hwndParent = NULL;
+    config.hInstance = NULL;
+    config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION;
+    config.pszWindowTitle = L"About";
+    config.pszMainIcon = TD_INFORMATION_ICON;
+    config.pszMainInstruction = L"JXL Screenshot Tool";
+    config.pszContent = L"Minimal tray screenshot tool using JPEG XL.\n\n"
+                        L"<a href=\"https://github.com/azizr12/jxlscrenshot\">https://github.com/azizr12/jxlscrenshot</a>";
+    config.pfCallback = AboutDialogCallback;
+
+    TaskDialogIndirect(&config, NULL, NULL, NULL);
+}
+
+
+/*       https://github.com/azizr12/jxlscrenshot/        */
+
 
 /* ------------------------------------------------------------------ */
 /* Interactive Region Selection (Optimized & Ghosting Fixed)          */
