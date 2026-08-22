@@ -199,24 +199,60 @@ static void crop_and_encode_region(RECT *r) {
 LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_PAINT: {
-            PAINTSTRUCT ps; HDC hdc = BeginPaint(hwnd, &ps);
-            BitBlt(hdc, 0, 0, g_screenW, g_screenH, g_hdcMem, 0, 0, SRCCOPY);
-            
-            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 120, 0 };
-            AlphaBlend(hdc, 0, 0, g_screenW, g_screenH, g_hdcBlack, 0, 0, 1, 1, bf);
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
 
-            if (g_isDragging || (g_rcSel.right > g_rcSel.left && g_rcSel.bottom > g_rcSel.top)) {
-                int x = min(g_rcSel.left, g_rcSel.right), y = min(g_rcSel.top, g_rcSel.bottom);
-                int w = abs(g_rcSel.right - g_rcSel.left), h = abs(g_rcSel.bottom - g_rcSel.top);
-                BitBlt(hdc, x, y, w, h, g_hdcMem, x, y, SRCCOPY);
-                HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
-                HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
-                HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-                Rectangle(hdc, x, y, x + w, y + h);
-                SelectObject(hdc, hOldBrush); SelectObject(hdc, hOldPen); DeleteObject(hPen);
+            // 1. Dark mode overlay background (Dark Gray: RGB 20, 20, 20)
+            HBRUSH hDarkBrush = CreateSolidBrush(RGB(20, 20, 20));
+            HRGN hRgnScreen = CreateRectRgn(0, 0, g_screenW, g_screenH);
+
+            if (g_isSelecting || (g_selRect.right > g_selRect.left && g_selRect.bottom > g_selRect.top)) {
+                HRGN hRgnSel = CreateRectRgn(g_selRect.left, g_selRect.top, g_selRect.right, g_selRect.bottom);
+                CombineRgn(hRgnScreen, hRgnScreen, hRgnSel, RGN_DIFF);
+                DeleteObject(hRgnSel);
             }
-            EndPaint(hwnd, &ps); return 0;
+            
+            FillRgn(hdc, hRgnScreen, hDarkBrush);
+            DeleteObject(hRgnScreen);
+
+            // 2. Modern Accent Color Border (Windows Blue: #0078D4)
+            if (g_isSelecting || (g_selRect.right > g_selRect.left && g_selRect.bottom > g_selRect.top)) {
+                HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 120, 212));
+                HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+                HBRUSH hNullBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
+                HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hNullBrush);
+                
+                Rectangle(hdc, g_selRect.left, g_selRect.top, g_selRect.right, g_selRect.bottom);
+                
+                // Restore original GDI objects and clean up
+                SelectObject(hdc, hOldPen);
+                SelectObject(hdc, hOldBrush);
+                DeleteObject(hPen);
+
+                // 3. Dimension Tooltip (White text, transparent background)
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, RGB(255, 255, 255));
+                
+                wchar_t dimText[64];
+                int width = g_selRect.right - g_selRect.left;
+                int height = g_selRect.bottom - g_selRect.top;
+                _snwprintf(dimText, 64, L"%d × %d", width, height);
+                
+                // Prevent tooltip from drawing off the top edge of the screen
+                int textY = (g_selRect.top - 28) < 0 ? (g_selRect.top + 8) : (g_selRect.top - 28);
+                
+                TextOutW(hdc, g_selRect.left + 8, textY, dimText, (int)wcslen(dimText));
+            }
+
+            DeleteObject(hDarkBrush);
+            EndPaint(hwnd, &ps);
+            return 0;
         }
+
+
+
+
+
         case WM_LBUTTONDOWN: {
             g_isDragging = TRUE; 
             g_rcSel.left = GET_X_LPARAM(lp); 
