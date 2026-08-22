@@ -85,15 +85,23 @@ static void show_tray_menu(HWND hwnd) {
 
 static void execute_full_capture(void) {
     Grab g;
+    ZeroMemory(&g, sizeof(g)); // Ensure clean initial state
+    
     if (!grab_primary_monitor(&g)) {
-        free_grab(&g); MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR); return;
+        MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
+        return; // Early exit is safe; g is zeroed
     }
-    wchar_t out_path[MAX_PATH]; build_out_path(out_path, MAX_PATH);
+    
+    wchar_t out_path[MAX_PATH]; 
+    build_out_path(out_path, MAX_PATH);
+    
     if (!save_bgra_as_jxl(g.bits, g.w, g.h, g_cfg.lossless, g_cfg.distance, out_path)) {
         MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
     }
-    free_grab(&g);
+    
+    free_grab(&g); // Guaranteed execution on all paths
 }
+
 
 static void execute_set_path(void) {
     BROWSEINFOW bi = { 0 }; bi.hwndOwner = NULL;
@@ -156,18 +164,36 @@ static BOOL    g_isDragging = FALSE;
 
 static void crop_and_encode_region(RECT *r) {
     Grab g;
-    if (!grab_primary_monitor(&g)) { free_grab(&g); return; }
-    int rw = r->right - r->left, rh = r->bottom - r->top;
-    if (rw <= 0 || rh <= 0) { free_grab(&g); return; }
+    ZeroMemory(&g, sizeof(g)); // Ensure clean initial state
+    
+    if (!grab_primary_monitor(&g)) {
+        return; // Early exit is safe
+    }
+    
+    int rw = r->right - r->left;
+    int rh = r->bottom - r->top;
+    
+    if (rw <= 0 || rh <= 0) {
+        free_grab(&g); // Guaranteed cleanup before early exit
+        return;
+    }
 
     uint8_t *crop_bits = (uint8_t *)malloc((size_t)rw * rh * 4);
-    if (!crop_bits) { free_grab(&g); return; }
+    if (!crop_bits) {
+        free_grab(&g); // Guaranteed cleanup before early exit
+        return;
+    }
+    
     for (int y = 0; y < rh; y++) {
         memcpy(crop_bits + y * rw * 4, g.bits + ((r->top + y) * g.w + r->left) * 4, rw * 4);
     }
-    wchar_t out_path[MAX_PATH]; build_out_path(out_path, MAX_PATH);
+    
+    wchar_t out_path[MAX_PATH]; 
+    build_out_path(out_path, MAX_PATH);
     save_bgra_as_jxl(crop_bits, rw, rh, g_cfg.lossless, g_cfg.distance, out_path);
-    free(crop_bits); free_grab(&g);
+    
+    free(crop_bits); // Guaranteed heap cleanup
+    free_grab(&g);   // Guaranteed GDI cleanup
 }
 
 LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {

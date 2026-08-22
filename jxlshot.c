@@ -313,16 +313,24 @@ static const char *jxl_enc_err_name(JxlEncoderError e) {
 /* Output Paths & DPI awareness                                       */
 /* ------------------------------------------------------------------ */
 static void build_out_path(wchar_t *path, int n) {
-    SYSTEMTIME st; GetLocalTime(&st);
-    _snwprintf(path, n, L"%s\\jxlshot_%04d%02d%02d_%02d%02d%02d_%03d.jxl",
-               g_cfg.export_path, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-    path[n - 1] = 0;
-}
-
-static void set_dpi_aware(void) {
-    typedef BOOL (WINAPI *Fn)(HANDLE);
-    Fn f = (Fn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
-    if (f) f((HANDLE)(LONG_PTR)-4); else SetProcessDPIAware();
+    SYSTEMTIME st; 
+    GetLocalTime(&st);
+    
+    // Create a safe, mutable copy of the export path
+    wchar_t safe_dir[MAX_PATH];
+    wcsncpy(safe_dir, g_cfg.export_path, MAX_PATH - 1);
+    safe_dir[MAX_PATH - 1] = L'\0';
+    
+    // Ensure the directory path ends with a backslash
+    size_t len = wcslen(safe_dir);
+    if (len > 0 && safe_dir[len - 1] != L'\\') {
+        wcsncat(safe_dir, L"\\", MAX_PATH - len - 1);
+    }
+    
+    _snwprintf(path, n, L"%sjxlshot_%04d%02d%02d_%02d%02d%02d_%03d.jxl",
+               safe_dir, st.wYear, st.wMonth, st.wDay, 
+               st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    path[n - 1] = L'\0';
 }
 
 /* ------------------------------------------------------------------ */
