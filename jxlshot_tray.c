@@ -173,10 +173,30 @@ static void execute_set_path(void) {
 /* ------------------------------------------------------------------ */
 /* About Dialog with Clickable Hyperlink and Custom Header Icon       */
 /* ------------------------------------------------------------------ */
-/* ------------------------------------------------------------------ */
-/* About Dialog with Clickable Hyperlink and Custom Header Icon       */
-/* ------------------------------------------------------------------ */
 static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
+    // Intercept the exact moment the Task Dialog window is created
+    if (msg == TDN_CREATED) {
+        HMODULE hUxtheme = LoadLibraryW(L"uxtheme.dll");
+        if (hUxtheme) {
+            // Ordinal 133: AllowDarkModeForWindow
+            typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
+            // Ordinal 136: FlushMenuThemes (ensures child controls render correctly)
+            typedef void (WINAPI *fnFlushMenuThemes)(void);
+            
+            fnAllowDarkModeForWindow pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133));
+            fnFlushMenuThemes pFlushMenuThemes = (fnFlushMenuThemes)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(136));
+
+            if (pAllowDarkModeForWindow) {
+                // Apply dark mode DIRECTLY to the Task Dialog's HWND
+                pAllowDarkModeForWindow(hwnd, TRUE);
+            }
+            if (pFlushMenuThemes) {
+                pFlushMenuThemes();
+            }
+            FreeLibrary(hUxtheme);
+        }
+    }
+    
     if (msg == TDN_HYPERLINK_CLICKED) {
         ShellExecuteW(hwnd, L"open", (LPCWSTR)lParam, NULL, NULL, SW_SHOWNORMAL);
     }
@@ -189,9 +209,8 @@ static void execute_about(void) {
     TASKDIALOGCONFIG config = {0};
     config.cbSize = sizeof(TASKDIALOGCONFIG);
     
-    // CRITICAL FIX: Use the dark-mode-enabled hidden window as the parent.
-    // Task Dialogs inherit their theme (Light/Dark) from their parent window.
-    config.hwndParent = g_hwndMenuOwner ? g_hwndMenuOwner : NULL;
+    // Provide a valid parent (fallback to tray window if menu owner is missing)
+    config.hwndParent = g_hwndMenuOwner ? g_hwndMenuOwner : g_hwndTray;
     
     config.hInstance = NULL;
     config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_HICON_MAIN;
