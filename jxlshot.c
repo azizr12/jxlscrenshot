@@ -320,6 +320,18 @@ static const char *jxl_enc_err_name(JxlEncoderError e) {
 /* ------------------------------------------------------------------ */
 /* Output Paths & DPI awareness                                       */
 /* ------------------------------------------------------------------ */
+static void set_dpi_aware(void) {
+    typedef BOOL (WINAPI *Fn)(HANDLE);
+    // Try to use the modern Windows 10 DPI awareness API first
+    Fn f = (Fn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
+    if (f) {
+        f((HANDLE)(LONG_PTR)-4); // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
+    } else {
+        // Fallback for Windows 8.1 and older
+        SetProcessDPIAware();
+    }
+}
+
 static void build_out_path(wchar_t *path, int n) {
     SYSTEMTIME st; 
     GetLocalTime(&st);
