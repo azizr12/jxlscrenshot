@@ -173,6 +173,9 @@ static void execute_set_path(void) {
 /* ------------------------------------------------------------------ */
 /* About Dialog with Clickable Hyperlink and Custom Header Icon       */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* About Dialog with Clickable Hyperlink and Custom Header Icon       */
+/* ------------------------------------------------------------------ */
 static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
     if (msg == TDN_HYPERLINK_CLICKED) {
         ShellExecuteW(hwnd, L"open", (LPCWSTR)lParam, NULL, NULL, SW_SHOWNORMAL);
@@ -185,7 +188,11 @@ static void execute_about(void) {
 
     TASKDIALOGCONFIG config = {0};
     config.cbSize = sizeof(TASKDIALOGCONFIG);
-    config.hwndParent = NULL;
+    
+    // CRITICAL FIX: Use the dark-mode-enabled hidden window as the parent.
+    // Task Dialogs inherit their theme (Light/Dark) from their parent window.
+    config.hwndParent = g_hwndMenuOwner ? g_hwndMenuOwner : NULL;
+    
     config.hInstance = NULL;
     config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_HICON_MAIN;
     config.pszWindowTitle = L"About";
