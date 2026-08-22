@@ -199,53 +199,50 @@ static void crop_and_encode_region(RECT *r) {
 LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_PAINT: {
-            PAINTSTRUCT ps;
+            PAINTSTRUCT ps; 
             HDC hdc = BeginPaint(hwnd, &ps);
-
-            // 1. Dark mode overlay background (Dark Gray: RGB 20, 20, 20)
-            HBRUSH hDarkBrush = CreateSolidBrush(RGB(20, 20, 20));
-            HRGN hRgnScreen = CreateRectRgn(0, 0, g_screenW, g_screenH);
-
-            if (g_isSelecting || (g_selRect.right > g_selRect.left && g_selRect.bottom > g_selRect.top)) {
-                HRGN hRgnSel = CreateRectRgn(g_selRect.left, g_selRect.top, g_selRect.right, g_selRect.bottom);
-                CombineRgn(hRgnScreen, hRgnScreen, hRgnSel, RGN_DIFF);
-                DeleteObject(hRgnSel);
-            }
             
-            FillRgn(hdc, hRgnScreen, hDarkBrush);
-            DeleteObject(hRgnScreen);
+            // 1. Restore the original screen capture
+            BitBlt(hdc, 0, 0, g_screenW, g_screenH, g_hdcMem, 0, 0, SRCCOPY);
+            
+            // 2. Apply dark mode overlay (Alpha 120 provides a modern dimmed effect)
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 120, 0 };
+            AlphaBlend(hdc, 0, 0, g_screenW, g_screenH, g_hdcBlack, 0, 0, 1, 1, bf);
 
-            // 2. Modern Accent Color Border (Windows Blue: #0078D4)
-            if (g_isSelecting || (g_selRect.right > g_selRect.left && g_selRect.bottom > g_selRect.top)) {
-                HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 120, 212));
+            // 3. Draw the selection area and border
+            if (g_isDragging || (g_rcSel.right > g_rcSel.left && g_rcSel.bottom > g_rcSel.top)) {
+                int x = min(g_rcSel.left, g_rcSel.right);
+                int y = min(g_rcSel.top, g_rcSel.bottom);
+                int w = abs(g_rcSel.right - g_rcSel.left);
+                int h = abs(g_rcSel.bottom - g_rcSel.top);
+                
+                // Restore the clear (non-dimmed) image in the selected region
+                BitBlt(hdc, x, y, w, h, g_hdcMem, x, y, SRCCOPY);
+                
+                // Modern Accent Color Border (Windows Blue: #0078D7)
+                HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
                 HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
-                HBRUSH hNullBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
-                HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hNullBrush);
+                HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                Rectangle(hdc, x, y, x + w, y + h);
                 
-                Rectangle(hdc, g_selRect.left, g_selRect.top, g_selRect.right, g_selRect.bottom);
-                
-                // Restore original GDI objects and clean up
-                SelectObject(hdc, hOldPen);
-                SelectObject(hdc, hOldBrush);
+                // Clean up GDI objects properly
+                SelectObject(hdc, hOldBrush); 
+                SelectObject(hdc, hOldPen); 
                 DeleteObject(hPen);
 
-                // 3. Dimension Tooltip (White text, transparent background)
+                // 4. Dimension Tooltip (White text, transparent background)
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(255, 255, 255));
                 
                 wchar_t dimText[64];
-                int width = g_selRect.right - g_selRect.left;
-                int height = g_selRect.bottom - g_selRect.top;
-                _snwprintf(dimText, 64, L"%d × %d", width, height);
+                _snwprintf(dimText, 64, L"%d × %d", w, h);
                 
                 // Prevent tooltip from drawing off the top edge of the screen
-                int textY = (g_selRect.top - 28) < 0 ? (g_selRect.top + 8) : (g_selRect.top - 28);
-                
-                TextOutW(hdc, g_selRect.left + 8, textY, dimText, (int)wcslen(dimText));
+                int textY = (y - 24) < 0 ? (y + 8) : (y - 24);
+                TextOutW(hdc, x + 8, textY, dimText, (int)wcslen(dimText));
             }
-
-            DeleteObject(hDarkBrush);
-            EndPaint(hwnd, &ps);
+            
+            EndPaint(hwnd, &ps); 
             return 0;
         }
 
