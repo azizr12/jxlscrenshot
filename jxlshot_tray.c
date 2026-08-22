@@ -26,6 +26,9 @@
  *       -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.rc -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
  */
 
+
+
+
 #define UNICODE
 #define _UNICODE
 #define WINVER 0x0601
@@ -42,6 +45,40 @@
 #include <stdlib.h>
 #include <wchar.h>
 #include "jxlshot.c" // Pulls in core logic, config, and unified dbg() logger
+
+#include <uxtheme.h>
+
+// Undocumented but stable uxtheme APIs for Win32 Dark Mode (Windows 10 1903+)
+typedef enum _PreferredAppMode {
+    Default = 0,
+    AllowDark = 1,
+    ForceDark = 2,
+    ForceLight = 3,
+    Max = 4
+} PreferredAppMode;
+
+typedef PreferredAppMode (WINAPI *fnSetPreferredAppMode)(PreferredAppMode appMode);
+typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
+typedef void (WINAPI *fnFlushMenuThemes)(void);
+
+static void ApplyDarkMode(HWND hwnd) {
+    HMODULE hUxtheme = LoadLibraryW(L"uxtheme.dll");
+    if (hUxtheme) {
+        // Ordinals have remained stable since Windows 10 version 1903
+        fnSetPreferredAppMode pSetPreferredAppMode = (fnSetPreferredAppMode)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135));
+        fnAllowDarkModeForWindow pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133));
+        fnFlushMenuThemes pFlushMenuThemes = (fnFlushMenuThemes)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(136));
+
+        if (pSetPreferredAppMode && pAllowDarkModeForWindow && pFlushMenuThemes) {
+            pSetPreferredAppMode(AllowDark);
+            pAllowDarkModeForWindow(hwnd, TRUE);
+            pFlushMenuThemes(); // Forces existing menus to redraw with the new theme
+        }
+        FreeLibrary(hUxtheme);
+    }
+}
+
+static HWND g_hwndMenuOwner = NULL;
 
 #define WM_TRAYICON            (WM_USER + 1)
 #define WM_HOOK_FULL_CAPTURE   (WM_USER + 10)
@@ -78,8 +115,21 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, L"About...");
     AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
-    SetForegroundWindow(hwnd);
-    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, NULL);
+    
+    // Force dark mode on the transient menu window before displaying it
+    if (g_hwndMenuOwner) {
+        ApplyDarkMode(g_hwndMenuOwner);
+    }
+    
+    // Bring the hidden menu owner to the foreground so the menu inherits its theme
+    if (g_hwndMenuOwner) {
+        SetForegroundWindow(g_hwndMenuOwner);
+    } else {
+        SetForegroundWindow(hwnd);
+    }
+    
+    // Pass g_hwndMenuOwner, NOT the message-only g_hwndTray
+    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_hwndMenuOwner ? g_hwndMenuOwner : hwnd, NULL);
     DestroyMenu(hMenu); PostMessage(hwnd, WM_NULL, 0, 0);
 }
 
@@ -245,10 +295,6 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             EndPaint(hwnd, &ps); 
             return 0;
         }
-
-
-
-
 
         case WM_LBUTTONDOWN: {
             g_isDragging = TRUE; 
@@ -450,6 +496,10 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
         case WM_DESTROY:
             uninstall_keyboard_hook();
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
+            if (g_hwndMenuOwner) {
+                DestroyWindow(g_hwndMenuOwner);
+                g_hwndMenuOwner = NULL;
+            }
             PostQuitMessage(0); break;
         default: return DefWindowProcW(hwnd, msg, wp, lParam);
     }
@@ -471,6 +521,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     RegisterClassExW(&wc);
     
     g_hwndTray = CreateWindowExW(0, L"JxlShotTrayClass", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInst, NULL);
+    
+    // Create a hidden popup window specifically to own the context menu
+    g_hwndMenuOwner = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        L"JxlShotTrayClass",
+        L"", 
+        WS_POPUP,
+        0, 0, 0, 0,
+        NULL, NULL, hInst, NULL
+    );
+    ShowWindow(g_hwndMenuOwner, SW_HIDE);
+    ApplyDarkMode(g_hwndMenuOwner);
     
     ZeroMemory(&g_nid, sizeof(g_nid));
     g_nid.cbSize = sizeof(g_nid); 
@@ -494,5 +556,3 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     uninstall_keyboard_hook();
     return (int)msg.wParam;
 }
-
-
