@@ -34,7 +34,15 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <jxl/encode.h>
-
+/* ------------------------------------------------------------------ */
+/* Forward Declarations                                               */
+/* ------------------------------------------------------------------ */
+static void set_dpi_aware(void);
+static void init_paths(void);
+static void ensure_default_ini(void);
+static void init_config(void);
+static void dbg_init(void);
+static void build_out_path(wchar_t *path, int n);
 /* ------------------------------------------------------------------ */
 /* Configuration (INI)                                                */
 /* ------------------------------------------------------------------ */
