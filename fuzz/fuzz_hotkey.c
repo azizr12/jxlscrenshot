@@ -4,6 +4,7 @@
 #include <string.h>
 #include <wchar.h>
 #include <ctype.h>
+#include <wctype.h> // Added to resolve towlower/towupper implicit declaration errors
 
 // Mock Windows types and constants for Linux compilation
 typedef unsigned int UINT;
