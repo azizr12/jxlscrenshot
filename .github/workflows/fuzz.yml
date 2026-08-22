@@ -1,0 +1,33 @@
+name: Fuzz Testing
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  # Optional: Run daily to catch regressions over time
+  schedule:
+    - cron: '0 0 * * *'
+
+jobs:
+  fuzz-hotkey:
+    name: Run libFuzzer on Hotkey Parser
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Compile Fuzz Target
+        run: |
+          # -fsanitize=fuzzer enables libFuzzer
+          # -fsanitize=address,undefined enables memory and UB detection
+          clang -fsanitize=fuzzer,address,undefined -g -O1 fuzz/fuzz_hotkey.c -o fuzz_hotkey_test
+
+      - name: Run Fuzzer
+        run: |
+          # Run for 60 seconds. If a crash is found, libFuzzer exits with a non-zero code, failing the CI.
+          # -timeout=10 prevents infinite loops from hanging the workflow.
+          ./fuzz_hotkey_test -max_total_time=60 -timeout=10
