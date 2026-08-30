@@ -33,6 +33,7 @@
 #include <jxl/encode.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
+#include <dxgi1_5.h>
 
 /* ------------------------------------------------------------------ */
 /* Forward Declarations                                               */
@@ -297,6 +298,7 @@ static int grab_primary_monitor(Grab *g) {
     IDXGIAdapter1 *adapter = NULL;
     IDXGIOutput *output = NULL;
     IDXGIOutput1 *output1 = NULL;
+    IDXGIOutput5 *output5 = NULL;
     IDXGIOutputDuplication *dupl = NULL;
     IDXGIResource *resource = NULL;
     ID3D11Texture2D *tex = NULL;
@@ -307,8 +309,50 @@ static int grab_primary_monitor(Grab *g) {
     if (FAILED(factory->lpVtbl->EnumAdapters1(factory, 0, &adapter))) goto cleanup;
     if (FAILED(adapter->lpVtbl->EnumOutputs(adapter, 0, &output))) goto cleanup;
     if (FAILED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput1, (void**)&output1))) goto cleanup;
-    if (FAILED(D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0, D3D11_SDK_VERSION, &device, NULL, &ctx))) goto cleanup;
-    if (FAILED(output1->lpVtbl->DuplicateOutput(output1, (IUnknown*)device, &dupl))) goto cleanup;
+
+    /*
+     * The D3D11 device must be created from the same adapter that owns
+     * the output being duplicated. Using NULL here can select a different
+     * adapter and is not valid for DuplicateOutput1.
+     */
+    if (FAILED(D3D11CreateDevice(
+        (IDXGIAdapter *)adapter,
+        D3D_DRIVER_TYPE_UNKNOWN,
+        NULL,
+        0,
+        NULL,
+        0,
+        D3D11_SDK_VERSION,
+        &device,
+        NULL,
+        &ctx))) goto cleanup;
+
+    /*
+     * DuplicateOutput() always gives the desktop as 32-bit BGRA.
+     * DuplicateOutput1() is required when we want the native HDR FP16
+     * desktop surface.
+     */
+    if (SUCCEEDED(output->lpVtbl->QueryInterface(
+        output, &IID_IDXGIOutput5, (void**)&output5))) {
+
+        const DXGI_FORMAT supported_formats[] = {
+            DXGI_FORMAT_R16G16B16A16_FLOAT,
+            DXGI_FORMAT_B8G8R8A8_UNORM
+        };
+
+        if (FAILED(output5->lpVtbl->DuplicateOutput1(
+            output5,
+            (IUnknown *)device,
+            0,
+            (UINT)(sizeof(supported_formats) / sizeof(supported_formats[0])),
+            supported_formats,
+            &dupl))) {
+            goto cleanup;
+        }
+    } else {
+        if (FAILED(output1->lpVtbl->DuplicateOutput(
+            output1, (IUnknown *)device, &dupl))) goto cleanup;
+    }
 
     DXGI_OUTDUPL_FRAME_INFO frame_info;
     if (FAILED(dupl->lpVtbl->AcquireNextFrame(dupl, 1000, &frame_info, &resource))) goto cleanup;
@@ -345,9 +389,13 @@ static int grab_primary_monitor(Grab *g) {
         uint8_t *src = src_row;
         for (int x = 0; x < g->w; x++) {
             if (g->is_hdr) {
-                dst[0] = src[4]; dst[1] = src[5]; // R
+                /*
+                 * DXGI_FORMAT_R16G16B16A16_FLOAT is RGBA, not BGRA.
+                 * Keep the R/G/B channels in their original order.
+                 */
+                dst[0] = src[0]; dst[1] = src[1]; // R
                 dst[2] = src[2]; dst[3] = src[3]; // G
-                dst[4] = src[0]; dst[5] = src[1]; // B
+                dst[4] = src[4]; dst[5] = src[5]; // B
                 dst += 6;
                 src += 8;
             } else {
@@ -372,6 +420,7 @@ cleanup:
     if (dupl) dupl->lpVtbl->Release(dupl);
     if (ctx) ctx->lpVtbl->Release(ctx);
     if (device) device->lpVtbl->Release(device);
+    if (output5) output5->lpVtbl->Release(output5);
     if (output1) output1->lpVtbl->Release(output1);
     if (output) output->lpVtbl->Release(output);
     if (adapter) adapter->lpVtbl->Release(adapter);
@@ -410,6 +459,17 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
         info.bits_per_sample = 16;
         info.exponent_bits_per_sample = 5; // Indicates float16
         fmt.data_type = JXL_TYPE_FLOAT16;
+
+        /*
+         * DXGI HDR desktop duplication uses scRGB:
+         *
+         *   R/G/B = linear-light sRGB
+         *   1.0    = SDR white reference (80 nits)
+         *   values > 1.0 represent HDR highlights
+         *
+         * Leave the samples untouched. libjxl accepts floating-point
+         * samples outside 0..1 and encodes them as extended linear sRGB.
+         */
     } else {
         info.bits_per_sample = 8;
         info.exponent_bits_per_sample = 0;
@@ -420,10 +480,19 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     
     JxlColorEncoding ce;
     if (is_hdr) {
-        ce.color_space = JXL_COLOR_SPACE_RGB;
-        ce.white_point = JXL_WHITE_POINT_D65;
-        ce.primaries = JXL_PRIMARIES_SRGB;
-        ce.transfer_function = JXL_TRANSFER_FUNCTION_LINEAR;
+        /*
+         * The captured FP16 samples are linear scRGB.
+         * Use libjxl's canonical linear-sRGB setup rather than
+         * manually constructing the same fields.
+         */
+        JxlColorEncodingSetToLinearSRGB(&ce, JXL_FALSE);
+
+        /*
+         * scRGB is a relative-luminance color space whose 1.0 level
+         * corresponds to the SDR reference white. Leave intensity_target
+         * at its default (0) so libjxl chooses the appropriate target
+         * for linear sRGB rather than falsely declaring a fixed HDR peak.
+         */
     } else {
         JxlColorEncodingSetToSRGB(&ce, JXL_FALSE);
     }
