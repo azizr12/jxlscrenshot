@@ -289,7 +289,142 @@ typedef struct {
     int is_hdr; // 1 if FP16 scRGB, 0 if 8-bit SDR
 } Grab;
 
-static int grab_primary_monitor(Grab *g) {
+/* ------------------------------------------------------------------ */
+/* Blank-frame detection                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Sparsely samples the buffer instead of scanning every byte — a
+ * screenshot doesn't need forensic certainty, just "is this basically
+ * a solid black rectangle". Checks a grid of points; if effectively
+ * all of them are near-zero, treat the frame as blank/failed.
+ */
+static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr) {
+    if (!rgb || w <= 0 || h <= 0) return 1;
+
+    size_t bpp = is_hdr ? 6 : 3;
+    int cols = 16, rows = 16;
+    int nonblack = 0, sampled = 0;
+
+    for (int r = 0; r < rows; r++) {
+        int y = (h * r) / rows;
+        for (int c = 0; c < cols; c++) {
+            int x = (w * c) / cols;
+            const uint8_t *px = rgb + ((size_t)y * w + x) * bpp;
+            sampled++;
+
+            if (is_hdr) {
+                /* FP16: treat any non-zero bit pattern in R/G/B as "not black" */
+                if (px[0] | px[1] | px[2] | px[3] | px[4] | px[5]) nonblack++;
+            } else {
+                if (px[0] > 4 || px[1] > 4 || px[2] > 4) nonblack++;
+            }
+        }
+    }
+
+    /* If fewer than 1% of sampled points have any color, call it blank */
+    return (nonblack * 100) < sampled;
+}
+
+/* ------------------------------------------------------------------ */
+/* GDI BitBlt fallback capture (works without DXGI Desktop Duplication)*/
+/* ------------------------------------------------------------------ */
+
+/*
+ * Classic BitBlt screen capture. Always SDR/8-bit, but far more
+ * broadly compatible than DXGI Desktop Duplication — it doesn't
+ * depend on DWM, doesn't care about weak/legacy GPU drivers, and
+ * works even when Desktop Duplication silently returns black frames.
+ * Used as a fallback when the DXGI path fails or produces a blank
+ * frame after retrying.
+ */
+static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
+    ZeroMemory(g, sizeof *g);
+
+    MONITORINFO mi = { sizeof(mi) };
+    if (!GetMonitorInfoW(target_monitor, &mi)) {
+        dbg("gdi: GetMonitorInfo FAILED");
+        return 0;
+    }
+
+    int x = mi.rcMonitor.left;
+    int y = mi.rcMonitor.top;
+    int w = mi.rcMonitor.right - mi.rcMonitor.left;
+    int h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    if (w <= 0 || h <= 0) { dbg("gdi: invalid monitor rect"); return 0; }
+
+    HDC hdcScreen = GetDC(NULL);
+    if (!hdcScreen) { dbg("gdi: GetDC FAILED"); return 0; }
+
+    HDC hdcMem = CreateCompatibleDC(hdcScreen);
+    if (!hdcMem) { dbg("gdi: CreateCompatibleDC FAILED"); ReleaseDC(NULL, hdcScreen); return 0; }
+
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h; /* top-down */
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void *dibBits = NULL;
+    HBITMAP hbm = CreateDIBSection(hdcScreen, &bi, DIB_RGB_COLORS, &dibBits, NULL, 0);
+    if (!hbm || !dibBits) {
+        dbg("gdi: CreateDIBSection FAILED");
+        DeleteDC(hdcMem); ReleaseDC(NULL, hdcScreen);
+        return 0;
+    }
+
+    HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, hbm);
+
+    /* CAPTUREBLT pulls in layered/UI-composited windows too, not just
+     * the raw framebuffer, which matters on some setups. */
+    BOOL blt_ok = BitBlt(hdcMem, 0, 0, w, h, hdcScreen, x, y, SRCCOPY | CAPTUREBLT);
+
+    SelectObject(hdcMem, hbmOld);
+    ReleaseDC(NULL, hdcScreen);
+
+    if (!blt_ok) {
+        dbg("gdi: BitBlt FAILED");
+        DeleteObject(hbm); DeleteDC(hdcMem);
+        return 0;
+    }
+
+    /* Convert BGRA (DIB) -> tightly packed RGB, matching the SDR
+     * layout the rest of the pipeline (encode_jxl_identity) expects. */
+    g->w = w; g->h = h; g->is_hdr = 0;
+    g->size = (size_t)w * h * 3;
+    g->bits = (uint8_t *)malloc(g->size);
+    if (!g->bits) {
+        dbg("gdi: malloc FAILED");
+        DeleteObject(hbm); DeleteDC(hdcMem);
+        return 0;
+    }
+
+    const uint8_t *src = (const uint8_t *)dibBits;
+    uint8_t *dst = g->bits;
+    for (int py = 0; py < h; py++) {
+        const uint8_t *srow = src + (size_t)py * w * 4;
+        for (int px = 0; px < w; px++) {
+            dst[0] = srow[2]; /* R */
+            dst[1] = srow[1]; /* G */
+            dst[2] = srow[0]; /* B */
+            dst += 3;
+            srow += 4;
+        }
+    }
+
+    DeleteObject(hbm);
+    DeleteDC(hdcMem);
+
+    dbg("gdi: capture ok w=%d h=%d", w, h);
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* DXGI Desktop Duplication capture, with retry + blank detection     */
+/* ------------------------------------------------------------------ */
+static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
     ZeroMemory(g, sizeof *g);
 
     ID3D11Device *device = NULL;
@@ -305,61 +440,45 @@ static int grab_primary_monitor(Grab *g) {
     ID3D11Texture2D *staging = NULL;
     int ok = 0;
 
-    dbg("grab: start");
+    dbg("dxgi: start");
 
     if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void**)&factory))) {
-        dbg("grab: CreateDXGIFactory1 FAILED"); goto cleanup;
+        dbg("dxgi: CreateDXGIFactory1 FAILED"); goto cleanup;
     }
 
-    {
-        HMONITOR target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
-        dbg("grab: target_monitor=0x%p", (void*)target_monitor);
+    for (UINT ai = 0; !adapter; ai++) {
+        IDXGIAdapter1 *cand_adapter = NULL;
+        HRESULT hr = factory->lpVtbl->EnumAdapters1(factory, ai, &cand_adapter);
+        if (hr == DXGI_ERROR_NOT_FOUND) break;
+        if (!cand_adapter) continue;
 
-        for (UINT ai = 0; !adapter; ai++) {
-            IDXGIAdapter1 *cand_adapter = NULL;
-            HRESULT hr = factory->lpVtbl->EnumAdapters1(factory, ai, &cand_adapter);
-            if (hr == DXGI_ERROR_NOT_FOUND) { dbg("grab: EnumAdapters1 exhausted at index %u", ai); break; }
-            if (!cand_adapter) continue;
+        for (UINT oi = 0; ; oi++) {
+            IDXGIOutput *cand_output = NULL;
+            if (cand_adapter->lpVtbl->EnumOutputs(cand_adapter, oi, &cand_output) == DXGI_ERROR_NOT_FOUND) break;
+            if (!cand_output) continue;
 
-            DXGI_ADAPTER_DESC1 adesc;
-            cand_adapter->lpVtbl->GetDesc1(cand_adapter, &adesc);
-            dbg("grab: adapter %u = %ls", ai, adesc.Description);
-
-            for (UINT oi = 0; ; oi++) {
-                IDXGIOutput *cand_output = NULL;
-                if (cand_adapter->lpVtbl->EnumOutputs(cand_adapter, oi, &cand_output) == DXGI_ERROR_NOT_FOUND) break;
-                if (!cand_output) continue;
-
-                DXGI_OUTPUT_DESC out_desc;
-                if (SUCCEEDED(cand_output->lpVtbl->GetDesc(cand_output, &out_desc))) {
-                    dbg("grab:   output %u monitor=0x%p attached=%d",
-                        oi, (void*)out_desc.Monitor, out_desc.AttachedToDesktop);
-                    if (out_desc.Monitor == target_monitor) {
-                        adapter = cand_adapter;
-                        output  = cand_output;
-                        dbg("grab:   -> MATCHED this output");
-                        break;
-                    }
-                }
-                cand_output->lpVtbl->Release(cand_output);
+            DXGI_OUTPUT_DESC out_desc;
+            if (SUCCEEDED(cand_output->lpVtbl->GetDesc(cand_output, &out_desc)) &&
+                out_desc.Monitor == target_monitor) {
+                adapter = cand_adapter;
+                output  = cand_output;
+                break;
             }
-
-            if (!adapter) cand_adapter->lpVtbl->Release(cand_adapter);
+            cand_output->lpVtbl->Release(cand_output);
         }
+        if (!adapter) cand_adapter->lpVtbl->Release(cand_adapter);
     }
 
-    if (!adapter || !output) { dbg("grab: no matching adapter/output found"); goto cleanup; }
-
+    if (!adapter || !output) { dbg("dxgi: no matching adapter/output"); goto cleanup; }
     if (FAILED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput1, (void**)&output1))) {
-        dbg("grab: QI IDXGIOutput1 FAILED"); goto cleanup;
+        dbg("dxgi: QI IDXGIOutput1 FAILED"); goto cleanup;
     }
 
     if (FAILED(D3D11CreateDevice(
         (IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0,
         D3D11_SDK_VERSION, &device, NULL, &ctx))) {
-        dbg("grab: D3D11CreateDevice FAILED"); goto cleanup;
+        dbg("dxgi: D3D11CreateDevice FAILED"); goto cleanup;
     }
-    dbg("grab: device created");
 
     if (SUCCEEDED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput5, (void**)&output5))) {
         const DXGI_FORMAT supported_formats[] = {
@@ -367,91 +486,107 @@ static int grab_primary_monitor(Grab *g) {
         };
         HRESULT hr = output5->lpVtbl->DuplicateOutput1(
             output5, (IUnknown *)device, 0, 2, supported_formats, &dupl);
-        if (FAILED(hr)) { dbg("grab: DuplicateOutput1 FAILED hr=0x%08lX", hr); goto cleanup; }
-        dbg("grab: DuplicateOutput1 ok");
+        if (FAILED(hr)) { dbg("dxgi: DuplicateOutput1 FAILED hr=0x%08lX", hr); goto cleanup; }
     } else {
         HRESULT hr = output1->lpVtbl->DuplicateOutput(output1, (IUnknown *)device, &dupl);
-        if (FAILED(hr)) { dbg("grab: DuplicateOutput FAILED hr=0x%08lX", hr); goto cleanup; }
-        dbg("grab: DuplicateOutput ok");
+        if (FAILED(hr)) { dbg("dxgi: DuplicateOutput FAILED hr=0x%08lX", hr); goto cleanup; }
     }
-
-    DXGI_OUTDUPL_FRAME_INFO frame_info;
-    HRESULT hr = dupl->lpVtbl->AcquireNextFrame(dupl, 1000, &frame_info, &resource);
-    if (FAILED(hr)) { dbg("grab: AcquireNextFrame (warmup) FAILED hr=0x%08lX", hr); goto cleanup; }
 
     /*
-    * Some GPU drivers (especially older/low-end ones like Kepler-era
-    * NVIDIA cards) return a stale or fully black frame on the very
-    * first AcquireNextFrame call right after the duplication interface
-    * is created. Discard this frame and acquire a second, real one.
-    */
-    dupl->lpVtbl->ReleaseFrame(dupl);
-    resource->lpVtbl->Release(resource);
-    resource = NULL;
+     * Retry loop: acquire frames repeatedly, discarding blank/stale
+     * ones, up to a fixed number of attempts. Weak/legacy drivers
+     * (older Kepler-class NVIDIA cards among them) are known to
+     * occasionally hand back black frames for several calls in a row
+     * right after the duplication interface is (re)created.
+     */
+    {
+        const int MAX_ATTEMPTS = 8;
+        for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+            if (resource) { resource->lpVtbl->Release(resource); resource = NULL; }
+            if (tex) { tex->lpVtbl->Release(tex); tex = NULL; }
 
-    hr = dupl->lpVtbl->AcquireNextFrame(dupl, 1000, &frame_info, &resource);
-    if (FAILED(hr)) { dbg("grab: AcquireNextFrame (real) FAILED hr=0x%08lX", hr); goto cleanup; }
-    dbg("grab: frame acquired");
-
-    if (FAILED(resource->lpVtbl->QueryInterface(resource, &IID_ID3D11Texture2D, (void**)&tex))) {
-        dbg("grab: QI ID3D11Texture2D FAILED"); goto cleanup;
-    }
-
-    D3D11_TEXTURE2D_DESC desc;
-    tex->lpVtbl->GetDesc(tex, &desc);
-    g->w = desc.Width;
-    g->h = desc.Height;
-    g->is_hdr = (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 1 : 0;
-    dbg("grab: w=%d h=%d hdr=%d fmt=%d", g->w, g->h, g->is_hdr, desc.Format);
-
-    D3D11_TEXTURE2D_DESC staging_desc = desc;
-    staging_desc.Usage = D3D11_USAGE_STAGING;
-    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    staging_desc.BindFlags = 0;
-    staging_desc.MiscFlags = 0;
-
-    if (FAILED(device->lpVtbl->CreateTexture2D(device, &staging_desc, NULL, &staging))) {
-        dbg("grab: CreateTexture2D(staging) FAILED"); goto cleanup;
-    }
-    ctx->lpVtbl->CopyResource(ctx, (ID3D11Resource*)staging, (ID3D11Resource*)tex);
-
-    D3D11_MAPPED_SUBRESOURCE mapped;
-    if (FAILED(ctx->lpVtbl->Map(ctx, (ID3D11Resource*)staging, 0, D3D11_MAP_READ, 0, &mapped))) {
-        dbg("grab: Map FAILED"); goto cleanup;
-    }
-    dbg("grab: mapped, pitch=%u", (unsigned)mapped.RowPitch);
-
-    size_t rgb_bpp = g->is_hdr ? 6 : 3;
-    g->size = (size_t)g->w * g->h * rgb_bpp;
-    g->bits = (uint8_t *)malloc(g->size);
-    if (!g->bits) { dbg("grab: malloc FAILED size=%zu", g->size); goto cleanup; }
-
-    uint8_t *dst = g->bits;
-    uint8_t *src_row = (uint8_t *)mapped.pData;
-    size_t src_pitch = mapped.RowPitch;
-
-    for (int y = 0; y < g->h; y++) {
-        uint8_t *src = src_row;
-        for (int x = 0; x < g->w; x++) {
-            if (g->is_hdr) {
-                dst[0] = src[0]; dst[1] = src[1];
-                dst[2] = src[2]; dst[3] = src[3];
-                dst[4] = src[4]; dst[5] = src[5];
-                dst += 6; src += 8;
-            } else {
-                dst[0] = src[2]; dst[1] = src[1]; dst[2] = src[0];
-                dst += 3; src += 4;
+            DXGI_OUTDUPL_FRAME_INFO frame_info;
+            HRESULT hr = dupl->lpVtbl->AcquireNextFrame(dupl, 500, &frame_info, &resource);
+            if (FAILED(hr)) {
+                dbg("dxgi: AcquireNextFrame attempt %d FAILED hr=0x%08lX", attempt, hr);
+                goto cleanup;
             }
-        }
-        src_row += src_pitch;
-    }
 
-    ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
-    ok = 1;
-    dbg("grab: success");
+            if (FAILED(resource->lpVtbl->QueryInterface(resource, &IID_ID3D11Texture2D, (void**)&tex))) {
+                dbg("dxgi: QI ID3D11Texture2D FAILED"); dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
+            }
+
+            D3D11_TEXTURE2D_DESC desc;
+            tex->lpVtbl->GetDesc(tex, &desc);
+            g->w = desc.Width;
+            g->h = desc.Height;
+            g->is_hdr = (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 1 : 0;
+
+            D3D11_TEXTURE2D_DESC staging_desc = desc;
+            staging_desc.Usage = D3D11_USAGE_STAGING;
+            staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            staging_desc.BindFlags = 0;
+            staging_desc.MiscFlags = 0;
+
+            if (staging) { staging->lpVtbl->Release(staging); staging = NULL; }
+            if (FAILED(device->lpVtbl->CreateTexture2D(device, &staging_desc, NULL, &staging))) {
+                dbg("dxgi: CreateTexture2D(staging) FAILED");
+                dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
+            }
+            ctx->lpVtbl->CopyResource(ctx, (ID3D11Resource*)staging, (ID3D11Resource*)tex);
+
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            if (FAILED(ctx->lpVtbl->Map(ctx, (ID3D11Resource*)staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+                dbg("dxgi: Map FAILED");
+                dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
+            }
+
+            size_t rgb_bpp = g->is_hdr ? 6 : 3;
+            if (g->bits) { free(g->bits); g->bits = NULL; }
+            g->size = (size_t)g->w * g->h * rgb_bpp;
+            g->bits = (uint8_t *)malloc(g->size);
+            if (!g->bits) {
+                dbg("dxgi: malloc FAILED");
+                ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
+                dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
+            }
+
+            uint8_t *dst = g->bits;
+            uint8_t *src_row = (uint8_t *)mapped.pData;
+            size_t src_pitch = mapped.RowPitch;
+
+            for (int py = 0; py < g->h; py++) {
+                uint8_t *src = src_row;
+                for (int px = 0; px < g->w; px++) {
+                    if (g->is_hdr) {
+                        dst[0]=src[0]; dst[1]=src[1]; dst[2]=src[2];
+                        dst[3]=src[3]; dst[4]=src[4]; dst[5]=src[5];
+                        dst += 6; src += 8;
+                    } else {
+                        dst[0]=src[2]; dst[1]=src[1]; dst[2]=src[0];
+                        dst += 3; src += 4;
+                    }
+                }
+                src_row += src_pitch;
+            }
+
+            ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
+            dupl->lpVtbl->ReleaseFrame(dupl);
+
+            if (!is_frame_blank(g->bits, g->w, g->h, g->is_hdr)) {
+                dbg("dxgi: attempt %d produced non-blank frame, accepting", attempt);
+                ok = 1;
+                break;
+            }
+
+            dbg("dxgi: attempt %d frame is blank, retrying", attempt);
+            Sleep(60);
+        }
+
+        if (!ok) dbg("dxgi: all attempts produced blank frames, giving up on DXGI");
+    }
 
 cleanup:
-    if (dupl && resource) dupl->lpVtbl->ReleaseFrame(dupl);
     if (staging) staging->lpVtbl->Release(staging);
     if (tex) tex->lpVtbl->Release(tex);
     if (resource) resource->lpVtbl->Release(resource);
@@ -465,8 +600,22 @@ cleanup:
     if (factory) factory->lpVtbl->Release(factory);
 
     if (!ok && g->bits) { free(g->bits); g->bits = NULL; }
-    dbg("grab: end ok=%d", ok);
+    dbg("dxgi: end ok=%d", ok);
     return ok;
+}
+
+/* ------------------------------------------------------------------ */
+/* Public entry point: try DXGI first, fall back to GDI               */
+/* ------------------------------------------------------------------ */
+static int grab_primary_monitor(Grab *g) {
+    HMONITOR target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+
+    if (grab_via_dxgi(g, target_monitor)) {
+        return 1;
+    }
+
+    dbg("grab: DXGI path failed or stayed blank, falling back to GDI BitBlt");
+    return grab_via_gdi(g, target_monitor);
 }
 
 static void free_grab(Grab *g) {
