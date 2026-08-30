@@ -34,6 +34,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <jxl/encode.h>
+#include "jxlshot_hdr.h"
 /* ------------------------------------------------------------------ */
 /* Forward Declarations                                               */
 /* ------------------------------------------------------------------ */
@@ -51,6 +52,8 @@ typedef struct {
     int     lossless;
     float   distance;
     int     show_cursor;
+    int     force_sdr;
+    int     hdr_enabled;
     wchar_t export_path[MAX_PATH];
     UINT    hk_full_mod;
     UINT    hk_full_vk;
