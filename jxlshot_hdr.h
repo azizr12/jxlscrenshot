@@ -1,3 +1,6 @@
+/*  jxlshot_hdr.h  
+ */
+
 #ifndef JXLSHOT_HDR_H
 #define JXLSHOT_HDR_H
 

@@ -26,7 +26,7 @@
  *       -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.rc -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
  */
 
-
+/*    jxlshot_tray.c      */
 
 
 #define UNICODE

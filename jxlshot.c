@@ -1,4 +1,4 @@
-/*
+/* jxlshot.c
 * Captures the primary monitor and saves it as JPEG XL (.jxl).
 *
 * Usage:
