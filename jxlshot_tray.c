@@ -17,7 +17,6 @@
  * NOT SURE IF HDR WILL WORK MAY BE JUST A DEAD CODE THAT ADD BLOAT
  *   IF  I HAD HDR MONITOR I MIGHT MAKE SURE IT WILL WORK
  */
-
 #define UNICODE
 #define _UNICODE
 #define WINVER 0x0601
@@ -120,7 +119,10 @@ static void execute_full_capture(void) {
         return;
     }
     
-    int is_hdr = !g_cfg.force_sdr && (g_dxgi.format == DXGI_FORMAT_R16G16B16A16_FLOAT || g_dxgi.format == DXGI_FORMAT_R10G10B10A2_UNORM);
+    /* Only true scRGB (R16G16B16A16_FLOAT) desktop data is real HDR; see
+     * the comment on save_dxgi_as_jxl() in jxlshot.c for why
+     * R10G10B10A2_UNORM is intentionally excluded here. */
+    int is_hdr = !g_cfg.force_sdr && (g_dxgi.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
     wchar_t out_path[MAX_PATH]; 
     build_out_path(out_path, MAX_PATH, is_hdr);
     

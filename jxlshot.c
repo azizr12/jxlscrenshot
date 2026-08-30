@@ -240,6 +240,59 @@ static float half_to_float(uint16_t h) {
     return result;
 }
 
+/* ---- HDR color pipeline helpers -------------------------------------
+ * Windows composes an HDR desktop into DXGI_FORMAT_R16G16B16A16_FLOAT
+ * ("scRGB"): linear-light samples using Rec.709/sRGB primaries, where
+ * 1.0 = 80 nits (the SDR reference white) and values can go negative
+ * (extended gamut) or well above 1.0 (HDR highlights, up to ~125.0 for
+ * 10,000 nits). JPEG XL's PQ transfer function instead expects samples
+ * that are ALREADY PQ (ST.2084) encoded in Rec.2020/2100 primaries,
+ * normalized so 1.0 = 10,000 nits. The two encodings are NOT
+ * interchangeable, so scRGB data must be explicitly converted:
+ *   1) Rec.709 primaries -> Rec.2020 primaries (still linear light)
+ *   2) Rescale from "1.0 = 80 nits" to "1.0 = 10,000 nits"
+ *   3) Apply the ST.2084 (PQ) OETF to get the actual PQ code values
+ * ---------------------------------------------------------------------*/
+#define SCRGB_REFERENCE_WHITE_NITS 80.0f
+#define PQ_MAX_NITS                10000.0f
+
+static float pq_oetf(float L) {
+    /* L: normalized scene-linear light, 0.0-1.0 where 1.0 == 10,000 nits */
+    if (L < 0.0f) L = 0.0f;
+    if (L > 1.0f) L = 1.0f;
+    const float m1 = 0.1593017578125f;
+    const float m2 = 78.84375f;
+    const float c1 = 0.8359375f;
+    const float c2 = 18.8515625f;
+    const float c3 = 18.6875f;
+    float Lm1 = powf(L, m1);
+    float num = c1 + c2 * Lm1;
+    float den = 1.0f + c3 * Lm1;
+    return powf(num / den, m2);
+}
+
+static void rec709_to_rec2020_linear(float r, float g, float b, float *outR, float *outG, float *outB) {
+    /* Standard BT.709 -> BT.2020 primary conversion matrix (linear light, D65). */
+    *outR = 0.6274040f * r + 0.3292820f * g + 0.0433136f * b;
+    *outG = 0.0690970f * r + 0.9195400f * g + 0.0113612f * b;
+    *outB = 0.0163916f * r + 0.0880132f * g + 0.8955950f * b;
+}
+
+static void unpack_r10g10b10a2_to_bgra8(const uint8_t *data, size_t npix, uint8_t *out_bgra) {
+    const uint32_t *src = (const uint32_t *)data;
+    uint32_t *dst = (uint32_t *)out_bgra;
+    for (size_t i = 0; i < npix; i++) {
+        uint32_t px = src[i];
+        uint32_t r10 = px & 0x3FF;
+        uint32_t g10 = (px >> 10) & 0x3FF;
+        uint32_t b10 = (px >> 20) & 0x3FF;
+        uint8_t r8 = (uint8_t)(r10 >> 2);
+        uint8_t g8 = (uint8_t)(g10 >> 2);
+        uint8_t b8 = (uint8_t)(b10 >> 2);
+        dst[i] = (0xFFu << 24) | ((uint32_t)r8 << 16) | ((uint32_t)g8 << 8) | b8;
+    }
+}
+
 typedef struct { HBITMAP hbmp; HDC hdc; uint8_t *bits; int w, h; } Grab;
 
 static int grab_primary_monitor(Grab *g) {
@@ -431,9 +484,55 @@ static void free_grab_dxgi(GrabDXGI *g) {
 }
 
 static int save_dxgi_as_jxl(const uint8_t *data, int w, int h, DXGI_FORMAT fmt, int lossless, float distance, int force_sdr, const wchar_t *path) {
-    int is_hdr = !force_sdr && (fmt == DXGI_FORMAT_R16G16B16A16_FLOAT || fmt == DXGI_FORMAT_R10G10B10A2_UNORM);
-    if (!is_hdr) return save_bgra_as_jxl(data, w, h, lossless, distance, path);
+    /* Only DXGI_FORMAT_R16G16B16A16_FLOAT (scRGB) is genuine HDR data from
+     * Desktop Duplication. R10G10B10A2_UNORM has no PQ/HDR metadata attached
+     * to it in this API - treating it as PQ was producing corrupt colors. */
+    int is_hdr = !force_sdr && (fmt == DXGI_FORMAT_R16G16B16A16_FLOAT);
 
+    if (!is_hdr) {
+        if (fmt == DXGI_FORMAT_R10G10B10A2_UNORM) {
+            /* 10-bit desktop, not HDR: unpack to 8bpc and encode normally. */
+            size_t npix = (size_t)w * h;
+            uint8_t *bgra8 = (uint8_t *)malloc(npix * 4);
+            if (!bgra8) return 0;
+            unpack_r10g10b10a2_to_bgra8(data, npix, bgra8);
+            int ok = save_bgra_as_jxl(bgra8, w, h, lossless, distance, path);
+            free(bgra8);
+            return ok;
+        }
+        if (fmt == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+            /* HDR desktop but caller asked for ForceSDR: clip scRGB to
+             * [0,1] (i.e. to the 80-nit SDR range) and gamma-encode. */
+            size_t npix = (size_t)w * h;
+            uint8_t *bgra8 = (uint8_t *)malloc(npix * 4);
+            if (!bgra8) return 0;
+            const uint16_t *src16 = (const uint16_t *)data;
+            uint8_t *dst8 = bgra8;
+            for (size_t i = 0; i < npix; i++) {
+                float r = half_to_float(src16[2]);
+                float g = half_to_float(src16[1]);
+                float b = half_to_float(src16[0]);
+                if (r < 0.0f) r = 0.0f; if (r > 1.0f) r = 1.0f;
+                if (g < 0.0f) g = 0.0f; if (g > 1.0f) g = 1.0f;
+                if (b < 0.0f) b = 0.0f; if (b > 1.0f) b = 1.0f;
+                float rs = (r <= 0.0031308f) ? (r * 12.92f) : (1.055f * powf(r, 1.0f / 2.4f) - 0.055f);
+                float gs = (g <= 0.0031308f) ? (g * 12.92f) : (1.055f * powf(g, 1.0f / 2.4f) - 0.055f);
+                float bs = (b <= 0.0031308f) ? (b * 12.92f) : (1.055f * powf(b, 1.0f / 2.4f) - 0.055f);
+                dst8[0] = (uint8_t)(bs * 255.0f + 0.5f);
+                dst8[1] = (uint8_t)(gs * 255.0f + 0.5f);
+                dst8[2] = (uint8_t)(rs * 255.0f + 0.5f);
+                dst8[3] = 0xFF;
+                src16 += 4; dst8 += 4;
+            }
+            int ok = save_bgra_as_jxl(bgra8, w, h, lossless, distance, path);
+            free(bgra8);
+            return ok;
+        }
+        /* Plain BGRA8 desktop. */
+        return save_bgra_as_jxl(data, w, h, lossless, distance, path);
+    }
+
+    /* ---- True HDR path: scRGB linear -> Rec.2020 PQ ---- */
     int ok = 0; 
     uint8_t *buf = NULL;
     JxlEncoder *enc = JxlEncoderCreate(NULL);
@@ -471,22 +570,30 @@ static int save_dxgi_as_jxl(const uint8_t *data, int w, int h, DXGI_FORMAT fmt, 
     if (!rgb) goto done;
     
     dst = rgb;
-    if (fmt == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+    {
         const uint16_t *src = (const uint16_t *)data;
+        const float scale = SCRGB_REFERENCE_WHITE_NITS / PQ_MAX_NITS; /* 80/10000 */
         for (i = 0; i < npix; i++) {
-            dst[0] = half_to_float(src[2]); dst[1] = half_to_float(src[1]); dst[2] = half_to_float(src[0]);
+            /* DXGI channel order in memory is B,G,R,A (little-endian halves). */
+            float r_lin = half_to_float(src[2]);
+            float g_lin = half_to_float(src[1]);
+            float b_lin = half_to_float(src[0]);
+
+            float r2020, g2020, b2020;
+            rec709_to_rec2020_linear(r_lin, g_lin, b_lin, &r2020, &g2020, &b2020);
+
+            /* Clamp out-of-gamut negatives introduced by the primary matrix
+             * or by scRGB's extended range before applying the PQ OETF. */
+            if (r2020 < 0.0f) r2020 = 0.0f;
+            if (g2020 < 0.0f) g2020 = 0.0f;
+            if (b2020 < 0.0f) b2020 = 0.0f;
+
+            dst[0] = pq_oetf(r2020 * scale);
+            dst[1] = pq_oetf(g2020 * scale);
+            dst[2] = pq_oetf(b2020 * scale);
             src += 4; dst += 3;
         }
-    } else if (fmt == DXGI_FORMAT_R10G10B10A2_UNORM) {
-        const uint32_t *src = (const uint32_t *)data;
-        for (i = 0; i < npix; i++) {
-            uint32_t pixel = src[i];
-            dst[0] = (float)((pixel >> 22) & 0x3FF) / 1023.0f;
-            dst[1] = (float)((pixel >> 12) & 0x3FF) / 1023.0f;
-            dst[2] = (float)((pixel >> 2) & 0x3FF) / 1023.0f;
-            dst += 3;
-        }
-    } else { free(rgb); goto done; }
+    }
 
     jxl_fmt.num_channels = 3;
     jxl_fmt.data_type = JXL_TYPE_FLOAT;
@@ -544,7 +651,7 @@ int main(int argc, char **argv) {
 
     GrabDXGI g_dxgi;
     if (grab_screen_dxgi(&g_dxgi)) {
-        int is_hdr = !g_cfg.force_sdr && (g_dxgi.format == DXGI_FORMAT_R16G16B16A16_FLOAT || g_dxgi.format == DXGI_FORMAT_R10G10B10A2_UNORM);
+        int is_hdr = !g_cfg.force_sdr && (g_dxgi.format == DXGI_FORMAT_R16G16B16A16_FLOAT);
         wchar_t out_path[MAX_PATH]; 
         build_out_path(out_path, MAX_PATH, is_hdr);
         int rc = save_dxgi_as_jxl(g_dxgi.bits, g_dxgi.w, g_dxgi.h, g_dxgi.format, g_cfg.lossless, g_cfg.distance, g_cfg.force_sdr, out_path) ? 0 : 1;
