@@ -1,0 +1,93 @@
+name: HDR JXL build-windows
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (MinGW-w64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-libjxl
+            mingw-w64-x86_64-upx
+            zip
+
+      - name: Compile and bundle runtime DLLs
+        run: |
+          # 1. Compile CLI version
+          gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
+              -mwindows -o jxlshot.exe jxlshot.c \
+              -ljxl -lgdi32 -luser32 -lshell32 -lole32 -ldxgi -ld3d11
+
+          # 2. Compile Tray version
+          gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
+              -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.rc \
+              -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11
+
+          # 3. Prepare distribution directory
+          mkdir -p dist
+          cp jxlshot.exe jxlshot_tray.exe dist/
+          
+          # Copy auxiliary files
+          cp README.md ADD-to-START-UP.bat dist/ 2>/dev/null || true
+
+          # 4. Extract and copy required MinGW/libjxl DLLs
+          ldd jxlshot.exe jxlshot_tray.exe | grep -o '/mingw64/bin/[^ )]*' | sort -u | while read -r dll; do
+            cp "$dll" dist/
+          done
+
+      - name: Compile and run HDR test generator
+        run: |
+          # Only run if the test file exists in the repository
+          if [ -f test_hdr_gen.c ]; then
+            echo "Compiling HDR test generator..."
+            gcc -O2 -o test_hdr_gen.exe test_hdr_gen.c -ljxl
+            
+            echo "Running HDR test generator..."
+            ./test_hdr_gen.exe
+            
+            # Move the generated HDR image to the dist folder for bundling
+            if [ -f test_hdr_output.jxl ]; then
+              mv test_hdr_output.jxl dist/
+              echo "Successfully moved test_hdr_output.jxl to dist/"
+            fi
+          else
+            echo "test_hdr_gen.c not found. Skipping HDR test generation."
+          fi
+
+      - name: Compress executables and DLLs with UPX
+        run: |
+          # Compress all .exe and .dll files in the dist folder to minimize release size
+          upx --best --lzma dist/*.exe dist/*.dll || echo "UPX compression completed with warnings"
+          
+          # Create the release archive
+          (cd dist && zip -9 -r ../jxlshot-windows-x64.zip .)
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jxlshot-windows-x64
+          path: dist/
+
+      - name: Publish release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            jxlshot-windows-x64.zip
+            dist/test_hdr_output.jxl
