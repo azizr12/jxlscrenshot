@@ -19,12 +19,7 @@
 /* jxlshot_tray.c — System tray extension for jxlshot.
  *
  * Configuration is read from jxlshot.ini located next to the executable.
- * Debug logs are written to %TEMP%\jxlshot_debug.log.
- *
- * Build (MSYS2 / MinGW-w64) - Optimized for size:
- *   gcc -Os -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
- *       -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.rc -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
- */
+ * Debug logs are written to %TEMP%\jxlshot_debug.log       */
 
 
 
@@ -135,23 +130,28 @@ static void show_tray_menu(HWND hwnd) {
 
 static void execute_full_capture(void) {
     Grab g;
-    ZeroMemory(&g, sizeof(g)); // Ensure clean initial state
-    
-    if (!grab_primary_monitor(&g)) {
-        MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
-        return; // Early exit is safe; g is zeroed
-    }
-    
-    wchar_t out_path[MAX_PATH]; 
-    build_out_path(out_path, MAX_PATH);
-    
-    if (!save_bgra_as_jxl(g.bits, g.w, g.h, g_cfg.lossless, g_cfg.distance, out_path)) {
-        MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
-    }
-    
-    free_grab(&g); // Guaranteed execution on all paths
-}
+    ZeroMemory(&g, sizeof(g));
 
+    dbg("execute_full_capture: begin");
+    if (!grab_primary_monitor(&g)) {
+        dbg("execute_full_capture: grab failed, showing MessageBox");
+        MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
+        return;
+    }
+
+    wchar_t out_path[MAX_PATH];
+    build_out_path(out_path, MAX_PATH, g.is_hdr);
+    dbg("execute_full_capture: writing to %ls", out_path);
+
+    if (!save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path)) {
+        dbg("execute_full_capture: save FAILED");
+        MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
+    } else {
+        dbg("execute_full_capture: save OK");
+    }
+
+    free_grab(&g);
+}
 
 static void execute_set_path(void) {
     BROWSEINFOW bi = { 0 }; bi.hwndOwner = NULL;
@@ -254,22 +254,32 @@ static void crop_and_encode_region(RECT *r) {
         return;
     }
 
-    uint8_t *crop_bits = (uint8_t *)malloc((size_t)rw * rh * 4);
+    // Determine bytes per pixel based on HDR (6 bytes) or SDR (3 bytes)
+    size_t bytes_per_pixel = g.is_hdr ? 6 : 3;
+    
+    uint8_t *crop_bits = (uint8_t *)malloc((size_t)rw * rh * bytes_per_pixel);
     if (!crop_bits) {
         free_grab(&g); // Guaranteed cleanup before early exit
         return;
     }
     
+    // Copy row by row from the tightly packed source buffer
     for (int y = 0; y < rh; y++) {
-        memcpy(crop_bits + y * rw * 4, g.bits + ((r->top + y) * g.w + r->left) * 4, rw * 4);
+        memcpy(
+            crop_bits + (size_t)y * rw * bytes_per_pixel, 
+            g.bits + ((size_t)(r->top + y) * g.w + r->left) * bytes_per_pixel, 
+            rw * bytes_per_pixel
+        );
     }
     
     wchar_t out_path[MAX_PATH]; 
-    build_out_path(out_path, MAX_PATH);
-    save_bgra_as_jxl(crop_bits, rw, rh, g_cfg.lossless, g_cfg.distance, out_path);
+    build_out_path(out_path, MAX_PATH, g.is_hdr); 
+    
+    // UPDATED: Use the new identity save function and pass g.is_hdr
+    save_rgb_as_jxl(crop_bits, rw, rh, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path);
     
     free(crop_bits); // Guaranteed heap cleanup
-    free_grab(&g);   // Guaranteed GDI cleanup
+    free_grab(&g);   // Guaranteed cleanup
 }
 
 LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
