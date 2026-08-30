@@ -291,7 +291,7 @@ typedef struct {
 
 static int grab_primary_monitor(Grab *g) {
     ZeroMemory(g, sizeof *g);
-    
+
     ID3D11Device *device = NULL;
     ID3D11DeviceContext *ctx = NULL;
     IDXGIFactory1 *factory = NULL;
@@ -306,8 +306,44 @@ static int grab_primary_monitor(Grab *g) {
     int ok = 0;
 
     if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void**)&factory))) goto cleanup;
-    if (FAILED(factory->lpVtbl->EnumAdapters1(factory, 0, &adapter))) goto cleanup;
-    if (FAILED(adapter->lpVtbl->EnumOutputs(adapter, 0, &output))) goto cleanup;
+
+    /*
+     * Don't assume adapter 0 / output 0 is the display we want.
+     * On hybrid-GPU laptops (switchable graphics), the first
+     * enumerated adapter may not be the one actually compositing the
+     * desktop, and DuplicateOutput can silently succeed while returning
+     * black frames. Walk every adapter/output and match the one whose
+     * HMONITOR is the primary display.
+     */
+    {
+        HMONITOR target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+
+        for (UINT ai = 0; !adapter; ai++) {
+            IDXGIAdapter1 *cand_adapter = NULL;
+            if (factory->lpVtbl->EnumAdapters1(factory, ai, &cand_adapter) == DXGI_ERROR_NOT_FOUND) break;
+            if (!cand_adapter) continue;
+
+            for (UINT oi = 0; ; oi++) {
+                IDXGIOutput *cand_output = NULL;
+                if (cand_adapter->lpVtbl->EnumOutputs(cand_adapter, oi, &cand_output) == DXGI_ERROR_NOT_FOUND) break;
+                if (!cand_output) continue;
+
+                DXGI_OUTPUT_DESC out_desc;
+                if (SUCCEEDED(cand_output->lpVtbl->GetDesc(cand_output, &out_desc)) &&
+                    out_desc.Monitor == target_monitor) {
+                    adapter = cand_adapter;
+                    output  = cand_output;
+                    break; /* found it, stop scanning this adapter's outputs */
+                }
+                cand_output->lpVtbl->Release(cand_output);
+            }
+
+            if (!adapter) cand_adapter->lpVtbl->Release(cand_adapter);
+        }
+    }
+
+    if (!adapter || !output) goto cleanup;
+
     if (FAILED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput1, (void**)&output1))) goto cleanup;
 
     /*
