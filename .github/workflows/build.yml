@@ -28,15 +28,15 @@ jobs:
 
       - name: Compile and bundle runtime DLLs
         run: |
-          # 1. Compile CLI version
+          # 1. Compile CLI version (Added jxlshot_hdr.c and DirectX/Math libraries)
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
-              -mwindows -o jxlshot.exe jxlshot.c \
-              -ljxl -lgdi32 -luser32 -lshell32 -lole32
+              -mwindows -o jxlshot.exe jxlshot.c jxlshot_hdr.c \
+              -ljxl -lgdi32 -luser32 -lshell32 -lole32 -ldxgi -ld3d11 -luuid -lm
 
-          # 2. Compile Tray version
+          # 2. Compile Tray version (Added jxlshot_hdr.c and DirectX/Math libraries)
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
-              -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.rc \
-              -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32
+              -mwindows -o jxlshot_tray.exe jxlshot_tray.c jxlshot_hdr.c resource.rc \
+              -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lm
 
           # 3. Prepare distribution directory
           mkdir -p dist
