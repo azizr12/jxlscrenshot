@@ -234,7 +234,16 @@ static void ensure_default_ini(void) {
             fprintf(f, "HotkeyFull=PrintScreen\n\n");
             
             fprintf(f, "; Hotkey to capture a SPECIFIC REGION (click and drag):\n");
-            fprintf(f, "HotkeyRegion=Ctrl+PrintScreen\n");
+            fprintf(f, "HotkeyRegion=Ctrl+PrintScreen\n\n");
+
+            fprintf(f, "; ---------------------------------------------------------\n");
+            fprintf(f, "; HDR SETTINGS (Requires Windows 11 + HDR Monitor)\n");
+            fprintf(f, "; ---------------------------------------------------------\n");
+            fprintf(f, "; Enable HDR capture attempt (1=try HDR, 0=always use SDR)\n");
+            fprintf(f, "HDREnabled=1\n\n");
+            
+            fprintf(f, "; Force SDR output even on HDR monitors (1=force SDR, 0=HDR when available)\n");
+            fprintf(f, "ForceSDR=0\n");
             
             fclose(f);
         }
@@ -493,8 +502,47 @@ int main(int argc, char **argv) {
     if (cli_lossless != -1) g_cfg.lossless = cli_lossless;
     if (cli_distance >= 0.0f) g_cfg.distance = cli_distance;
     dbg_init();
+    
+    // [NEW] Wire the HDR module's internal logging to debug log
+    hdr_set_logger(dbg); 
+    
     if (wait_ms) Sleep(wait_ms);
 
+    // =================================================================
+    // [NEW] HDR Capture Path (Attempted first if enabled in INI)
+    // =================================================================
+    if (g_cfg.hdr_enabled && !g_cfg.force_sdr) {
+        hdr_frame_t hf;
+        dbg("Attempting HDR capture...");
+        
+        if (hdr_capture_primary(&hf, 1000)) {
+            wchar_t out_path[MAX_PATH];
+            build_out_path(out_path, MAX_PATH);
+            
+            /* Insert "_hdr" before .jxl extension for clarity */
+            wchar_t *ext = wcsrchr(out_path, L'.');
+            if (ext) {
+                wchar_t temp[MAX_PATH];
+                *ext = L'\0';
+                _snwprintf(temp, MAX_PATH, L"%s_hdr.jxl", out_path);
+                wcscpy(out_path, temp);
+            }
+            
+            int rc;
+            /* Save as true HDR JXL */
+            rc = hdr_encode_jxl_hdr(hf.rgb, hf.w, hf.h, g_cfg.lossless, g_cfg.distance, out_path) ? 0 : 1;
+            
+            hdr_frame_free(&hf);
+            dbg("HDR capture %s", rc == 0 ? "SUCCESS" : "FAILED");
+            return rc;
+        }
+        
+        dbg("HDR capture failed or not available, falling back to GDI");
+    }
+
+    // =================================================================
+    // [EXISTING] GDI Fallback Path (Used if HDR fails or is disabled)
+    // =================================================================
     Grab g;
     if (!grab_primary_monitor(&g)) { free_grab(&g); return 1; }
     wchar_t out_path[MAX_PATH]; build_out_path(out_path, MAX_PATH);
