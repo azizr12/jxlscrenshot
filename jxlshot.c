@@ -262,7 +262,8 @@ static void init_config(void) {
         GetEnvironmentVariableW(L"USERPROFILE", g_cfg.export_path, MAX_PATH);
         wcscat_s(g_cfg.export_path, MAX_PATH, L"\\Pictures");
     }
-
+    g_cfg.hdr_enabled = GetPrivateProfileIntW(L"Capture", L"HDREnabled", 1, ini_path);
+    g_cfg.force_sdr   = GetPrivateProfileIntW(L"Capture", L"ForceSDR", 0, ini_path);
     g_cfg.debug_enabled = GetPrivateProfileIntW(L"Capture", L"Debug", 1, ini_path);
     g_cfg.lossless = GetPrivateProfileIntW(L"Capture", L"Lossless", 1, ini_path);
     g_cfg.show_cursor = GetPrivateProfileIntW(L"Capture", L"ShowCursor", 1, ini_path);
@@ -366,42 +367,95 @@ static void build_out_path(wchar_t *path, int n) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Screen capture                                                     */
+/* Unified Screen Capture (HDR with SDR Fallback)                     */
 /* ------------------------------------------------------------------ */
-typedef struct { HBITMAP hbmp; HDC hdc; uint8_t *bits; int w, h; } Grab;
+typedef enum { CAPTURE_SDR, CAPTURE_HDR } CaptureMode;
 
-static int grab_primary_monitor(Grab *g) {
-    ZeroMemory(g, sizeof *g);
-    g->w = GetSystemMetrics(SM_CXSCREEN); g->h = GetSystemMetrics(SM_CYSCREEN);
-    dbg("grab_primary_monitor: %dx%d", g->w, g->h);
-    if (g->w <= 0 || g->h <= 0) return 0;
+typedef struct {
+    CaptureMode mode;
+    // SDR data
+    HBITMAP hbmp;
+    HDC hdc;
+    uint8_t *bits;
+    int w, h;
+    // HDR data
+    hdr_frame_t hdr_frame;
+} CaptureResult;
+
+static int capture_screen(CaptureResult *cr) {
+    ZeroMemory(cr, sizeof *cr);
+    
+    // 1. Attempt HDR capture if enabled and not forced to SDR
+    if (g_cfg.hdr_enabled && !g_cfg.force_sdr) {
+        if (hdr_capture_primary(&cr->hdr_frame, 1000)) {
+            cr->mode = CAPTURE_HDR;
+            cr->w = cr->hdr_frame.w;
+            cr->h = cr->hdr_frame.h;
+            dbg("capture_screen: HDR capture successful (%dx%d)", cr->w, cr->h);
+            return 1;
+        }
+        dbg("capture_screen: HDR not available or failed, falling back to SDR.");
+    }
+    
+    // 2. Fallback to standard SDR GDI capture
+    cr->mode = CAPTURE_SDR;
+    cr->w = GetSystemMetrics(SM_CXSCREEN); 
+    cr->h = GetSystemMetrics(SM_CYSCREEN);
+    if (cr->w <= 0 || cr->h <= 0) return 0;
 
     HDC sdc = GetDC(NULL);
     if (!sdc) return 0;
-    g->hdc = CreateCompatibleDC(sdc);
-    if (!g->hdc) { ReleaseDC(NULL, sdc); return 0; }
+    
+    cr->hdc = CreateCompatibleDC(sdc);
+    if (!cr->hdc) { ReleaseDC(NULL, sdc); return 0; }
 
     BITMAPINFO bi = {0};
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = g->w; bi.bmiHeader.biHeight = -g->h;
-    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+    bi.bmiHeader.biWidth = cr->w; 
+    bi.bmiHeader.biHeight = -cr->h;
+    bi.bmiHeader.biPlanes = 1; 
+    bi.bmiHeader.biBitCount = 32; 
+    bi.bmiHeader.biCompression = BI_RGB;
     
-    g->hbmp = CreateDIBSection(sdc, &bi, DIB_RGB_COLORS, (void **)&g->bits, NULL, 0);
-    if (!g->hbmp) { DeleteDC(g->hdc); ReleaseDC(NULL, sdc); return 0; }
+    cr->hbmp = CreateDIBSection(sdc, &bi, DIB_RGB_COLORS, (void **)&cr->bits, NULL, 0);
+    if (!cr->hbmp) { DeleteDC(cr->hdc); ReleaseDC(NULL, sdc); return 0; }
 
-    SelectObject(g->hdc, g->hbmp);
-    if (!BitBlt(g->hdc, 0, 0, g->w, g->h, sdc, 0, 0, SRCCOPY)) {
+    SelectObject(cr->hdc, cr->hbmp);
+    if (!BitBlt(cr->hdc, 0, 0, cr->w, cr->h, sdc, 0, 0, SRCCOPY)) {
         ReleaseDC(NULL, sdc); return 0;
     }
-    GdiFlush(); ReleaseDC(NULL, sdc);
+    GdiFlush(); 
+    ReleaseDC(NULL, sdc);
+    
+    dbg("capture_screen: SDR capture successful (%dx%d)", cr->w, cr->h);
     return 1;
 }
 
-static void free_grab(Grab *g) {
-    if (g->hdc) DeleteDC(g->hdc);
-    if (g->hbmp) DeleteObject(g->hbmp);
-    ZeroMemory(g, sizeof *g);
+static void free_capture(CaptureResult *cr) {
+    if (cr->mode == CAPTURE_HDR) {
+        hdr_frame_free(&cr->hdr_frame);
+    } else {
+        if (cr->hdc) DeleteDC(cr->hdc);
+        if (cr->hbmp) DeleteObject(cr->hbmp);
+    }
+    ZeroMemory(cr, sizeof *cr);
 }
+
+/* ------------------------------------------------------------------ */
+/* Unified Save Function (Routes to HDR or SDR encoder)               */
+/* ------------------------------------------------------------------ */
+static int save_capture_as_jxl(const CaptureResult *cr, const wchar_t *path) {
+    if (cr->mode == CAPTURE_HDR) {
+        dbg("save_capture_as_jxl: Encoding true HDR JXL.");
+        return hdr_encode_jxl_hdr(cr->hdr_frame.rgb, cr->w, cr->h, 
+                                  g_cfg.lossless, g_cfg.distance, path);
+    } else {
+        dbg("save_capture_as_jxl: Encoding SDR JXL.");
+        return save_bgra_as_jxl(cr->bits, cr->w, cr->h, 
+                                g_cfg.lossless, g_cfg.distance, path);
+    }
+}
+
 
 /* ------------------------------------------------------------------ */
 /* JPEG XL encoding                                                   */
@@ -489,64 +543,58 @@ static int save_bgra_as_jxl(const uint8_t *bgra, int w, int h, int lossless, flo
 /* ------------------------------------------------------------------ */
 #ifndef JXLSHOT_TRAY_BUILD
 int main(int argc, char **argv);
-int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) { return main(__argc, __argv); }
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) { 
+    return main(__argc, __argv); 
+}
 
 int main(int argc, char **argv) {
-    DWORD wait_ms = 0; int cli_lossless = -1; float cli_distance = -1.0f;
+    DWORD wait_ms = 0; 
+    int cli_lossless = -1; 
+    float cli_distance = -1.0f;
+    
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-q")) cli_lossless = 0;
-        else if (!strcmp(argv[i], "-d") && i + 1 < argc) { cli_distance = (float)strtod(argv[++i], NULL); cli_lossless = 0; }
-        else if (!strcmp(argv[i], "-w") && i + 1 < argc) { wait_ms = (DWORD)strtol(argv[++i], NULL, 10); }
+        else if (!strcmp(argv[i], "-d") && i + 1 < argc) { 
+            cli_distance = (float)strtod(argv[++i], NULL); 
+            cli_lossless = 0; 
+        }
+        else if (!strcmp(argv[i], "-w") && i + 1 < argc) { 
+            wait_ms = (DWORD)strtol(argv[++i], NULL, 10); 
+        }
     }
-    set_dpi_aware(); init_paths(); ensure_default_ini(); init_config();
+    
+    set_dpi_aware(); 
+    init_paths(); 
+    ensure_default_ini(); 
+    init_config();
+    
     if (cli_lossless != -1) g_cfg.lossless = cli_lossless;
     if (cli_distance >= 0.0f) g_cfg.distance = cli_distance;
-    dbg_init();
     
-    // [NEW] Wire the HDR module's internal logging to debug log
-    hdr_set_logger(dbg); 
+    dbg_init();
     
     if (wait_ms) Sleep(wait_ms);
 
-    // =================================================================
-    // [NEW] HDR Capture Path (Attempted first if enabled in INI)
-    // =================================================================
-    if (g_cfg.hdr_enabled && !g_cfg.force_sdr) {
-        hdr_frame_t hf;
-        dbg("Attempting HDR capture...");
-        
-        if (hdr_capture_primary(&hf, 1000)) {
-            wchar_t out_path[MAX_PATH];
-            build_out_path(out_path, MAX_PATH);
-            
-            /* Insert "_hdr" before .jxl extension for clarity */
-            wchar_t *ext = wcsrchr(out_path, L'.');
-            if (ext) {
-                wchar_t temp[MAX_PATH];
-                *ext = L'\0';
-                _snwprintf(temp, MAX_PATH, L"%s_hdr.jxl", out_path);
-                wcscpy(out_path, temp);
-            }
-            
-            int rc;
-            /* Save as true HDR JXL */
-            rc = hdr_encode_jxl_hdr(hf.rgb, hf.w, hf.h, g_cfg.lossless, g_cfg.distance, out_path) ? 0 : 1;
-            
-            hdr_frame_free(&hf);
-            dbg("HDR capture %s", rc == 0 ? "SUCCESS" : "FAILED");
-            return rc;
-        }
-        
-        dbg("HDR capture failed or not available, falling back to GDI");
+    // Unified Capture Pipeline
+    CaptureResult cr;
+    ZeroMemory(&cr, sizeof(cr));
+    
+    if (!capture_screen(&cr)) {
+        fwprintf(stderr, L"Screen capture failed.\n");
+        return 1;
     }
 
-    // =================================================================
-    // [EXISTING] GDI Fallback Path (Used if HDR fails or is disabled)
-    // =================================================================
-    Grab g;
-    if (!grab_primary_monitor(&g)) { free_grab(&g); return 1; }
-    wchar_t out_path[MAX_PATH]; build_out_path(out_path, MAX_PATH);
-    int rc = save_bgra_as_jxl(g.bits, g.w, g.h, g_cfg.lossless, g_cfg.distance, out_path) ? 0 : 1;
-    free_grab(&g); return rc;
+    wchar_t out_path[MAX_PATH];
+    build_out_path(out_path, MAX_PATH);
+
+    if (!save_capture_as_jxl(&cr, out_path)) {
+        fwprintf(stderr, L"Encoding or saving failed.\n");
+        free_capture(&cr);
+        return 1;
+    }
+
+    fwprintf(stdout, L"Screenshot saved to: %s\n", out_path);
+    free_capture(&cr);
+    return 0;
 }
 #endif
