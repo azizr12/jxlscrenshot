@@ -130,23 +130,27 @@ static void show_tray_menu(HWND hwnd) {
 
 static void execute_full_capture(void) {
     Grab g;
-    ZeroMemory(&g, sizeof(g)); 
-    
+    ZeroMemory(&g, sizeof(g));
+
+    dbg("execute_full_capture: begin");
     if (!grab_primary_monitor(&g)) {
+        dbg("execute_full_capture: grab failed, showing MessageBox");
         MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
-        return; 
+        return;
     }
-    
-    wchar_t out_path[MAX_PATH]; 
-    
-    // UPDATED: Pass g.is_hdr
-    build_out_path(out_path, MAX_PATH, g.is_hdr); 
-    
+
+    wchar_t out_path[MAX_PATH];
+    build_out_path(out_path, MAX_PATH, g.is_hdr);
+    dbg("execute_full_capture: writing to %ls", out_path);
+
     if (!save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path)) {
+        dbg("execute_full_capture: save FAILED");
         MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
+    } else {
+        dbg("execute_full_capture: save OK");
     }
-    
-    free_grab(&g); 
+
+    free_grab(&g);
 }
 
 static void execute_set_path(void) {

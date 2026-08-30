@@ -305,23 +305,25 @@ static int grab_primary_monitor(Grab *g) {
     ID3D11Texture2D *staging = NULL;
     int ok = 0;
 
-    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void**)&factory))) goto cleanup;
+    dbg("grab: start");
 
-    /*
-     * Don't assume adapter 0 / output 0 is the display we want.
-     * On hybrid-GPU laptops (switchable graphics), the first
-     * enumerated adapter may not be the one actually compositing the
-     * desktop, and DuplicateOutput can silently succeed while returning
-     * black frames. Walk every adapter/output and match the one whose
-     * HMONITOR is the primary display.
-     */
+    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void**)&factory))) {
+        dbg("grab: CreateDXGIFactory1 FAILED"); goto cleanup;
+    }
+
     {
         HMONITOR target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+        dbg("grab: target_monitor=0x%p", (void*)target_monitor);
 
         for (UINT ai = 0; !adapter; ai++) {
             IDXGIAdapter1 *cand_adapter = NULL;
-            if (factory->lpVtbl->EnumAdapters1(factory, ai, &cand_adapter) == DXGI_ERROR_NOT_FOUND) break;
+            HRESULT hr = factory->lpVtbl->EnumAdapters1(factory, ai, &cand_adapter);
+            if (hr == DXGI_ERROR_NOT_FOUND) { dbg("grab: EnumAdapters1 exhausted at index %u", ai); break; }
             if (!cand_adapter) continue;
+
+            DXGI_ADAPTER_DESC1 adesc;
+            cand_adapter->lpVtbl->GetDesc1(cand_adapter, &adesc);
+            dbg("grab: adapter %u = %ls", ai, adesc.Description);
 
             for (UINT oi = 0; ; oi++) {
                 IDXGIOutput *cand_output = NULL;
@@ -329,11 +331,15 @@ static int grab_primary_monitor(Grab *g) {
                 if (!cand_output) continue;
 
                 DXGI_OUTPUT_DESC out_desc;
-                if (SUCCEEDED(cand_output->lpVtbl->GetDesc(cand_output, &out_desc)) &&
-                    out_desc.Monitor == target_monitor) {
-                    adapter = cand_adapter;
-                    output  = cand_output;
-                    break; /* found it, stop scanning this adapter's outputs */
+                if (SUCCEEDED(cand_output->lpVtbl->GetDesc(cand_output, &out_desc))) {
+                    dbg("grab:   output %u monitor=0x%p attached=%d",
+                        oi, (void*)out_desc.Monitor, out_desc.AttachedToDesktop);
+                    if (out_desc.Monitor == target_monitor) {
+                        adapter = cand_adapter;
+                        output  = cand_output;
+                        dbg("grab:   -> MATCHED this output");
+                        break;
+                    }
                 }
                 cand_output->lpVtbl->Release(cand_output);
             }
@@ -342,63 +348,50 @@ static int grab_primary_monitor(Grab *g) {
         }
     }
 
-    if (!adapter || !output) goto cleanup;
+    if (!adapter || !output) { dbg("grab: no matching adapter/output found"); goto cleanup; }
 
-    if (FAILED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput1, (void**)&output1))) goto cleanup;
+    if (FAILED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput1, (void**)&output1))) {
+        dbg("grab: QI IDXGIOutput1 FAILED"); goto cleanup;
+    }
 
-    /*
-     * The D3D11 device must be created from the same adapter that owns
-     * the output being duplicated. Using NULL here can select a different
-     * adapter and is not valid for DuplicateOutput1.
-     */
     if (FAILED(D3D11CreateDevice(
-        (IDXGIAdapter *)adapter,
-        D3D_DRIVER_TYPE_UNKNOWN,
-        NULL,
-        0,
-        NULL,
-        0,
-        D3D11_SDK_VERSION,
-        &device,
-        NULL,
-        &ctx))) goto cleanup;
+        (IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0,
+        D3D11_SDK_VERSION, &device, NULL, &ctx))) {
+        dbg("grab: D3D11CreateDevice FAILED"); goto cleanup;
+    }
+    dbg("grab: device created");
 
-    /*
-     * DuplicateOutput() always gives the desktop as 32-bit BGRA.
-     * DuplicateOutput1() is required when we want the native HDR FP16
-     * desktop surface.
-     */
-    if (SUCCEEDED(output->lpVtbl->QueryInterface(
-        output, &IID_IDXGIOutput5, (void**)&output5))) {
-
+    if (SUCCEEDED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput5, (void**)&output5))) {
         const DXGI_FORMAT supported_formats[] = {
-            DXGI_FORMAT_R16G16B16A16_FLOAT,
-            DXGI_FORMAT_B8G8R8A8_UNORM
+            DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM
         };
-
-        if (FAILED(output5->lpVtbl->DuplicateOutput1(
-            output5,
-            (IUnknown *)device,
-            0,
-            (UINT)(sizeof(supported_formats) / sizeof(supported_formats[0])),
-            supported_formats,
-            &dupl))) {
-            goto cleanup;
-        }
+        HRESULT hr = output5->lpVtbl->DuplicateOutput1(
+            output5, (IUnknown *)device, 0, 2, supported_formats, &dupl);
+        if (FAILED(hr)) { dbg("grab: DuplicateOutput1 FAILED hr=0x%08lX", hr); goto cleanup; }
+        dbg("grab: DuplicateOutput1 ok");
     } else {
-        if (FAILED(output1->lpVtbl->DuplicateOutput(
-            output1, (IUnknown *)device, &dupl))) goto cleanup;
+        HRESULT hr = output1->lpVtbl->DuplicateOutput(output1, (IUnknown *)device, &dupl);
+        if (FAILED(hr)) { dbg("grab: DuplicateOutput FAILED hr=0x%08lX", hr); goto cleanup; }
+        dbg("grab: DuplicateOutput ok");
     }
 
     DXGI_OUTDUPL_FRAME_INFO frame_info;
-    if (FAILED(dupl->lpVtbl->AcquireNextFrame(dupl, 1000, &frame_info, &resource))) goto cleanup;
-    if (FAILED(resource->lpVtbl->QueryInterface(resource, &IID_ID3D11Texture2D, (void**)&tex))) goto cleanup;
+    {
+        HRESULT hr = dupl->lpVtbl->AcquireNextFrame(dupl, 1000, &frame_info, &resource);
+        if (FAILED(hr)) { dbg("grab: AcquireNextFrame FAILED hr=0x%08lX", hr); goto cleanup; }
+    }
+    dbg("grab: frame acquired");
+
+    if (FAILED(resource->lpVtbl->QueryInterface(resource, &IID_ID3D11Texture2D, (void**)&tex))) {
+        dbg("grab: QI ID3D11Texture2D FAILED"); goto cleanup;
+    }
 
     D3D11_TEXTURE2D_DESC desc;
     tex->lpVtbl->GetDesc(tex, &desc);
     g->w = desc.Width;
     g->h = desc.Height;
     g->is_hdr = (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 1 : 0;
+    dbg("grab: w=%d h=%d hdr=%d fmt=%d", g->w, g->h, g->is_hdr, desc.Format);
 
     D3D11_TEXTURE2D_DESC staging_desc = desc;
     staging_desc.Usage = D3D11_USAGE_STAGING;
@@ -406,16 +399,21 @@ static int grab_primary_monitor(Grab *g) {
     staging_desc.BindFlags = 0;
     staging_desc.MiscFlags = 0;
 
-    if (FAILED(device->lpVtbl->CreateTexture2D(device, &staging_desc, NULL, &staging))) goto cleanup;
+    if (FAILED(device->lpVtbl->CreateTexture2D(device, &staging_desc, NULL, &staging))) {
+        dbg("grab: CreateTexture2D(staging) FAILED"); goto cleanup;
+    }
     ctx->lpVtbl->CopyResource(ctx, (ID3D11Resource*)staging, (ID3D11Resource*)tex);
 
     D3D11_MAPPED_SUBRESOURCE mapped;
-    if (FAILED(ctx->lpVtbl->Map(ctx, (ID3D11Resource*)staging, 0, D3D11_MAP_READ, 0, &mapped))) goto cleanup;
+    if (FAILED(ctx->lpVtbl->Map(ctx, (ID3D11Resource*)staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+        dbg("grab: Map FAILED"); goto cleanup;
+    }
+    dbg("grab: mapped, pitch=%u", (unsigned)mapped.RowPitch);
 
     size_t rgb_bpp = g->is_hdr ? 6 : 3;
     g->size = (size_t)g->w * g->h * rgb_bpp;
     g->bits = (uint8_t *)malloc(g->size);
-    if (!g->bits) goto cleanup;
+    if (!g->bits) { dbg("grab: malloc FAILED size=%zu", g->size); goto cleanup; }
 
     uint8_t *dst = g->bits;
     uint8_t *src_row = (uint8_t *)mapped.pData;
@@ -425,21 +423,13 @@ static int grab_primary_monitor(Grab *g) {
         uint8_t *src = src_row;
         for (int x = 0; x < g->w; x++) {
             if (g->is_hdr) {
-                /*
-                 * DXGI_FORMAT_R16G16B16A16_FLOAT is RGBA, not BGRA.
-                 * Keep the R/G/B channels in their original order.
-                 */
-                dst[0] = src[0]; dst[1] = src[1]; // R
-                dst[2] = src[2]; dst[3] = src[3]; // G
-                dst[4] = src[4]; dst[5] = src[5]; // B
-                dst += 6;
-                src += 8;
+                dst[0] = src[0]; dst[1] = src[1];
+                dst[2] = src[2]; dst[3] = src[3];
+                dst[4] = src[4]; dst[5] = src[5];
+                dst += 6; src += 8;
             } else {
-                dst[0] = src[2]; // R
-                dst[1] = src[1]; // G
-                dst[2] = src[0]; // B
-                dst += 3;
-                src += 4;
+                dst[0] = src[2]; dst[1] = src[1]; dst[2] = src[0];
+                dst += 3; src += 4;
             }
         }
         src_row += src_pitch;
@@ -447,6 +437,7 @@ static int grab_primary_monitor(Grab *g) {
 
     ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
     ok = 1;
+    dbg("grab: success");
 
 cleanup:
     if (dupl && resource) dupl->lpVtbl->ReleaseFrame(dupl);
@@ -463,6 +454,7 @@ cleanup:
     if (factory) factory->lpVtbl->Release(factory);
 
     if (!ok && g->bits) { free(g->bits); g->bits = NULL; }
+    dbg("grab: end ok=%d", ok);
     return ok;
 }
 
