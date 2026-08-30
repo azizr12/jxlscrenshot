@@ -13,6 +13,7 @@
 * jxlshot.c — minimal command-line screenshot tool for Windows.
 *
 */
+#define INITGUID
 #define UNICODE
 #define _UNICODE
 #define WINVER 0x0601
