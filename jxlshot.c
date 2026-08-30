@@ -376,10 +376,21 @@ static int grab_primary_monitor(Grab *g) {
     }
 
     DXGI_OUTDUPL_FRAME_INFO frame_info;
-    {
-        HRESULT hr = dupl->lpVtbl->AcquireNextFrame(dupl, 1000, &frame_info, &resource);
-        if (FAILED(hr)) { dbg("grab: AcquireNextFrame FAILED hr=0x%08lX", hr); goto cleanup; }
-    }
+    HRESULT hr = dupl->lpVtbl->AcquireNextFrame(dupl, 1000, &frame_info, &resource);
+    if (FAILED(hr)) { dbg("grab: AcquireNextFrame (warmup) FAILED hr=0x%08lX", hr); goto cleanup; }
+
+    /*
+    * Some GPU drivers (especially older/low-end ones like Kepler-era
+    * NVIDIA cards) return a stale or fully black frame on the very
+    * first AcquireNextFrame call right after the duplication interface
+    * is created. Discard this frame and acquire a second, real one.
+    */
+    dupl->lpVtbl->ReleaseFrame(dupl);
+    resource->lpVtbl->Release(resource);
+    resource = NULL;
+
+    hr = dupl->lpVtbl->AcquireNextFrame(dupl, 1000, &frame_info, &resource);
+    if (FAILED(hr)) { dbg("grab: AcquireNextFrame (real) FAILED hr=0x%08lX", hr); goto cleanup; }
     dbg("grab: frame acquired");
 
     if (FAILED(resource->lpVtbl->QueryInterface(resource, &IID_ID3D11Texture2D, (void**)&tex))) {
