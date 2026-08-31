@@ -360,6 +360,39 @@ static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int samp
 }
 
 /* ------------------------------------------------------------------ */
+/* GDI Cursor Rendering Helper                                        */
+/* ------------------------------------------------------------------ */
+static void draw_cursor_if_enabled(HDC hdc, HMONITOR target_monitor, const AppConfig* cfg) {
+    if (!cfg->show_cursor) return;
+
+    CURSORINFO ci = { sizeof(ci) };
+    if (!GetCursorInfo(&ci)) return;
+    if (!(ci.flags & CURSOR_SHOWING)) return;
+
+    ICONINFO iconInfo;
+    if (!GetIconInfo(ci.hCursor, &iconInfo)) return;
+
+    MONITORINFO mi = { sizeof(mi) };
+    if (!GetMonitorInfoW(target_monitor, &mi)) {
+        if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
+        if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
+        return;
+    }
+
+    // Calculate cursor position relative to the target monitor's top-left corner
+    int x = ci.ptScreenPos.x - mi.rcMonitor.left - (int)iconInfo.xHotspot;
+    int y = ci.ptScreenPos.y - mi.rcMonitor.top - (int)iconInfo.yHotspot;
+
+    // Draw the cursor onto the memory DC. 
+    // 0, 0 for width/height tells DrawIconEx to use the cursor's native size.
+    DrawIconEx(hdc, x, y, ci.hCursor, 0, 0, 0, NULL, DI_NORMAL);
+
+    // Clean up GDI bitmaps allocated by GetIconInfo to prevent memory leaks
+    if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
+    if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
+}
+
+/* ------------------------------------------------------------------ */
 /* GDI BitBlt fallback capture (works without DXGI Desktop Duplication)*/
 /* ------------------------------------------------------------------ */
 
@@ -371,6 +404,7 @@ static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int samp
  * Used as a fallback when the DXGI path fails or produces a blank
  * frame after retrying.
  */
+
 static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
     ZeroMemory(g, sizeof *g);
 
@@ -413,6 +447,11 @@ static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
     /* CAPTUREBLT pulls in layered/UI-composited windows too, not just
      * the raw framebuffer, which matters on some setups. */
     BOOL blt_ok = BitBlt(hdcMem, 0, 0, w, h, hdcScreen, x, y, SRCCOPY | CAPTUREBLT);
+
+    /* Manually draw the cursor if enabled. This ensures the cursor appears 
+     * even if BitBlt missed the hardware overlay, and avoids the dangerous 
+     * system-wide side effects of ShowCursor(FALSE). */
+    draw_cursor_if_enabled(hdcMem, target_monitor, &g_cfg);
 
     SelectObject(hdcMem, hbmOld);
     ReleaseDC(NULL, hdcScreen);
