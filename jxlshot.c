@@ -6,7 +6,16 @@
 *   jxlshot.exe -q             lossy capture, default distance 1.0
 *   jxlshot.exe -q -d 3.0      lossy capture, distance 3.0 (lower = better)
 *   jxlshot.exe -w 3000        wait 3000 ms before capturing
+*  
 *
+*
+*  THE PICTURE EXPORTING FOLLOW THE EXPORT PATH !!!!!!!
+*
+*
+*
+*
+*
+
 * Configuration is read from jxlshot.ini located next to the executable.
 * Debug logs are written to %TEMP%\jxlshot_debug.log
 *
@@ -54,6 +63,7 @@ typedef struct {
     int     lossless;
     float   distance;
     int     show_cursor;
+    int blank_check_mode; /* 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels */
     wchar_t export_path[MAX_PATH];
     UINT    hk_full_mod;
     UINT    hk_full_vk;
@@ -164,7 +174,7 @@ static void ensure_default_ini(void) {
     if (GetFileAttributesW(ini_path) == INVALID_FILE_ATTRIBUTES) {
         FILE *f = _wfopen(ini_path, L"w");
         if (f) {
-            fprintf(f, "[Capture]\nDebug=0\nLossless=1\nDistance=1.0\nShowCursor=1\nExportPath=\nHotkeyFull=PrintScreen\nHotkeyRegion=Ctrl+PrintScreen\n");
+            fprintf(f, "[Capture]\nDebug=0\nLossless=1\nDistance=1.0\nShowCursor=1\nExportPath=\nHotkeyFull=PrintScreen\nHotkeyRegion=Ctrl+PrintScreen\nBlankCheckMode=2\n");
             fclose(f);
         }
     }
@@ -186,7 +196,9 @@ static void init_config(void) {
     g_cfg.debug_enabled = GetPrivateProfileIntW(L"Capture", L"Debug", 1, ini_path);
     g_cfg.lossless = GetPrivateProfileIntW(L"Capture", L"Lossless", 1, ini_path);
     g_cfg.show_cursor = GetPrivateProfileIntW(L"Capture", L"ShowCursor", 1, ini_path);
-    
+    g_cfg.blank_check_mode = GetPrivateProfileIntW(L"Capture", L"BlankCheckMode", 2, ini_path);
+    if (g_cfg.blank_check_mode < 1) g_cfg.blank_check_mode = 1;
+    if (g_cfg.blank_check_mode > 3) g_cfg.blank_check_mode = 3;
     wchar_t dist_str[64];
     GetPrivateProfileStringW(L"Capture", L"Distance", L"1.0", dist_str, 64, ini_path);
     g_cfg.distance = (float)wcstod(dist_str, NULL);
@@ -293,37 +305,58 @@ typedef struct {
 /* Blank-frame detection                                              */
 /* ------------------------------------------------------------------ */
 
+/*  THIS FUNTION MAY BE STUPID BUT ITS BETTER TO FIX THE STUPID BLANK SCREENSHOT    */
+/*  ON SOME STUPID HARDWARE                               */
 /*
- * Sparsely samples the buffer instead of scanning every byte — a
- * screenshot doesn't need forensic certainty, just "is this basically
- * a solid black rectangle". Checks a grid of points; if effectively
- * all of them are near-zero, treat the frame as blank/failed.
+ * Checks if a frame is completely blank (all black).
+ * 
+ * sample_mode:
+ *   1 = 16 samples (4x4 grid) - Fastest, may miss tiny non-black artifacts.
+ *   2 = 256 samples (16x16 grid) - Balanced, default behavior.
+ *   3 = ALL pixels (exhaustive scan) - Slowest, absolute certainty.
+ *
+ * A frame is deemed blank ONLY when every checked pixel is exactly black.
+ * If even one checked pixel carries any colour information, the frame is
+ * considered valid (returns 0).
  */
-static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr) {
+static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int sample_mode) {
     if (!rgb || w <= 0 || h <= 0) return 1;
 
     size_t bpp = is_hdr ? 6 : 3;
-    int cols = 16, rows = 16;
-    int nonblack = 0, sampled = 0;
 
-    for (int r = 0; r < rows; r++) {
-        int y = (h * r) / rows;
-        for (int c = 0; c < cols; c++) {
-            int x = (w * c) / cols;
-            const uint8_t *px = rgb + ((size_t)y * w + x) * bpp;
-            sampled++;
-
+    if (sample_mode == 3) {
+        /* Mode 3: Exhaustive scan of every single pixel */
+        size_t total_pixels = (size_t)w * h;
+        for (size_t i = 0; i < total_pixels; i++) {
+            const uint8_t *px = rgb + (i * bpp);
             if (is_hdr) {
-                /* FP16: treat any non-zero bit pattern in R/G/B as "not black" */
-                if (px[0] | px[1] | px[2] | px[3] | px[4] | px[5]) nonblack++;
+                if (px[0] | px[1] | px[2] | px[3] | px[4] | px[5]) return 0;
             } else {
-                if (px[0] > 4 || px[1] > 4 || px[2] > 4) nonblack++;
+                if (px[0] | px[1] | px[2]) return 0;
+            }
+        }
+    } else {
+        /* Mode 1 or 2: Grid sampling (4x4 or 16x16) */
+        int cols = (sample_mode == 1) ? 4 : 16;
+        int rows = (sample_mode == 1) ? 4 : 16;
+
+        for (int r = 0; r < rows; r++) {
+            int y = (h * r) / rows;
+            for (int c = 0; c < cols; c++) {
+                int x = (w * c) / cols;
+                const uint8_t *px = rgb + ((size_t)y * w + x) * bpp;
+
+                if (is_hdr) {
+                    if (px[0] | px[1] | px[2] | px[3] | px[4] | px[5]) return 0;
+                } else {
+                    if (px[0] | px[1] | px[2]) return 0;
+                }
             }
         }
     }
 
-    /* If fewer than 1% of sampled points have any color, call it blank */
-    return (nonblack * 100) < sampled;
+    /* Every checked pixel was exactly zero — frame is blank */
+    return 1;
 }
 
 /* ------------------------------------------------------------------ */
@@ -573,7 +606,8 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
             dupl->lpVtbl->ReleaseFrame(dupl);
 
-            if (!is_frame_blank(g->bits, g->w, g->h, g->is_hdr)) {
+            /* Pass the configured blank check mode to the detection function */
+            if (!is_frame_blank(g->bits, g->w, g->h, g->is_hdr, g_cfg.blank_check_mode)) {
                 dbg("dxgi: attempt %d produced non-blank frame, accepting", attempt);
                 ok = 1;
                 break;
