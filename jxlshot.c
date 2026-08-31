@@ -17,7 +17,7 @@
 *
 
 * Configuration is read from jxlshot.ini located next to the executable.
-* Debug logs are written to %TEMP%\jxlshot_debug.log
+* Debug logs are written to %TMP%\jxlshot_debug.log
 *
 * jxlshot.c — minimal command-line screenshot tool for Windows.
 *
