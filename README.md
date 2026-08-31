@@ -11,6 +11,8 @@
 
 - there is also config file for controlling lossy compression or keep lossless as default
 
+- there is also HDR support too (still experimental), alongside DPI awreness and correct colors awareness.
+
 - no need for installation or anything just keep the folder somewhere and make sure its path stay as it is and run .bat file to make it run with windows always on startup
 
 - and nothing fancy just do what it should do !
