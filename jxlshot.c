@@ -174,7 +174,48 @@ static void ensure_default_ini(void) {
     if (GetFileAttributesW(ini_path) == INVALID_FILE_ATTRIBUTES) {
         FILE *f = _wfopen(ini_path, L"w");
         if (f) {
-            fprintf(f, "[Capture]\nDebug=0\nLossless=1\nDistance=1.0\nShowCursor=1\nExportPath=\nHotkeyFull=PrintScreen\nHotkeyRegion=Ctrl+PrintScreen\nBlankCheckMode=2\n");
+            fprintf(f, 
+                "; ==============================================================================\n"
+                "; JXLShot Configuration File\n"
+                "; ==============================================================================\n"
+                ";\n"
+                "; [JPEG XL Distance & Quality Guide]\n"
+                "; The 'Distance' parameter dictates the compression ratio and visual quality.\n"
+                "; Please refer to the following metrics when adjusting this value:\n"
+                ";\n"
+                ";   0.0 : Mathematically lossless compression. The file retains every single\n"
+                ";         original data bit.\n"
+                ";   1.0 : Visually lossless quality. The image looks identical to the human\n"
+                ";         eye under normal viewing conditions, but uses lossy compression\n"
+                ";         to save space. (Recommended default)\n"
+                ";   2.0+: Higher compression levels. These values significantly reduce file\n"
+                ";         size but introduce visible quality loss and artifacts.\n"
+                ";\n"
+                "; Note: If 'Lossless=1' is enabled below, the 'Distance' parameter is ignored,\n"
+                "; and the image is processed in strict mathematically lossless mode.\n"
+                ";\n"
+                "; [General Settings Reference]\n"
+                ";   Debug          : Set to 1 to enable debug logging; 0 to disable.\n"
+                ";   Lossless       : 1 = Force mathematically lossless mode (ignores Distance).\n"
+                ";                    0 = Use lossy compression based on the 'Distance' value.\n"
+                ";   ShowCursor     : 1 = Include the mouse cursor in captures; 0 = Hide it.\n"
+                ";   ExportPath     : Custom directory for saving screenshots. Leave blank for default.\n"
+                ";   HotkeyFull     : Keyboard shortcut to capture the entire screen.\n"
+                ";   HotkeyRegion   : Keyboard shortcut to capture a specific screen region.\n"
+                ";   BlankCheckMode : 0 = Disabled, 1 = Basic detection, 2 = Advanced detection.\n"
+                ";\n"
+                "; ==============================================================================\n"
+                "\n"
+                "[Capture]\n"
+                "Debug=0\n"
+                "Lossless=1\n"
+                "Distance=1.0\n"
+                "ShowCursor=1\n"
+                "ExportPath=\n"
+                "HotkeyFull=PrintScreen\n"
+                "HotkeyRegion=Ctrl+PrintScreen\n"
+                "BlankCheckMode=2\n"
+            );
             fclose(f);
         }
     }
