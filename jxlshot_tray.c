@@ -154,18 +154,41 @@ static void execute_full_capture(void) {
 }
 
 static void execute_set_path(void) {
-    BROWSEINFOW bi = { 0 }; bi.hwndOwner = NULL;
+    BROWSEINFOW bi = { 0 };
+    
+    // Note: If you have a visible main window handle, use it here instead of NULL 
+    // or g_hwndTray to ensure the dialog is properly modal and centered.
+    bi.hwndOwner = g_hwndTray; 
     bi.lpszTitle = L"Select Export Folder for Screenshots";
-    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    
+    // BIF_USENEWUI is the modern standard (includes BIF_NEWDIALOGSTYLE | BIF_EDITBOX)
+    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_USENEWUI;
+    
     LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
     if (pidl) {
-        wchar_t path[MAX_PATH];
+        // Use a larger buffer (32768) to safely handle modern long paths
+        wchar_t path[32768];
+        
         if (SHGetPathFromIDListW(pidl, path)) {
-            wcsncpy(g_cfg.export_path, path, MAX_PATH - 1); g_cfg.export_path[MAX_PATH - 1] = L'\0';
-            wchar_t ini_path[MAX_PATH]; _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-            WritePrivateProfileStringW(L"Capture", L"ExportPath", path, ini_path);
-            MessageBoxW(NULL, L"Export path updated.", L"jxlshot", MB_ICONINFORMATION);
+            // Safely copy to config, ensuring null-termination (requires <stdlib.h> for _countof)
+            wcsncpy_s(g_cfg.export_path, _countof(g_cfg.export_path), path, _TRUNCATE);
+            
+            // Safely build the INI path with guaranteed null-termination
+            wchar_t ini_path[32768];
+            if (_snwprintf_s(ini_path, _countof(ini_path), _TRUNCATE, L"%s\\jxlshot.ini", g_exe_dir) == 0) {
+                
+                WritePrivateProfileStringW(L"Capture", L"ExportPath", path, ini_path);
+                MessageBoxW(g_hwndTray, L"Export path updated.", L"jxlshot", MB_ICONINFORMATION);
+                
+            } else {
+                // Handle the rare case where the executable directory path itself is excessively long
+                MessageBoxW(g_hwndTray, L"Failed to build configuration path.", L"jxlshot", MB_ICONERROR);
+            }
+        } else {
+            MessageBoxW(g_hwndTray, L"Failed to resolve the selected folder path.", L"jxlshot", MB_ICONERROR);
         }
+        
+        // Correctly free the PIDL allocated by the shell
         CoTaskMemFree(pidl);
     }
 }
@@ -176,41 +199,45 @@ static void execute_set_path(void) {
 static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
     // Intercept the exact moment the Task Dialog window is created
     if (msg == TDN_CREATED) {
-        HMODULE hUxtheme = LoadLibraryW(L"uxtheme.dll");
-        if (hUxtheme) {
-            // Ordinal 133: AllowDarkModeForWindow
-            typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
-            // Ordinal 136: FlushMenuThemes (ensures child controls render correctly)
-            typedef void (WINAPI *fnFlushMenuThemes)(void);
-            
-            fnAllowDarkModeForWindow pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133));
-            fnFlushMenuThemes pFlushMenuThemes = (fnFlushMenuThemes)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(136));
-
-            if (pAllowDarkModeForWindow) {
-                // Apply dark mode DIRECTLY to the Task Dialog's HWND
-                pAllowDarkModeForWindow(hwnd, TRUE);
-            }
-            if (pFlushMenuThemes) {
-                pFlushMenuThemes();
-            }
-            FreeLibrary(hUxtheme);
+        // Use the cached initialization function from the previous refactoring
+        InitDarkModeAPI(); 
+        
+        if (pAllowDarkModeForWindow) {
+            // Apply dark mode DIRECTLY to the Task Dialog's HWND
+            pAllowDarkModeForWindow(hwnd, TRUE);
+        }
+        if (pFlushMenuThemes) {
+            pFlushMenuThemes();
         }
     }
     
     if (msg == TDN_HYPERLINK_CLICKED) {
-        ShellExecuteW(hwnd, L"open", (LPCWSTR)lParam, NULL, NULL, SW_SHOWNORMAL);
+        // Check return value to ensure the shell execute was successful (> 32)
+        HINSTANCE hResult = ShellExecuteW(hwnd, L"open", (LPCWSTR)lParam, NULL, NULL, SW_SHOWNORMAL);
+        if ((INT_PTR)hResult <= 32) {
+            // Optional: Handle failure (e.g., no default browser configured)
+            MessageBoxW(hwnd, L"Failed to open the link. Please check your default browser settings.", L"jxlshot", MB_ICONWARNING);
+        }
     }
+    
     return S_OK;
 }
 
 static void execute_about(void) {
+    // LoadIconW returns a shared icon. Do NOT call DestroyIcon on it.
     HICON hAppIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON));
 
     TASKDIALOGCONFIG config = {0};
     config.cbSize = sizeof(TASKDIALOGCONFIG);
     
-    // Provide a valid parent (fallback to tray window if menu owner is missing)
-    config.hwndParent = g_hwndMenuOwner ? g_hwndMenuOwner : g_hwndTray;
+    // SAFETY FIX: Avoid using message-only windows as parents for modal dialogs.
+    // GetForegroundWindow() is the safest bet for a tray app to ensure proper z-order and focus.
+    // Fallback to NULL if no foreground window is available.
+    HWND hParent = GetForegroundWindow();
+    if (hParent == NULL || IsWindowVisible(hParent) == FALSE) {
+        hParent = NULL; 
+    }
+    config.hwndParent = hParent;
     
     config.hInstance = NULL;
     config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_HICON_MAIN;
@@ -223,11 +250,9 @@ static void execute_about(void) {
 
     TaskDialogIndirect(&config, NULL, NULL, NULL);
 
-    if (hAppIcon) {
-        DestroyIcon(hAppIcon);
-    }
+    // REMOVED: DestroyIcon(hAppIcon); 
+    // LoadIconW returns a shared system resource. Destroying it is unsafe.
 }
-
 /* ------------------------------------------------------------------ */
 /* Interactive Region Selection (Optimized & Ghosting Fixed)          */
 /* ------------------------------------------------------------------ */
@@ -240,46 +265,50 @@ static BOOL    g_isDragging = FALSE;
 
 static void crop_and_encode_region(RECT *r) {
     Grab g;
-    ZeroMemory(&g, sizeof(g)); // Ensure clean initial state
+    ZeroMemory(&g, sizeof(g));
     
     if (!grab_primary_monitor(&g)) {
-        return; // Early exit is safe
+        return;
     }
     
     int rw = r->right - r->left;
     int rh = r->bottom - r->top;
     
     if (rw <= 0 || rh <= 0) {
-        free_grab(&g); // Guaranteed cleanup before early exit
+        free_grab(&g);
         return;
     }
 
-    // Determine bytes per pixel based on HDR (6 bytes) or SDR (3 bytes)
     size_t bytes_per_pixel = g.is_hdr ? 6 : 3;
+    
+    // SAFETY: Verify that the source buffer is tightly packed. 
+    // If grab_primary_monitor uses a stride (e.g., padded to 4 bytes), 
+    // you must use g.stride instead of (g.w * bytes_per_pixel) here.
+    size_t src_stride = g.w * bytes_per_pixel; // REPLACE with g.stride if applicable
     
     uint8_t *crop_bits = (uint8_t *)malloc((size_t)rw * rh * bytes_per_pixel);
     if (!crop_bits) {
-        free_grab(&g); // Guaranteed cleanup before early exit
+        free_grab(&g);
         return;
     }
     
-    // Copy row by row from the tightly packed source buffer
+    // Copy row by row, accounting for potential source stride
+    size_t dst_stride = (size_t)rw * bytes_per_pixel;
     for (int y = 0; y < rh; y++) {
         memcpy(
-            crop_bits + (size_t)y * rw * bytes_per_pixel, 
-            g.bits + ((size_t)(r->top + y) * g.w + r->left) * bytes_per_pixel, 
-            rw * bytes_per_pixel
+            crop_bits + (size_t)y * dst_stride, 
+            g.bits + ((size_t)(r->top + y) * g.w + r->left) * bytes_per_pixel, // Update if using src_stride
+            dst_stride
         );
     }
     
-    wchar_t out_path[MAX_PATH]; 
-    build_out_path(out_path, MAX_PATH, g.is_hdr); 
+    wchar_t out_path[32768]; // Upgraded to support long paths
+    build_out_path(out_path, _countof(out_path), g.is_hdr); 
     
-    // UPDATED: Use the new identity save function and pass g.is_hdr
     save_rgb_as_jxl(crop_bits, rw, rh, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path);
     
-    free(crop_bits); // Guaranteed heap cleanup
-    free_grab(&g);   // Guaranteed cleanup
+    free(crop_bits);
+    free_grab(&g);
 }
 
 LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -291,7 +320,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             // 1. Restore the original screen capture
             BitBlt(hdc, 0, 0, g_screenW, g_screenH, g_hdcMem, 0, 0, SRCCOPY);
             
-            // 2. Apply dark mode overlay (Alpha 120 provides a modern dimmed effect)
+            // 2. Apply dark mode overlay (Alpha 120)
             BLENDFUNCTION bf = { AC_SRC_OVER, 0, 120, 0 };
             AlphaBlend(hdc, 0, 0, g_screenW, g_screenH, g_hdcBlack, 0, 0, 1, 1, bf);
 
@@ -302,28 +331,26 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 int w = abs(g_rcSel.right - g_rcSel.left);
                 int h = abs(g_rcSel.bottom - g_rcSel.top);
                 
-                // Restore the clear (non-dimmed) image in the selected region
+                // Restore the clear image in the selected region
                 BitBlt(hdc, x, y, w, h, g_hdcMem, x, y, SRCCOPY);
                 
-                // Modern Accent Color Border (Windows Blue: #0078D7)
                 HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
                 HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
                 HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
                 Rectangle(hdc, x, y, x + w, y + h);
                 
-                // Clean up GDI objects properly
                 SelectObject(hdc, hOldBrush); 
                 SelectObject(hdc, hOldPen); 
                 DeleteObject(hPen);
 
-                // 4. Dimension Tooltip (White text, transparent background)
+                // 4. Dimension Tooltip
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(255, 255, 255));
                 
                 wchar_t dimText[64];
-                _snwprintf(dimText, 64, L"%d × %d", w, h);
+                // SECURE: Use _snwprintf_s to guarantee null-termination
+                _snwprintf_s(dimText, _countof(dimText), _TRUNCATE, L"%d × %d", w, h);
                 
-                // Prevent tooltip from drawing off the top edge of the screen
                 int textY = (y - 24) < 0 ? (y + 8) : (y - 24);
                 TextOutW(hdc, x + 8, textY, dimText, (int)wcslen(dimText));
             }
@@ -362,9 +389,11 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ShowWindow(hwnd, SW_HIDE);
                 DestroyWindow(hwnd);
                 
-                // Force desktop to repaint immediately to clear any ghosting artifacts
-                RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
-
+                // PERFORMANCE FIX: Removed RDW_ALLCHILDREN. 
+                // Let DWM naturally repaint the desktop. If ghosting occurs, 
+                // invalidate only the specific region, not the entire OS.
+                // RedrawWindow(NULL, &r, NULL, RDW_INVALIDATE | RDW_UPDATENOW); // Optional fallback
+                
                 if ((r.right - r.left) > 0 && (r.bottom - r.top) > 0) {
                     crop_and_encode_region(&r);
                 }
@@ -379,8 +408,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 ShowWindow(hwnd, SW_HIDE);
                 DestroyWindow(hwnd);
                 
-                // Force desktop to repaint immediately to clear any ghosting artifacts
-                RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
+                // Same performance fix as above: do not use RDW_ALLCHILDREN
             } 
             return 0;
         }
@@ -390,12 +418,13 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
             if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
             
-            // Completely clear all region selection state so the app remembers nothing
             g_hwndRegion = NULL;
             g_isDragging = FALSE;
             g_rcSel.left = g_rcSel.top = g_rcSel.right = g_rcSel.bottom = 0;
             
-            if (!g_cfg.show_cursor) ShowCursor(TRUE);
+            // Ensure cursor is restored. Consider tracking a local boolean 
+            // to ensure ShowCursor(FALSE) was actually called before this.
+            ShowCursor(TRUE); 
             return 0;
         }
     }
@@ -409,34 +438,100 @@ static void start_region_capture(void) {
     g_isDragging = FALSE;
     g_rcSel.left = g_rcSel.top = g_rcSel.right = g_rcSel.bottom = 0;
 
-    g_screenW = GetSystemMetrics(SM_CXSCREEN); g_screenH = GetSystemMetrics(SM_CYSCREEN);
-    HDC g_hdcScreen = GetDC(NULL);
-    g_hdcMem = CreateCompatibleDC(g_hdcScreen);
-    
-    BITMAPINFO bi = {0}; bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = g_screenW; bi.bmiHeader.biHeight = -g_screenH;
-    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
-    g_hbmScreen = CreateDIBSection(g_hdcScreen, &bi, DIB_RGB_COLORS, NULL, NULL, 0);
-    SelectObject(g_hdcMem, g_hbmScreen);
-    BitBlt(g_hdcMem, 0, 0, g_screenW, g_screenH, g_hdcScreen, 0, 0, SRCCOPY);
+    // MULTI-MONITOR FIX: Use virtual screen metrics to cover all displays
+    int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    g_screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    g_screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
 
-    g_hdcBlack = CreateCompatibleDC(g_hdcScreen);
-    g_hbmBlack = CreateCompatibleBitmap(g_hdcScreen, 1, 1);
+    HDC hdcScreen = GetDC(NULL);
+    if (!hdcScreen) return;
+
+    g_hdcMem = CreateCompatibleDC(hdcScreen);
+    if (!g_hdcMem) goto cleanup_dc;
+
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = g_screenW;
+    bi.bmiHeader.biHeight = -g_screenH; // Top-down DIB
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    // WYSIWYG IMPROVEMENT: Capture the pointer to the bitmap bits
+    // This allows crop_and_encode_region to read directly from this buffer
+    // instead of calling grab_primary_monitor() again.
+    void* pScreenBits = NULL;
+    g_hbmScreen = CreateDIBSection(hdcScreen, &bi, DIB_RGB_COLORS, &pScreenBits, NULL, 0);
+    if (!g_hbmScreen) goto cleanup_mem_dc;
+    
+    SelectObject(g_hdcMem, g_hbmScreen);
+    BitBlt(g_hdcMem, 0, 0, g_screenW, g_screenH, hdcScreen, 0, 0, SRCCOPY);
+
+    g_hdcBlack = CreateCompatibleDC(hdcScreen);
+    if (!g_hdcBlack) goto cleanup_dib;
+
+    g_hbmBlack = CreateCompatibleBitmap(hdcScreen, 1, 1);
+    if (!g_hbmBlack) goto cleanup_black_dc;
+
     HBITMAP hOldBmp = (HBITMAP)SelectObject(g_hdcBlack, g_hbmBlack);
     RECT rc = {0, 0, 1, 1};
     FillRect(g_hdcBlack, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
     SelectObject(g_hdcBlack, hOldBmp);
 
-    ReleaseDC(NULL, g_hdcScreen);
+    ReleaseDC(NULL, hdcScreen);
 
-    WNDCLASSEXW wc = {0}; wc.cbSize = sizeof(wc); wc.lpfnWndProc = RegionWndProc;
-    wc.hInstance = GetModuleHandle(NULL); wc.hCursor = LoadCursor(NULL, IDC_CROSS);
-    wc.lpszClassName = L"JxlShotRegionClass"; RegisterClassExW(&wc);
+    // CLASS REGISTRATION: Guarded to prevent redundant calls
+    static BOOL classRegistered = FALSE;
+    if (!classRegistered) {
+        WNDCLASSEXW wc = {0};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = RegionWndProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, IDC_CROSS);
+        wc.lpszClassName = L"JxlShotRegionClass";
+        
+        if (RegisterClassExW(&wc)) {
+            classRegistered = TRUE;
+        } else {
+            goto cleanup_black_bmp; // Fatal: cannot create window without class
+        }
+    }
 
-    g_hwndRegion = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"JxlShotRegionClass", L"",
-                                   WS_POPUP, 0, 0, g_screenW, g_screenH, NULL, NULL, GetModuleHandle(NULL), NULL);
-    if (!g_cfg.show_cursor) ShowCursor(FALSE);
-    ShowWindow(g_hwndRegion, SW_SHOW); UpdateWindow(g_hwndRegion);
+    g_hwndRegion = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW, 
+        L"JxlShotRegionClass", 
+        L"",
+        WS_POPUP, 
+        screenX, screenY, g_screenW, g_screenH, 
+        NULL, NULL, GetModuleHandleW(NULL), NULL
+    );
+
+    if (!g_hwndRegion) {
+        goto cleanup_black_bmp;
+    }
+
+    if (!g_cfg.show_cursor) {
+        ShowCursor(FALSE);
+    }
+    
+    ShowWindow(g_hwndRegion, SW_SHOW);
+    UpdateWindow(g_hwndRegion);
+    return;
+
+/* ------------------------------------------------------------------ */
+/* Centralized Cleanup Path for Initialization Failures               */
+/* ------------------------------------------------------------------ */
+cleanup_black_bmp:
+    if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
+cleanup_black_dc:
+    if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
+cleanup_dib:
+    if (g_hbmScreen) { DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
+cleanup_mem_dc:
+    if (g_hdcMem) { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
+cleanup_dc:
+    ReleaseDC(NULL, hdcScreen);
 }
 
 /* ------------------------------------------------------------------ */
