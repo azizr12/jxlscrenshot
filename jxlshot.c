@@ -360,6 +360,159 @@ static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int samp
 }
 
 /* ------------------------------------------------------------------ */
+/* Cursor Rendering Helper for DXGI (blends into raw bits)            */
+/* ------------------------------------------------------------------ */
+static float half_to_float(uint16_t h) {
+    uint32_t sign = (h & 0x8000) << 16;
+    int32_t exponent = (h & 0x7C00) >> 10;
+    uint32_t mantissa = h & 0x03FF;
+    if (exponent == 0) {
+        if (mantissa == 0) return (sign >> 16) ? -0.0f : 0.0f;
+        while ((mantissa & 0x0400) == 0) { mantissa <<= 1; exponent--; }
+        exponent++; mantissa &= ~0x0400;
+    } else if (exponent == 31) {
+        return (mantissa == 0) ? ((sign >> 16) ? -1e38f : 1e38f) : 1e38f;
+    }
+    exponent += (127 - 15);
+    uint32_t f = sign | (exponent << 23) | (mantissa << 13);
+    return *(float*)&f;
+}
+
+static uint16_t float_to_half(float f) {
+    uint32_t x = *(uint32_t*)&f;
+    uint32_t sign = (x >> 16) & 0x8000;
+    int32_t exponent = ((x >> 23) & 0xFF) - 127 + 15;
+    uint32_t mantissa = x & 0x7FFFFF;
+    if (exponent <= 0) {
+        if (exponent < -10) return (uint16_t)sign;
+        mantissa = (mantissa | 0x800000) >> (1 - exponent);
+        return (uint16_t)(sign | (mantissa >> 13));
+    } else if (exponent >= 31) {
+        return (uint16_t)(sign | 0x7C00);
+    }
+    return (uint16_t)(sign | (exponent << 10) | (mantissa >> 13));
+}
+
+static void draw_cursor_on_bits(uint8_t *bits, int w, int h, int is_hdr, HMONITOR target_monitor) {
+    if (!bits || w <= 0 || h <= 0) return;
+    CURSORINFO ci = { sizeof(ci) };
+    if (!GetCursorInfo(&ci) || !(ci.flags & CURSOR_SHOWING)) return;
+    ICONINFO iconInfo;
+    if (!GetIconInfo(ci.hCursor, &iconInfo)) return;
+    MONITORINFO mi = { sizeof(mi) };
+    if (!GetMonitorInfoW(target_monitor, &mi)) {
+        if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
+        if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
+        return;
+    }
+
+    int cursor_x = ci.ptScreenPos.x - mi.rcMonitor.left - (int)iconInfo.xHotspot;
+    int cursor_y = ci.ptScreenPos.y - mi.rcMonitor.top - (int)iconInfo.yHotspot;
+
+    BITMAP bm;
+    HBITMAP hbmSource = iconInfo.hbmColor ? iconInfo.hbmColor : iconInfo.hbmMask;
+    if (!GetObjectW(hbmSource, sizeof(bm), &bm)) {
+        if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
+        if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
+        return;
+    }
+
+    int cw = bm.bmWidth;
+    int ch = bm.bmHeight;
+    if (iconInfo.hbmMask && !iconInfo.hbmColor) ch /= 2;
+
+    HDC hdc = CreateCompatibleDC(NULL);
+    BITMAPINFO bi = {0};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = cw;
+    bi.bmiHeader.biHeight = -ch;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void *dibBits = NULL;
+    HBITMAP hbmCursor = CreateDIBSection(hdc, &bi, DIB_RGB_COLORS, &dibBits, NULL, 0);
+    if (dibBits) {
+        memset(dibBits, 0, (size_t)cw * ch * 4);
+        HBITMAP hbmOld = (HBITMAP)SelectObject(hdc, hbmCursor);
+        DrawIconEx(hdc, 0, 0, ci.hCursor, cw, ch, 0, NULL, DI_NORMAL);
+        SelectObject(hdc, hbmOld);
+
+        int start_x = cursor_x < 0 ? 0 : cursor_x;
+        int start_y = cursor_y < 0 ? 0 : cursor_y;
+        int end_x = cursor_x + cw > w ? w : cursor_x + cw;
+        int end_y = cursor_y + ch > h ? h : cursor_y + ch;
+
+        if (end_x > start_x && end_y > start_y) {
+            size_t bpp = is_hdr ? 6 : 3;
+            uint8_t *cursor_pixels = (uint8_t *)dibBits;
+            for (int y = start_y; y < end_y; y++) {
+                for (int x = start_x; x < end_x; x++) {
+                    int cx = x - cursor_x;
+                    int cy = y - cursor_y;
+                    uint8_t *cpx = cursor_pixels + ((size_t)cy * cw + cx) * 4;
+                    uint8_t a = cpx[3];
+                    if (a > 0) {
+                        uint8_t *dpx = bits + ((size_t)y * w + x) * bpp;
+                        float alpha = a / 255.0f;
+                        if (is_hdr) {
+                            float r = half_to_float(*(uint16_t*)&dpx[0]);
+                            float g = half_to_float(*(uint16_t*)&dpx[2]);
+                            float b = half_to_float(*(uint16_t*)&dpx[4]);
+                            float cr = cpx[2] / 255.0f, cg = cpx[1] / 255.0f, cb = cpx[0] / 255.0f;
+                            *(uint16_t*)&dpx[0] = float_to_half(cr * alpha + r * (1.0f - alpha));
+                            *(uint16_t*)&dpx[2] = float_to_half(cg * alpha + g * (1.0f - alpha));
+                            *(uint16_t*)&dpx[4] = float_to_half(cb * alpha + b * (1.0f - alpha));
+                        } else {
+                            dpx[0] = (uint8_t)(cpx[2] * alpha + dpx[0] * (1.0f - alpha));
+                            dpx[1] = (uint8_t)(cpx[1] * alpha + dpx[1] * (1.0f - alpha));
+                            dpx[2] = (uint8_t)(cpx[0] * alpha + dpx[2] * (1.0f - alpha));
+                        }
+                    }
+                }
+            }
+        }
+        DeleteObject(hbmCursor);
+    }
+    DeleteDC(hdc);
+    if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
+    if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
+}
+
+/* ------------------------------------------------------------------ */
+/* GDI Cursor Rendering Helper                                        */
+/* ------------------------------------------------------------------ */
+static void draw_cursor_if_enabled(HDC hdc, HMONITOR target_monitor, const AppConfig* cfg) {
+    if (!cfg->show_cursor) return;
+
+    CURSORINFO ci = { sizeof(ci) };
+    if (!GetCursorInfo(&ci)) return;
+    if (!(ci.flags & CURSOR_SHOWING)) return;
+
+    ICONINFO iconInfo;
+    if (!GetIconInfo(ci.hCursor, &iconInfo)) return;
+
+    MONITORINFO mi = { sizeof(mi) };
+    if (!GetMonitorInfoW(target_monitor, &mi)) {
+        if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
+        if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
+        return;
+    }
+
+    // Calculate cursor position relative to the target monitor's top-left corner
+    int x = ci.ptScreenPos.x - mi.rcMonitor.left - (int)iconInfo.xHotspot;
+    int y = ci.ptScreenPos.y - mi.rcMonitor.top - (int)iconInfo.yHotspot;
+
+    // Draw the cursor onto the memory DC. 
+    // 0, 0 for width/height tells DrawIconEx to use the cursor's native size.
+    DrawIconEx(hdc, x, y, ci.hCursor, 0, 0, 0, NULL, DI_NORMAL);
+
+    // Clean up GDI bitmaps allocated by GetIconInfo to prevent memory leaks
+    if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
+    if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
+}
+
+/* ------------------------------------------------------------------ */
 /* GDI BitBlt fallback capture (works without DXGI Desktop Duplication)*/
 /* ------------------------------------------------------------------ */
 
@@ -371,6 +524,7 @@ static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int samp
  * Used as a fallback when the DXGI path fails or produces a blank
  * frame after retrying.
  */
+
 static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
     ZeroMemory(g, sizeof *g);
 
@@ -413,6 +567,11 @@ static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
     /* CAPTUREBLT pulls in layered/UI-composited windows too, not just
      * the raw framebuffer, which matters on some setups. */
     BOOL blt_ok = BitBlt(hdcMem, 0, 0, w, h, hdcScreen, x, y, SRCCOPY | CAPTUREBLT);
+
+    /* Manually draw the cursor if enabled. This ensures the cursor appears 
+     * even if BitBlt missed the hardware overlay, and avoids the dangerous 
+     * system-wide side effects of ShowCursor(FALSE). */
+    draw_cursor_if_enabled(hdcMem, target_monitor, &g_cfg);
 
     SelectObject(hdcMem, hbmOld);
     ReleaseDC(NULL, hdcScreen);
@@ -605,6 +764,10 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
 
             ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
             dupl->lpVtbl->ReleaseFrame(dupl);
+
+            if (g_cfg.show_cursor) {
+                draw_cursor_on_bits(g->bits, g->w, g->h, g->is_hdr, target_monitor);
+            }
 
             /* Pass the configured blank check mode to the detection function */
             if (!is_frame_blank(g->bits, g->w, g->h, g->is_hdr, g_cfg.blank_check_mode)) {
