@@ -202,7 +202,7 @@ static void ensure_default_ini(void) {
                 ";   ExportPath     : Custom directory for saving screenshots. Leave blank for default.\n"
                 ";   HotkeyFull     : Keyboard shortcut to capture the entire screen.\n"
                 ";   HotkeyRegion   : Keyboard shortcut to capture a specific screen region.\n"
-                ";   BlankCheckMode : 0 = Disabled, 1 = Basic detection, 2 = Advanced detection.\n"
+                ";   BlankCheckMode : 0 = Disabled, 1 = Basic detection, 2 = Advanced detection, 3 = HARDCORE . \n"
                 ";\n"
                 "; ==============================================================================\n"
                 "\n"
@@ -215,8 +215,9 @@ static void ensure_default_ini(void) {
                 "HotkeyFull=PrintScreen\n"
                 "HotkeyRegion=Ctrl+PrintScreen\n"
                 "BlankCheckMode=2\n"
-                ";\n"
-                ";\n"   
+                "\n"
+                "\n"
+                "\n"   
                 "; THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! "
             );
             fclose(f);
