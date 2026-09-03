@@ -215,6 +215,9 @@ static void ensure_default_ini(void) {
                 "HotkeyFull=PrintScreen\n"
                 "HotkeyRegion=Ctrl+PrintScreen\n"
                 "BlankCheckMode=2\n"
+                ";\n"
+                ";\n"   
+                "; THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! "
             );
             fclose(f);
         }
