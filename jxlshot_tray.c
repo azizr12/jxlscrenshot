@@ -436,6 +436,21 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             } 
             return 0;
         }
+        
+        /* Right-Click Cancellation */
+        case WM_RBUTTONDOWN: {
+            // Right-click cancels the selection, exactly like the Escape key
+            g_isDragging = FALSE; 
+            ReleaseCapture();
+    
+            ShowWindow(hwnd, SW_HIDE);
+            DestroyWindow(hwnd);
+            
+            // Force desktop to repaint immediately to clear any ghosting artifacts
+            RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
+            return 0;
+        }
+        
         case WM_DESTROY: {
             if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
             if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
@@ -499,7 +514,14 @@ static void start_region_capture(void) {
     }
 
     if (!g_cfg.show_cursor) ShowCursor(FALSE);
-    ShowWindow(g_hwndRegion, SW_SHOW); UpdateWindow(g_hwndRegion);
+    
+    ShowWindow(g_hwndRegion, SW_SHOW); 
+    
+    /* Crucial Fix: Force the overlay to take keyboard focus so it receives WM_KEYDOWN (Escape) */
+    SetForegroundWindow(g_hwndRegion);
+    SetFocus(g_hwndRegion);
+    
+    UpdateWindow(g_hwndRegion);
 }
 
 /* ------------------------------------------------------------------ */
