@@ -79,8 +79,13 @@ static AppConfig g_cfg;
 static wchar_t   g_exe_dir[MAX_PATH];
 
 static void init_paths(void) {
-    wchar_t tmp[MAX_PATH];
-    GetModuleFileNameW(NULL, tmp, MAX_PATH);
+    wchar_t tmp[32768]; // Support Windows long paths
+    DWORD len = GetModuleFileNameW(NULL, tmp, 32768);
+    if (len == 0 || len == 32768) {
+        // Fallback to current directory if path is too long or fails
+        wcscpy(g_exe_dir, L".");
+        return;
+    }
     wchar_t *slash = wcsrchr(tmp, L'\\');
     if (slash) *slash = 0;
     wcsncpy(g_exe_dir, tmp, MAX_PATH - 1);
@@ -668,7 +673,8 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             }
 
             dbg("dxgi: attempt %d frame is blank, retrying", attempt);
-            Sleep(60);
+            SwitchToThread(); // Yields remainder of time slice to the game/DWM
+            Sleep(7);         // Fallback to a short sleep to guarantee frame pacing alignment
         }
 
         if (!ok) dbg("dxgi: all attempts produced blank frames, giving up on DXGI");
@@ -837,6 +843,33 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
     free(buf); return ok;
 }
 
+
+
+/* ------------------------------------------------------------------ */
+/* Asynchronous Encoding Worker                                       */
+/* ------------------------------------------------------------------ */
+typedef struct {
+    uint8_t *bits;
+    int w, h, is_hdr, lossless;
+    float distance;
+    wchar_t out_path[MAX_PATH];
+} EncodeTask;
+
+static DWORD WINAPI EncodeWorker(LPVOID param) {
+    EncodeTask *task = (EncodeTask *)param;
+    
+    // Perform the heavy encoding and file I/O in the background
+    save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path);
+    
+    // Clean up memory allocated for this specific task
+    free(task->bits);
+    free(task);
+    return 0;
+}
+
+
+
+
 /* ------------------------------------------------------------------ */
 /* Entry points & main                                                */
 /* ------------------------------------------------------------------ */
@@ -871,12 +904,40 @@ int main(int argc, char **argv) {
     }
     
     wchar_t out_path[MAX_PATH]; 
-    
-    // CORRECTED: Single call with the updated 3-parameter signature
     build_out_path(out_path, MAX_PATH, g.is_hdr); 
     
-    // Use the new identity save function and pass g.is_hdr
-    int rc = save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path) ? 0 : 1;
+    int rc = 0;
+    
+    // Transfer ownership of the captured buffer to the background thread
+    EncodeTask *task = (EncodeTask *)malloc(sizeof(EncodeTask));
+    if (task) {
+        task->bits = g.bits;
+        task->w = g.w;
+        task->h = g.h;
+        task->is_hdr = g.is_hdr;
+        task->lossless = g_cfg.lossless;
+        task->distance = g_cfg.distance;
+        wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
+        
+        // Spawn the background thread
+        HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
+        if (hThread) {
+            CloseHandle(hThread);      // Detach thread; OS keeps process alive until it finishes
+            g.bits = NULL;             // Prevent free_grab from freeing the buffer (thread owns it now)
+            dbg("main: encoding offloaded to background thread");
+        } else {
+            // Fallback to synchronous if thread creation fails
+            dbg("main: CreateThread failed, falling back to synchronous save");
+            rc = save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path) ? 0 : 1;
+            free(task->bits);
+            free(task);
+            g.bits = NULL;
+        }
+    } else {
+        // Fallback if malloc fails
+        dbg("main: malloc failed for EncodeTask, falling back to synchronous save");
+        rc = save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path) ? 0 : 1;
+    }
     
     free_grab(&g); 
     
