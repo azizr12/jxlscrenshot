@@ -44,6 +44,9 @@
 #include <dxgi1_2.h>
 #include <dxgi1_5.h>
 #include <locale.h>
+#include <objbase.h>
+
+
 
 /* ------------------------------------------------------------------ */
 /* Forward Declarations                                               */
@@ -842,6 +845,9 @@ int main(int argc, char **argv);
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) { return main(__argc, __argv); }
 
 int main(int argc, char **argv) {
+    /* Initialize COM for DXGI/D3D11 stability */
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
     DWORD wait_ms = 0; int cli_lossless = -1; float cli_distance = -1.0f;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-q")) cli_lossless = 0;
@@ -858,6 +864,9 @@ int main(int argc, char **argv) {
     if (!grab_primary_monitor(&g)) { 
         free_grab(&g); 
         if (g_dbg) { fclose(g_dbg); g_dbg = NULL; }
+        
+        /* Uninitialize COM on early exit */
+        CoUninitialize(); 
         return 1; 
     }
     
@@ -876,6 +885,9 @@ int main(int argc, char **argv) {
         fclose(g_dbg);
         g_dbg = NULL;
     }
+    
+    /* Uninitialize COM before normal exit */
+    CoUninitialize();
     
     return rc;
 }
