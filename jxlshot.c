@@ -855,7 +855,11 @@ int main(int argc, char **argv) {
     if (wait_ms) Sleep(wait_ms);
 
     Grab g;
-    if (!grab_primary_monitor(&g)) { free_grab(&g); return 1; }
+    if (!grab_primary_monitor(&g)) { 
+        free_grab(&g); 
+        if (g_dbg) { fclose(g_dbg); g_dbg = NULL; }
+        return 1; 
+    }
     
     wchar_t out_path[MAX_PATH]; 
     
@@ -866,6 +870,13 @@ int main(int argc, char **argv) {
     int rc = save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path) ? 0 : 1;
     
     free_grab(&g); 
+    
+    /* Close the debug log file before exiting */
+    if (g_dbg) {
+        fclose(g_dbg);
+        g_dbg = NULL;
+    }
+    
     return rc;
 }
 #endif
