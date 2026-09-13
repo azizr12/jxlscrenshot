@@ -606,6 +606,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
 }
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
+    // 1. Initialize COM for Shell APIs (SHBrowseForFolder), TaskDialog, and DXGI/D3D11 stability
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
     set_dpi_aware(); 
     init_paths(); 
     ensure_default_ini(); 
@@ -653,5 +656,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     }
     
     uninstall_keyboard_hook();
+    
+    // 2. Clean up COM before exiting
+    CoUninitialize();
+    
     return (int)msg.wParam;
 }
