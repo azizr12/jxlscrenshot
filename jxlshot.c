@@ -219,7 +219,6 @@ static void ensure_default_ini(void) {
                 "Debug=0\n"
                 "Lossless=1\n"
                 "Distance=1.0\n"
-                /* "ShowCursor=1\n" */
                 "ExportPath=\n"
                 "HotkeyFull=PrintScreen\n"
                 "HotkeyRegion=Ctrl+PrintScreen\n"
@@ -227,7 +226,8 @@ static void ensure_default_ini(void) {
                 /* "\n" */
                 /* "\n" */
                 /* "\n" */
-                /* "; THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! " */
+                "ShowCursor=1\n"
+                "     THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! "
             );
             fclose(f);
         }

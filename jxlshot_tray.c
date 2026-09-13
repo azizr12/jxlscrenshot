@@ -143,14 +143,39 @@ static void execute_full_capture(void) {
     build_out_path(out_path, MAX_PATH, g.is_hdr);
     dbg("execute_full_capture: writing to %ls", out_path);
 
-    if (!save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path)) {
-        dbg("execute_full_capture: save FAILED");
-        MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
+    // OFFLOAD TO BACKGROUND THREAD
+    EncodeTask *task = (EncodeTask *)malloc(sizeof(EncodeTask));
+    if (task) {
+        task->bits = g.bits;
+        task->w = g.w;
+        task->h = g.h;
+        task->is_hdr = g.is_hdr;
+        task->lossless = g_cfg.lossless;
+        task->distance = g_cfg.distance;
+        wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
+        
+        HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
+        if (hThread) {
+            CloseHandle(hThread);
+            g.bits = NULL; // Thread owns the buffer now
+            dbg("execute_full_capture: encoding offloaded to background thread");
+        } else {
+            dbg("execute_full_capture: CreateThread failed, falling back to synchronous");
+            if (!save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path)) {
+                MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
+            }
+            free(task->bits);
+            free(task);
+            g.bits = NULL;
+        }
     } else {
-        dbg("execute_full_capture: save OK");
+        dbg("execute_full_capture: malloc failed, falling back to synchronous");
+        if (!save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path)) {
+            MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
+        }
     }
 
-    free_grab(&g);
+    free_grab(&g); 
 }
 
 static void execute_set_path(void) {
@@ -276,9 +301,36 @@ static void crop_and_encode_region(RECT *r) {
     build_out_path(out_path, MAX_PATH, g.is_hdr); 
     
     // UPDATED: Use the new identity save function and pass g.is_hdr
-    save_rgb_as_jxl(crop_bits, rw, rh, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path);
-    
-    free(crop_bits); // Guaranteed heap cleanup
+    // (Now offloaded to background thread to prevent UI/game freezing)
+    EncodeTask *task = (EncodeTask *)malloc(sizeof(EncodeTask));
+    if (task) {
+        task->bits = crop_bits; // Transfer ownership of crop_bits to the thread
+        task->w = rw;
+        task->h = rh;
+        task->is_hdr = g.is_hdr;
+        task->lossless = g_cfg.lossless;
+        task->distance = g_cfg.distance;
+        wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
+        
+        HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
+        if (hThread) {
+            CloseHandle(hThread);
+            // crop_bits is owned by the thread now; do NOT free it here.
+            dbg("crop_and_encode_region: encoding offloaded to background thread");
+        } else {
+            // Fallback to synchronous if thread creation fails
+            dbg("crop_and_encode_region: CreateThread failed, falling back to synchronous");
+            save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path);
+            free(task->bits); // Guaranteed heap cleanup on fallback
+            free(task);
+        }
+    } else {
+        // Fallback if malloc fails
+        dbg("crop_and_encode_region: malloc failed for EncodeTask, falling back to synchronous");
+        save_rgb_as_jxl(crop_bits, rw, rh, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path);
+        free(crop_bits); // Guaranteed heap cleanup on fallback
+    }
+
     free_grab(&g);   // Guaranteed cleanup
 }
 
@@ -429,12 +481,23 @@ static void start_region_capture(void) {
 
     ReleaseDC(NULL, g_hdcScreen);
 
+
     WNDCLASSEXW wc = {0}; wc.cbSize = sizeof(wc); wc.lpfnWndProc = RegionWndProc;
     wc.hInstance = GetModuleHandle(NULL); wc.hCursor = LoadCursor(NULL, IDC_CROSS);
     wc.lpszClassName = L"JxlShotRegionClass"; RegisterClassExW(&wc);
 
     g_hwndRegion = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"JxlShotRegionClass", L"",
                                    WS_POPUP, 0, 0, g_screenW, g_screenH, NULL, NULL, GetModuleHandle(NULL), NULL);
+    
+    // If window creation fails, clean up GDI objects immediately to prevent leaks
+    if (!g_hwndRegion) {
+        if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
+        if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
+        if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
+        if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
+        return;
+    }
+
     if (!g_cfg.show_cursor) ShowCursor(FALSE);
     ShowWindow(g_hwndRegion, SW_SHOW); UpdateWindow(g_hwndRegion);
 }
