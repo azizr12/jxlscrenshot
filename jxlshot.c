@@ -43,6 +43,7 @@
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <dxgi1_5.h>
+#include <locale.h>
 
 /* ------------------------------------------------------------------ */
 /* Forward Declarations                                               */
@@ -210,7 +211,7 @@ static void ensure_default_ini(void) {
                 "Debug=0\n"
                 "Lossless=1\n"
                 "Distance=1.0\n"
-                "ShowCursor=1\n"
+                "ShowCursor=0\n"
                 "ExportPath=\n"
                 "HotkeyFull=PrintScreen\n"
                 "HotkeyRegion=Ctrl+PrintScreen\n"
@@ -246,7 +247,12 @@ static void init_config(void) {
     if (g_cfg.blank_check_mode > 3) g_cfg.blank_check_mode = 3;
     wchar_t dist_str[64];
     GetPrivateProfileStringW(L"Capture", L"Distance", L"1.0", dist_str, 64, ini_path);
-    g_cfg.distance = (float)wcstod(dist_str, NULL);
+    
+    /* FIX: Use _wcstod_l with the "C" locale to ensure '.' is always recognized as the decimal separator */
+    _locale_t c_locale = _create_locale(LC_NUMERIC, "C");
+    g_cfg.distance = (float)_wcstod_l(dist_str, NULL, c_locale);
+    _free_locale(c_locale);
+
     if (g_cfg.distance < 0.0f) g_cfg.distance = 0.0f;
     if (g_cfg.distance > 25.0f) g_cfg.distance = 25.0f;
 
