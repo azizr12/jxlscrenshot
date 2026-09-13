@@ -251,7 +251,7 @@ static void init_config(void) {
     g_cfg.lossless = GetPrivateProfileIntW(L"Capture", L"Lossless", 1, ini_path);
     g_cfg.show_cursor = GetPrivateProfileIntW(L"Capture", L"ShowCursor", 1, ini_path);
     g_cfg.blank_check_mode = GetPrivateProfileIntW(L"Capture", L"BlankCheckMode", 2, ini_path);
-    if (g_cfg.blank_check_mode < 1) g_cfg.blank_check_mode = 1;
+    if (g_cfg.blank_check_mode < 0) g_cfg.blank_check_mode = 0; // Allow 0 (Disabled)
     if (g_cfg.blank_check_mode > 3) g_cfg.blank_check_mode = 3;
     wchar_t dist_str[64];
     GetPrivateProfileStringW(L"Capture", L"Distance", L"1.0", dist_str, 64, ini_path);
@@ -379,6 +379,9 @@ typedef struct {
  * considered valid (returns 0).
  */
 static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int sample_mode) {
+    // Mode 0: Disabled. Assume the frame is valid and skip checking.
+    if (sample_mode == 0) return 0; 
+
     if (!rgb || w <= 0 || h <= 0) return 1;
 
     size_t bpp = is_hdr ? 6 : 3;
