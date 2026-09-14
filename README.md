@@ -16,6 +16,8 @@
 
 - no need for installation or anything just keep the folder somewhere and make sure its path stay as it is and run .bat file to make it run with windows always on startup
 
+- or just use installer to do for you all of that!
+
 - and nothing fancy just do what it should do !
 
 - Why JXL? Because its the modern image format and take less space than other file format and has great compression.
