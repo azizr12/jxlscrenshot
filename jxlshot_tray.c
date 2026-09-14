@@ -608,6 +608,11 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 static void start_region_capture(void) {
+
+    // Fallback safety: If the flag was somehow stuck, reset it before starting
+    g_isRegionCapturing = TRUE; 
+    g_regionCaptureEndTime = 0;
+
     if (g_hwndRegion) return;
 
     g_isRegionCapturing = TRUE;
