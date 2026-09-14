@@ -79,13 +79,14 @@ static HWND g_hwndMenuOwner = NULL;
 #define WM_HOOK_FULL_CAPTURE   (WM_USER + 10)
 #define WM_HOOK_REGION_CAPTURE (WM_USER + 11)
 
-#define ID_TRAY       1
-#define IDM_FULL      101
-#define IDM_REGION    102
-#define IDM_SETPATH   104
-#define IDM_ABOUT     105
-#define IDM_RELOAD    106
-#define IDM_EXIT      103
+#define ID_TRAY        1
+#define IDM_FULL       101
+#define IDM_REGION     102
+#define IDM_SETPATH    104
+#define IDM_ABOUT      105
+#define IDM_RELOAD     106
+#define IDM_EXIT       103
+#define IDM_OPENCONFIG 107
 
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
 #define IDI_APP_ICON  1001
@@ -106,6 +107,7 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
+    AppendMenuW(hMenu, MF_STRING, IDM_OPENCONFIG, L"Open Config File");
     AppendMenuW(hMenu, MF_STRING, IDM_RELOAD, L"Reload Configuration");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, L"About...");
@@ -193,6 +195,26 @@ static void execute_set_path(void) {
         }
         CoTaskMemFree(pidl);
     }
+}
+
+static void execute_open_config(HWND hwnd) {
+    wchar_t ini_path[MAX_PATH];
+    _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    
+    // Attempt 1: Explicitly open with Notepad
+    HINSTANCE hResult = ShellExecuteW(hwnd, L"open", L"notepad.exe", ini_path, NULL, SW_SHOWNORMAL);
+    if ((INT_PTR)hResult > 32) {
+        return; // Success
+    }
+    
+    // Attempt 2: Fallback to default .txt/.ini viewer
+    hResult = ShellExecuteW(hwnd, L"open", ini_path, NULL, NULL, SW_SHOWNORMAL);
+    if ((INT_PTR)hResult > 32) {
+        return; // Success
+    }
+    
+    // Attempt 3: Fallback to simply opening the root folder containing the INI
+    ShellExecuteW(hwnd, L"explore", g_exe_dir, NULL, NULL, SW_SHOWNORMAL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -610,6 +632,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 case IDM_FULL: execute_full_capture(); break;
                 case IDM_REGION: start_region_capture(); break;
                 case IDM_SETPATH: execute_set_path(); break;
+                case IDM_OPENCONFIG: execute_open_config(hwnd); break;
                 case IDM_RELOAD: reload_config(); break;
                 case IDM_ABOUT: execute_about(); break;
                 case IDM_EXIT: PostQuitMessage(0); break;
