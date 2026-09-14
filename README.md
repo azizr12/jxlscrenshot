@@ -2,7 +2,7 @@
 
 [![Download Windows Installer](https://img.shields.io/badge/⬇_Download-Windows_Installer-2ea44f?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/azizr12/jxlscrenshot/releases/latest/download/jxlshot-setup-x64.exe)
 
-- Small c project to capture monitor screenshot using jxl image codec.
+- Small c project to capture monitor screenshot using jxl image codec on windows.
   
 - just run jxlshot.exe and it export a screenshot to picture path folder
   
