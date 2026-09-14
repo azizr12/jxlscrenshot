@@ -1,9 +1,10 @@
-v2.1.8 - 14 September 2026
+v2.1.9 - 14 September 2026
 - add **config.ini backward compatibility** with old config.ini or corruption
 - add **open config** to tray menu
 - add installer for executable using inno
 - add updater that check if there is new update only trigger if user click it no forcing 
 - add to tray iconn menu  **open export folder**
+- fix bug reltaed to esc button not working
 
 v2.1.3 - 13 September 2026
 - Fix the **stuttering** during **capture and decoding**

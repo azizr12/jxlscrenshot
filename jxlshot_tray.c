@@ -644,8 +644,20 @@ static void start_region_capture(void) {
     ShowWindow(g_hwndRegion, SW_SHOW); 
     
     /* Crucial Fix: Force the overlay to take keyboard focus so it receives WM_KEYDOWN (Escape) */
-    SetForegroundWindow(g_hwndRegion);
-    SetFocus(g_hwndRegion);
+    // We use AttachThreadInput to bypass Windows' strict SetForegroundWindow limitations
+    HWND hCurWnd = GetForegroundWindow();
+    DWORD dwCurID = GetCurrentThreadId();
+    DWORD dwForeID = GetWindowThreadProcessId(hCurWnd, NULL);
+    
+    if (dwCurID != dwForeID) {
+        AttachThreadInput(dwCurID, dwForeID, TRUE);
+        SetForegroundWindow(g_hwndRegion);
+        SetFocus(g_hwndRegion);
+        AttachThreadInput(dwCurID, dwForeID, FALSE);
+    } else {
+        SetForegroundWindow(g_hwndRegion);
+        SetFocus(g_hwndRegion);
+    }
     
     UpdateWindow(g_hwndRegion);
 }
@@ -684,26 +696,36 @@ static BOOL check_modifiers(UINT required_mod) {
 }
 
 static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode == HC_ACTION && wParam == WM_KEYDOWN) {
+    if (nCode == HC_ACTION) {
         KBDLLHOOKSTRUCT *pKB = (KBDLLHOOKSTRUCT *)lParam;
         
-        /* 1. Check Full Capture Hotkey 
-         * Condition: Key is defined (!= 0) AND pressed key matches AND modifiers match exactly */
-        if (g_cfg.hk_full_vk != 0 && pKB->vkCode == g_cfg.hk_full_vk) {
-            if (check_modifiers(g_cfg.hk_full_mod)) {
-                dbg("MATCH: Triggering FULL capture (VK=%d, MOD=%d)", g_cfg.hk_full_vk, g_cfg.hk_full_mod);
-                PostMessageW(g_hwndTray, WM_HOOK_FULL_CAPTURE, 0, 0);
-                return 1; // Block key from propagating to other apps
-            }
+        // FIX: Intercept Escape globally while region selection is active.
+        // This guarantees Esc works even if Windows refuses to give the overlay keyboard focus,
+        // and prevents the Esc key from accidentally exiting fullscreen games or closing underlying menus.
+        if (g_hwndRegion && pKB->vkCode == VK_ESCAPE && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+            PostMessageW(g_hwndRegion, WM_KEYDOWN, VK_ESCAPE, 0);
+            return 1; // Block the key from reaching the underlying application
         }
-        
-        /* 2. Check Region Capture Hotkey 
-         * Condition: Key is defined (!= 0) AND pressed key matches AND modifiers match exactly */
-        if (g_cfg.hk_region_vk != 0 && pKB->vkCode == g_cfg.hk_region_vk) {
-            if (check_modifiers(g_cfg.hk_region_mod)) {
-                dbg("MATCH: Triggering REGION capture (VK=%d, MOD=%d)", g_cfg.hk_region_vk, g_cfg.hk_region_mod);
-                PostMessageW(g_hwndTray, WM_HOOK_REGION_CAPTURE, 0, 0);
-                return 1; // Block key from propagating to other apps
+
+        if (wParam == WM_KEYDOWN) {
+            /* 1. Check Full Capture Hotkey 
+             * Condition: Key is defined (!= 0) AND pressed key matches AND modifiers match exactly */
+            if (g_cfg.hk_full_vk != 0 && pKB->vkCode == g_cfg.hk_full_vk) {
+                if (check_modifiers(g_cfg.hk_full_mod)) {
+                    dbg("MATCH: Triggering FULL capture (VK=%d, MOD=%d)", g_cfg.hk_full_vk, g_cfg.hk_full_mod);
+                    PostMessageW(g_hwndTray, WM_HOOK_FULL_CAPTURE, 0, 0);
+                    return 1; // Block key from propagating to other apps
+                }
+            }
+            
+            /* 2. Check Region Capture Hotkey 
+             * Condition: Key is defined (!= 0) AND pressed key matches AND modifiers match exactly */
+            if (g_cfg.hk_region_vk != 0 && pKB->vkCode == g_cfg.hk_region_vk) {
+                if (check_modifiers(g_cfg.hk_region_mod)) {
+                    dbg("MATCH: Triggering REGION capture (VK=%d, MOD=%d)", g_cfg.hk_region_vk, g_cfg.hk_region_mod);
+                    PostMessageW(g_hwndTray, WM_HOOK_REGION_CAPTURE, 0, 0);
+                    return 1; // Block key from propagating to other apps
+                }
             }
         }
     }
