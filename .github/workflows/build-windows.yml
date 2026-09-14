@@ -41,12 +41,12 @@ jobs:
               -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.o \
               -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid
 
-          # 4. Prepare distribution directory
+          # 4. Prepare distribution directory (Required for Inno Setup to package these files)
           mkdir -p dist
           cp jxlshot.exe jxlshot_tray.exe dist/
           
-          # Copy auxiliary files
-          cp README.md ADD-to-START-UP.bat dist/ 2>/dev/null || true
+          # Copy auxiliary files needed by the installer
+          cp README.md dist/ 2>/dev/null || true
 
           # 5. Extract and copy required MinGW/libjxl DLLs
           ldd jxlshot.exe jxlshot_tray.exe | grep -o '/mingw64/bin/[^ )]*' | sort -u | while read -r dll; do
@@ -56,12 +56,6 @@ jobs:
       - name: Compress executables and DLLs with UPX
         run: |
           upx --best dist/*.exe dist/*.dll || echo "UPX compression completed with warnings"
-
-      - name: Create portable ZIP archive
-        run: |
-          # Create ZIP before building installer so the installer isn't redundantly zipped inside itself
-          (cd dist && zip -9 -r ../jxlshot-windows-x64.zip jxlshot.exe jxlshot_tray.exe *.dll README.md ADD-to-START-UP.bat)
-          ls -la dist/
 
       - name: Build Inno Setup Installer
         shell: pwsh
@@ -83,13 +77,11 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: jxlshot-windows-x64
-          path: dist/
+          name: jxlshot-setup-x64
+          path: dist/jxlshot-setup-x64.exe
 
       - name: Publish release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            jxlshot-windows-x64.zip
-            dist/jxlshot-setup-x64.exe
+          files: dist/jxlshot-setup-x64.exe
