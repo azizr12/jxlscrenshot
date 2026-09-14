@@ -5,6 +5,7 @@ v2.1.9 - 14 September 2026
 - add updater that check if there is new update only trigger if user click it no forcing 
 - add to tray iconn menu  **open export folder**
 - fix bug reltaed to esc button not working
+- fix bug reltaed to mouse right click causing double click
 
 v2.1.3 - 13 September 2026
 - Fix the **stuttering** during **capture and decoding**
