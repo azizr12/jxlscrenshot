@@ -368,8 +368,9 @@ static void execute_about(void) {
     TASKDIALOGCONFIG config = {0};
     config.cbSize = sizeof(TASKDIALOGCONFIG);
     
-    // Provide a valid parent (fallback to tray window if menu owner is missing)
-    config.hwndParent = g_hwndMenuOwner ? g_hwndMenuOwner : g_hwndTray;
+    // FIX: Use NULL as parent so it acts as a proper top-level window.
+    // This prevents it from being hidden behind other apps due to a hidden parent window.
+    config.hwndParent = NULL;
     
     config.hInstance = NULL;
     config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_HICON_MAIN;
