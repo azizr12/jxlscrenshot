@@ -204,14 +204,15 @@ static int compare_versions(Version a, Version b) {
 
 
 static void execute_check_update(HWND hwnd) {
-    // Ensure you have a file named 'VERSION' in the root of your GitHub repo containing e.g., "2.1.6"
-    const wchar_t* remote_url = L"https://raw.githubusercontent.com/azizr12/jxlscrenshot/main/VERSION";
-    wchar_t temp_path[MAX_PATH];
+    // Cache-busting URL to guarantee a fresh download every time
+    wchar_t remote_url[512];
+    _snwprintf(remote_url, 512, L"https://raw.githubusercontent.com/azizr12/jxlscrenshot/main/VERSION?t=%llu", (unsigned long long)GetTickCount64());
     
+    wchar_t temp_path[MAX_PATH];
     GetTempPathW(MAX_PATH, temp_path);
     wcscat_s(temp_path, MAX_PATH, L"jxlshot_version.txt");
 
-    // Download the file synchronously (Fast for a tiny text file)
+    // Download the file synchronously
     HRESULT hr = URLDownloadToFileW(NULL, remote_url, temp_path, 0, NULL);
     
     if (FAILED(hr)) {
