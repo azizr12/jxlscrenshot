@@ -12,7 +12,8 @@ AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 AppPublisherURL={#MyAppURL}
-DefaultDirName={autopf}\{#MyAppName}
+; Install to the current user's Local AppData folder
+DefaultDirName={localappdata}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=Output
@@ -20,8 +21,8 @@ OutputBaseFilename=jxlshot-setup-x64
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-; Changed to 'admin' to ensure installation into Program Files is permitted
-PrivilegesRequired=admin
+; No admin rights required for AppData installation
+PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 
@@ -30,7 +31,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-; Removed 'Flags: unchecked' so the startup option is enabled by default
+; Enabled by default (no 'unchecked' flag)
 Name: "startup"; Description: "Launch on Windows Startup"; GroupDescription: "Additional options:"
 
 [Files]
@@ -38,7 +39,6 @@ Source: "dist\jxlshot.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\jxlshot_tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\README.md"; DestDir: "{app}"; Flags: ignoreversion
-; Note: ADD-to-START-UP.bat is omitted here as the [Registry] section handles this natively and more reliably.
 
 [Icons]
 Name: "{group}\{#MyAppName} Tray"; Filename: "{app}\{#MyAppExeName}"
@@ -48,7 +48,7 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Registry]
 ; Natively adds the application to the current user's startup registry
-; This replicates the exact behavior of your batch file without requiring external script execution
+; Replicates your batch file behavior perfectly without needing to execute it
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: "{app}\{#MyAppExeName}"; Flags: uninsdeletevalue; Tasks: startup
 
 [Run]
