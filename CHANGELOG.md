@@ -1,19 +1,19 @@
-v2.1.5 14 September 2026
-add **config.ini backward compatibility** with old config.ini or corruption
-add **open config** to tray menu
-add installer for executable using inno
+v2.1.5 - 14 September 2026
+- add **config.ini backward compatibility** with old config.ini or corruption
+- add **open config** to tray menu
+- add installer for executable using inno
 
 v2.1.3 - 13 September 2026
-Fix the **stuttering** during **capture and decoding**
-Fix the **blankcheck 0** not working
-add some code fixes to avoid any problems or leaks
-Added ** right click to cancel capture** alongside **esc button**
+- Fix the **stuttering** during **capture and decoding**
+- Fix the **blankcheck 0** not working
+- add some code fixes to avoid any problems or leaks
+- Added ** right click to cancel capture** alongside **esc button**
 
 
 v2.1.1 - 3 September 2026
-revert cursor bug
-now screenshot simply take a screenshot without cursor
-bcz simply nobody need it and just add more code to maintaining
+- revert cursor bug
+- now screenshot simply take a screenshot without cursor
+- bcz simply nobody need it and just add more code to maintaining
 
 
 v2.1 - 31 August2026
@@ -36,16 +36,16 @@ other than that this is even more robust release
 
 
 v1.2 - 22 August 2026
-add dpi aware
-add path bug fix
-tested for fuzz
-add dark mode
+- add dpi aware
+- add path bug fix
+- tested for fuzz
+- add dark mode
 
 
 v1.1 - 22 August 2026
-add dpi aware
-add path bug fix
-tested for fuzz
+- add dpi aware
+- add path bug fix
+- tested for fuzz
 
 v1 - 18 August 2026
-first realease
+- first realease
