@@ -181,99 +181,144 @@ static void ensure_default_ini(void) {
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
     
     if (GetFileAttributesW(ini_path) == INVALID_FILE_ATTRIBUTES) {
-        FILE *f = _wfopen(ini_path, L"w");
+        // Use binary write to explicitly control the encoding
+        FILE *f = _wfopen(ini_path, L"wb");
         if (f) {
-            fprintf(f, 
-                "; ==============================================================================\n"
-                "; JXLShot Configuration File\n"
-                "; ==============================================================================\n"
-                ";\n"
-                "; [JPEG XL Distance & Quality Guide]\n"
-                "; The 'Distance' parameter dictates the compression ratio and visual quality.\n"
-                "; Please refer to the following metrics when adjusting this value:\n"
-                ";\n"
-                ";   0.0 : Mathematically lossless compression. The file retains every single\n"
-                ";         original data bit.\n"
-                ";   1.0 : Visually lossless quality. The image looks identical to the human\n"
-                ";         eye under normal viewing conditions, but uses lossy compression\n"
-                ";         to save space. (Recommended default)\n"
-                ";   2.0+: Higher compression levels. These values significantly reduce file\n"
-                ";         size but introduce visible quality loss and artifacts.\n"
-                ";\n"
-                "; Note: If 'Lossless=1' is enabled below, the 'Distance' parameter is ignored,\n"
-                "; and the image is processed in strict mathematically lossless mode.\n"
-                ";\n"
-                "; [General Settings Reference]\n"
-                ";   Debug          : Set to 1 to enable debug logging; 0 to disable.\n"
-                ";   Lossless       : 1 = Force mathematically lossless mode (ignores Distance).\n"
-                ";                    0 = Use lossy compression based on the 'Distance' value.\n"
-                ";   ShowCursor     : 1 = Include the mouse cursor in captures; 0 = Hide it.\n"
-                ";   ExportPath     : Custom directory for saving screenshots. Leave blank for default.\n"
-                ";   HotkeyFull     : Keyboard shortcut to capture the entire screen.\n"
-                ";   HotkeyRegion   : Keyboard shortcut to capture a specific screen region.\n"
-                ";   BlankCheckMode : 0 = Disabled, 1 = Basic detection, 2 = Advanced detection, 3 = HARDCORE . \n"
-                ";\n"
-                "; ==============================================================================\n"
-                "\n"
-                "[Capture]\n"
-                "Debug=0\n"
-                "Lossless=1\n"
-                "Distance=1.0\n"
-                "ExportPath=\n"
-                "HotkeyFull=PrintScreen\n"
-                "HotkeyRegion=Ctrl+PrintScreen\n"
-                "BlankCheckMode=2\n"
-                /* "\n" */
-                /* "\n" */
-                /* "\n" */
-                "ShowCursor=1\n"
-                "     THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! "
-            );
+            // 1. Write UTF-16 LE Byte Order Mark (BOM)
+            unsigned short bom = 0xFEFF;
+            fwrite(&bom, sizeof(bom), 1, f);
+            
+            // 2. Write the configuration in UTF-16 LE
+            const wchar_t *default_ini = 
+                L"; ==============================================================================\n"
+                L"; JXLShot Configuration File\n"
+                L"; ==============================================================================\n"
+                L";\n"
+                L"; [JPEG XL Distance & Quality Guide]\n"
+                L";   0.0 : Mathematically lossless compression.\n"
+                L";   1.0 : Visually lossless quality. (Recommended default)\n"
+                L";   2.0+: Higher compression, visible quality loss.\n"
+                L";\n"
+                L"; [General Settings Reference]\n"
+                L";   Debug          : 1 = enable debug logging; 0 = disable.\n"
+                L";   Lossless       : 1 = Force mathematically lossless mode.\n"
+                L";   ShowCursor     : 1 = Include mouse cursor; 0 = Hide it.\n"
+                L";   ExportPath     : Custom directory for saving screenshots.\n"
+                L";   HotkeyFull     : Keyboard shortcut to capture entire screen.\n"
+                L";   HotkeyRegion   : Keyboard shortcut to capture specific region.\n"
+                L";   BlankCheckMode : 0 = Disabled, 1 = Basic, 2 = Advanced, 3 = HARDCORE.\n"
+                L";\n"
+                L"; ==============================================================================\n"
+                L"\n"
+                L"[Capture]\n"
+                L"Debug=0\n"
+                L"Lossless=1\n"
+                L"Distance=1.0\n"
+                L"ExportPath=\n"
+                L"HotkeyFull=PrintScreen\n"
+                L"HotkeyRegion=Ctrl+PrintScreen\n"
+                L"BlankCheckMode=2\n"
+                L"ShowCursor=1\n"
+                L"     THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! \n";
+            
+            fputws(default_ini, f);
             fclose(f);
         }
     }
+}
+
+
+/* ------------------------------------------------------------------ */
+/* Robust INI Parsing with Backward Compatibility Fallbacks           */
+/* ------------------------------------------------------------------ */
+static int get_cfg_int(LPCWSTR key, int default_val, LPCWSTR ini_path) {
+    wchar_t buf[64];
+    // 1. Try primary section
+    if (GetPrivateProfileStringW(L"Capture", key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
+    // 2. Try legacy/alternative sections
+    if (GetPrivateProfileStringW(L"Settings", key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
+    if (GetPrivateProfileStringW(L"General", key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
+    // 3. Try root level (no section header)
+    if (GetPrivateProfileStringW(NULL, key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
+    
+    return default_val;
+}
+
+static float get_cfg_float(LPCWSTR key, float default_val, LPCWSTR ini_path) {
+    wchar_t buf[64];
+    // Helper lambda-style block to parse float safely with C locale
+    #define PARSE_FLOAT(buf) \
+        do { \
+            _locale_t c_locale = _create_locale(LC_NUMERIC, "C"); \
+            float val = (float)_wcstod_l(buf, NULL, c_locale); \
+            _free_locale(c_locale); \
+            return val; \
+        } while(0)
+
+    if (GetPrivateProfileStringW(L"Capture", key, L"", buf, 64, ini_path) > 0) PARSE_FLOAT(buf);
+    if (GetPrivateProfileStringW(L"Settings", key, L"", buf, 64, ini_path) > 0) PARSE_FLOAT(buf);
+    if (GetPrivateProfileStringW(NULL, key, L"", buf, 64, ini_path) > 0) PARSE_FLOAT(buf);
+    
+    #undef PARSE_FLOAT
+    return default_val;
+}
+
+static void get_cfg_string(LPCWSTR key, LPCWSTR default_val, LPWSTR out_buf, DWORD buf_size, LPCWSTR ini_path) {
+    // 1. Try primary section
+    if (GetPrivateProfileStringW(L"Capture", key, L"", out_buf, buf_size, ini_path) > 0) return;
+    // 2. Try legacy sections
+    if (GetPrivateProfileStringW(L"Settings", key, L"", out_buf, buf_size, ini_path) > 0) return;
+    if (GetPrivateProfileStringW(L"General", key, L"", out_buf, buf_size, ini_path) > 0) return;
+    // 3. Try root level
+    if (GetPrivateProfileStringW(NULL, key, L"", out_buf, buf_size, ini_path) > 0) return;
+    
+    // 4. Fallback to default
+    wcsncpy_s(out_buf, buf_size, default_val, _TRUNCATE);
 }
 
 static void init_config(void) {
     wchar_t ini_path[MAX_PATH];
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
     
-    g_cfg.debug_enabled = 1; g_cfg.lossless = 1; g_cfg.distance = 1.0f; g_cfg.show_cursor = 1;
-    g_cfg.hk_full_mod = 0; g_cfg.hk_full_vk = VK_SNAPSHOT;
-    g_cfg.hk_region_mod = MOD_CONTROL; g_cfg.hk_region_vk = VK_SNAPSHOT;
+    // Set absolute defaults first
+    g_cfg.debug_enabled = 1; 
+    g_cfg.lossless = 1; 
+    g_cfg.distance = 1.0f; 
+    g_cfg.show_cursor = 1;
+    g_cfg.blank_check_mode = 2;
+    g_cfg.hk_full_mod = 0; 
+    g_cfg.hk_full_vk = VK_SNAPSHOT;
+    g_cfg.hk_region_mod = MOD_CONTROL; 
+    g_cfg.hk_region_vk = VK_SNAPSHOT;
     
     if (FAILED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, SHGFP_TYPE_CURRENT, g_cfg.export_path))) {
         GetEnvironmentVariableW(L"USERPROFILE", g_cfg.export_path, MAX_PATH);
         wcscat_s(g_cfg.export_path, MAX_PATH, L"\\Pictures");
     }
 
-    g_cfg.debug_enabled = GetPrivateProfileIntW(L"Capture", L"Debug", 1, ini_path);
-    g_cfg.lossless = GetPrivateProfileIntW(L"Capture", L"Lossless", 1, ini_path);
-    g_cfg.show_cursor = GetPrivateProfileIntW(L"Capture", L"ShowCursor", 1, ini_path);
-    g_cfg.blank_check_mode = GetPrivateProfileIntW(L"Capture", L"BlankCheckMode", 2, ini_path);
-    if (g_cfg.blank_check_mode < 0) g_cfg.blank_check_mode = 0; // Allow 0 (Disabled)
-    if (g_cfg.blank_check_mode > 3) g_cfg.blank_check_mode = 3;
-    wchar_t dist_str[64];
-    GetPrivateProfileStringW(L"Capture", L"Distance", L"1.0", dist_str, 64, ini_path);
+    // Use robust fallback getters instead of direct GetPrivateProfile* calls
+    g_cfg.debug_enabled = get_cfg_int(L"Debug", 1, ini_path);
+    g_cfg.lossless = get_cfg_int(L"Lossless", 1, ini_path);
+    g_cfg.show_cursor = get_cfg_int(L"ShowCursor", 1, ini_path);
+    g_cfg.blank_check_mode = get_cfg_int(L"BlankCheckMode", 2, ini_path);
     
-    /* FIX: Use _wcstod_l with the "C" locale to ensure '.' is always recognized as the decimal separator */
-    _locale_t c_locale = _create_locale(LC_NUMERIC, "C");
-    g_cfg.distance = (float)_wcstod_l(dist_str, NULL, c_locale);
-    _free_locale(c_locale);
+    if (g_cfg.blank_check_mode < 0) g_cfg.blank_check_mode = 0;
+    if (g_cfg.blank_check_mode > 3) g_cfg.blank_check_mode = 3;
 
+    g_cfg.distance = get_cfg_float(L"Distance", 1.0f, ini_path);
     if (g_cfg.distance < 0.0f) g_cfg.distance = 0.0f;
     if (g_cfg.distance > 25.0f) g_cfg.distance = 25.0f;
 
     wchar_t path_buf[MAX_PATH];
-    GetPrivateProfileStringW(L"Capture", L"ExportPath", L"", path_buf, MAX_PATH, ini_path);
+    get_cfg_string(L"ExportPath", L"", path_buf, MAX_PATH, ini_path);
     if (path_buf[0] != L'\0') {
-        wcsncpy(g_cfg.export_path, path_buf, MAX_PATH - 1);
-        g_cfg.export_path[MAX_PATH - 1] = L'\0';
+        wcsncpy_s(g_cfg.export_path, MAX_PATH, path_buf, _TRUNCATE);
     }
 
     wchar_t hk_full_str[128], hk_region_str[128];
-    GetPrivateProfileStringW(L"Capture", L"HotkeyFull", L"PrintScreen", hk_full_str, 128, ini_path);
-    GetPrivateProfileStringW(L"Capture", L"HotkeyRegion", L"Ctrl+PrintScreen", hk_region_str, 128, ini_path);
+    get_cfg_string(L"HotkeyFull", L"PrintScreen", hk_full_str, 128, ini_path);
+    get_cfg_string(L"HotkeyRegion", L"Ctrl+PrintScreen", hk_region_str, 128, ini_path);
+    
     parse_hotkey(hk_full_str, &g_cfg.hk_full_mod, &g_cfg.hk_full_vk);
     parse_hotkey(hk_region_str, &g_cfg.hk_region_mod, &g_cfg.hk_region_vk);
 }
