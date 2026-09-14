@@ -89,6 +89,7 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDM_EXIT         103
 #define IDM_OPENCONFIG   107
 #define IDM_CHECK_UPDATE 108
+#define IDM_OPENEXPORT   109
 
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
 #define IDI_APP_ICON  1001
@@ -109,6 +110,7 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
+    AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, L"Open Export Folder");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENCONFIG, L"Open Config File");
     AppendMenuW(hMenu, MF_STRING, IDM_RELOAD, L"Reload Configuration");
     AppendMenuW(hMenu, MF_STRING, IDM_CHECK_UPDATE, L"Check for Updates...");
@@ -301,6 +303,20 @@ static void execute_open_config(HWND hwnd) {
     
     // Attempt 3: Fallback to simply opening the root folder containing the INI
     ShellExecuteW(hwnd, L"explore", g_exe_dir, NULL, NULL, SW_SHOWNORMAL);
+}
+
+static void execute_open_export_folder(void) {
+    wchar_t path_to_open[MAX_PATH];
+    
+    // Use the configured export path, or fall back to the executable directory
+    if (g_cfg.export_path[0] != L'\0') {
+        wcsncpy_s(path_to_open, MAX_PATH, g_cfg.export_path, _TRUNCATE);
+    } else {
+        wcsncpy_s(path_to_open, MAX_PATH, g_exe_dir, _TRUNCATE);
+    }
+    
+    // Open the folder in Windows Explorer
+    ShellExecuteW(NULL, L"explore", path_to_open, NULL, NULL, SW_SHOWNORMAL);
 }
 
 
@@ -720,6 +736,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 case IDM_FULL: execute_full_capture(); break;
                 case IDM_REGION: start_region_capture(); break;
                 case IDM_SETPATH: execute_set_path(); break;
+                case IDM_OPENEXPORT: execute_open_export_folder(); break;
                 case IDM_OPENCONFIG: execute_open_config(hwnd); break;
                 case IDM_RELOAD: reload_config(); break;
                 case IDM_CHECK_UPDATE: execute_check_update(hwnd); break;
