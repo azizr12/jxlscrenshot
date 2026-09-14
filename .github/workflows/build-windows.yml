@@ -1,0 +1,95 @@
+name: build-windows installer
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2 (MinGW-w64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-libjxl
+            mingw-w64-x86_64-upx
+            zip
+
+      - name: Compile and bundle runtime DLLs
+        run: |
+          # 1. Compile CLI version
+          gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
+              -mwindows -o jxlshot.exe jxlshot.c \
+              -ljxl -lgdi32 -luser32 -lshell32 -lole32 -ldxgi -ld3d11 -luuid
+
+          # 2. EXPLICITLY compile the resource file using windres
+          windres -i resource.rc -o resource.o
+
+          # 3. Compile Tray version using the compiled resource object
+          gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
+              -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.o \
+              -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid
+
+          # 4. Prepare distribution directory
+          mkdir -p dist
+          cp jxlshot.exe jxlshot_tray.exe dist/
+          
+          # Copy auxiliary files
+          cp README.md ADD-to-START-UP.bat dist/ 2>/dev/null || true
+
+          # 5. Extract and copy required MinGW/libjxl DLLs
+          ldd jxlshot.exe jxlshot_tray.exe | grep -o '/mingw64/bin/[^ )]*' | sort -u | while read -r dll; do
+            cp "$dll" dist/
+          done
+
+      - name: Compress executables and DLLs with UPX
+        run: |
+          upx --best dist/*.exe dist/*.dll || echo "UPX compression completed with warnings"
+
+      - name: Create portable ZIP archive
+        run: |
+          # Create ZIP before building installer so the installer isn't redundantly zipped inside itself
+          (cd dist && zip -9 -r ../jxlshot-windows-x64.zip jxlshot.exe jxlshot_tray.exe *.dll README.md ADD-to-START-UP.bat)
+          ls -la dist/
+
+      - name: Build Inno Setup Installer
+        shell: pwsh
+        run: |
+          # Locate Inno Setup Compiler (ISCC) typically pre-installed on windows-latest
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-Not (Test-Path $iscc)) {
+              Write-Host "Inno Setup not found. Installing via Chocolatey..."
+              choco install innosetup -y
+              $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          }
+          
+          # Compile the installer script
+          & $iscc setup.iss
+          
+          # Move the setup executable to the dist folder for the release
+          mv Output/jxlshot-setup-x64.exe dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jxlshot-windows-x64
+          path: dist/
+
+      - name: Publish release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            jxlshot-windows-x64.zip
+            dist/jxlshot-setup-x64.exe
