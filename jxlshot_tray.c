@@ -97,6 +97,7 @@ static HWND g_hwndMenuOwner = NULL;
 static NOTIFYICONDATAW g_nid;
 static HWND            g_hwndTray = NULL;
 static HHOOK           g_hhkKeyboard = NULL;
+static HHOOK           g_hhkMouse = NULL;
 
 static void reload_config(void) { init_config(); }
 
@@ -578,6 +579,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         
         case WM_DESTROY: {
+            uninstall_mouse_hook();
             if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
             if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
             if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
@@ -660,6 +662,7 @@ static void start_region_capture(void) {
     }
     
     UpdateWindow(g_hwndRegion);
+    install_mouse_hook();
 }
 
 /* ------------------------------------------------------------------ */
@@ -734,6 +737,20 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
     return CallNextHookEx(g_hhkKeyboard, nCode, wParam, lParam);
 }
 
+static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HC_ACTION) {
+        // If region capture is active, intercept Right Click to cancel it
+        if (g_hwndRegion && (wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP)) {
+            // Post the message to the region window to handle cancellation cleanly
+            PostMessageW(g_hwndRegion, WM_RBUTTONDOWN, 0, 0);
+            
+            // Return 1 to BLOCK the mouse event from reaching the OS / underlying apps
+            return 1; 
+        }
+    }
+    return CallNextHookEx(g_hhkMouse, nCode, wParam, lParam);
+}
+
 static void install_keyboard_hook(void) {
     if (g_hhkKeyboard) return;
     g_hhkKeyboard = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(NULL), 0);
@@ -741,6 +758,18 @@ static void install_keyboard_hook(void) {
 
 static void uninstall_keyboard_hook(void) {
     if (g_hhkKeyboard) { UnhookWindowsHookEx(g_hhkKeyboard); g_hhkKeyboard = NULL; }
+}
+
+static void install_mouse_hook(void) {
+    if (g_hhkMouse) return;
+    g_hhkMouse = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(NULL), 0);
+}
+
+static void uninstall_mouse_hook(void) {
+    if (g_hhkMouse) { 
+        UnhookWindowsHookEx(g_hhkMouse); 
+        g_hhkMouse = NULL; 
+    }
 }
 
 /* ------------------------------------------------------------------ */
