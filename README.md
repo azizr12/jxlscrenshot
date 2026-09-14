@@ -1,7 +1,7 @@
+<img alt="Logo" src="icon.ico" />
 
 [![Windows](https://img.shields.io/badge/-Windows_x64-blue.svg?style=for-the-badge&logo=windows)](https://github.com/azizr12/jxlscrenshot/releases/download/v2.1.3/jxlshot-windows-x64.zip)
 
-<img alt="Logo" src="icon.ico" />
 
 - Small c project to capture monitor screenshot using jxl image codec.
   
