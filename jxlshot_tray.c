@@ -98,6 +98,8 @@ static NOTIFYICONDATAW g_nid;
 static HWND            g_hwndTray = NULL;
 static HHOOK           g_hhkKeyboard = NULL;
 static HHOOK           g_hhkMouse = NULL;
+static BOOL            g_isRegionCapturing = FALSE;
+static DWORD           g_regionCaptureEndTime = 0;
 
 // Forward declarations to fix implicit declaration errors
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
@@ -584,7 +586,10 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         }
         
         case WM_DESTROY: {
-            uninstall_mouse_hook();
+            g_isRegionCapturing = FALSE;
+            g_regionCaptureEndTime = GetTickCount(); // Start the 50ms block grace period
+            
+            // DO NOT call uninstall_mouse_hook() here anymore!
             if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
             if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
             if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
@@ -604,6 +609,8 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
 static void start_region_capture(void) {
     if (g_hwndRegion) return;
+
+    g_isRegionCapturing = TRUE;
 
     // Ensure a completely clean slate before starting a new capture
     g_isDragging = FALSE;
@@ -744,13 +751,14 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
 
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
-        // If region capture is active, intercept Right Click to cancel it
-        if (g_hwndRegion && (wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP)) {
-            // Post the message to the region window to handle cancellation cleanly
-            PostMessageW(g_hwndRegion, WM_RBUTTONDOWN, 0, 0);
-            
-            // Return 1 to BLOCK the mouse event from reaching the OS / underlying apps
-            return 1; 
+        // Block if currently capturing, OR within 25ms after capturing ended (catches the mouse release)
+        BOOL is_active = g_isRegionCapturing || (GetTickCount() - g_regionCaptureEndTime < 25);
+        
+        if (is_active && (wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP)) {
+            if (wParam == WM_RBUTTONDOWN && g_hwndRegion) {
+                PostMessageW(g_hwndRegion, WM_RBUTTONDOWN, 0, 0);
+            }
+            return 1; // Completely block the event from reaching the OS / underlying apps
         }
     }
     return CallNextHookEx(g_hhkMouse, nCode, wParam, lParam);
@@ -801,6 +809,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
             } break;
         case WM_DESTROY:
             uninstall_keyboard_hook();
+            uninstall_mouse_hook(); // clean up when the app fully exits
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
             if (g_hwndMenuOwner) {
                 DestroyWindow(g_hwndMenuOwner);
