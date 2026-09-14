@@ -757,7 +757,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
         // Block if currently capturing, OR within 25ms after capturing ended (catches the mouse release)
-        BOOL is_active = g_isRegionCapturing || (GetTickCount() - g_regionCaptureEndTime < 25);
+        BOOL is_active = g_isRegionCapturing || (GetTickCount() - g_regionCaptureEndTime < 500);
         
         if (is_active && (wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP)) {
             if (wParam == WM_RBUTTONDOWN && g_hwndRegion) {
