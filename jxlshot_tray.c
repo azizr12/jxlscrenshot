@@ -99,6 +99,11 @@ static HWND            g_hwndTray = NULL;
 static HHOOK           g_hhkKeyboard = NULL;
 static HHOOK           g_hhkMouse = NULL;
 
+// Forward declarations to fix implicit declaration errors
+static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
+static void install_mouse_hook(void);
+static void uninstall_mouse_hook(void);
+
 static void reload_config(void) { init_config(); }
 
 /* ------------------------------------------------------------------ */
