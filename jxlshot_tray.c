@@ -183,6 +183,26 @@ static void execute_full_capture(void) {
     free_grab(&g); 
 }
 
+/* ------------------------------------------------------------------ */
+/* Version Parsing Helpers                                            */
+/* ------------------------------------------------------------------ */
+typedef struct { int major, minor, patch; } Version;
+
+static Version parse_version(const wchar_t* str) {
+    Version v = {0, 0, 0};
+    if (str) {
+        swscanf(str, L"%d.%d.%d", &v.major, &v.minor, &v.patch);
+    }
+    return v;
+}
+
+static int compare_versions(Version a, Version b) {
+    if (a.major != b.major) return a.major - b.major;
+    if (a.minor != b.minor) return a.minor - b.minor;
+    return a.patch - b.patch;
+}
+
+
 static void execute_check_update(HWND hwnd) {
     // Ensure you have a file named 'VERSION' in the root of your GitHub repo containing e.g., "2.1.6"
     const wchar_t* remote_url = L"https://raw.githubusercontent.com/azizr12/jxlscrenshot/main/VERSION";
@@ -282,24 +302,6 @@ static void execute_open_config(HWND hwnd) {
     ShellExecuteW(hwnd, L"explore", g_exe_dir, NULL, NULL, SW_SHOWNORMAL);
 }
 
-/* ------------------------------------------------------------------ */
-/* Version Parsing Helpers                                            */
-/* ------------------------------------------------------------------ */
-typedef struct { int major, minor, patch; } Version;
-
-static Version parse_version(const wchar_t* str) {
-    Version v = {0, 0, 0};
-    if (str) {
-        swscanf(str, L"%d.%d.%d", &v.major, &v.minor, &v.patch);
-    }
-    return v;
-}
-
-static int compare_versions(Version a, Version b) {
-    if (a.major != b.major) return a.major - b.major;
-    if (a.minor != b.minor) return a.minor - b.minor;
-    return a.patch - b.patch;
-}
 
 
 /* ------------------------------------------------------------------ */
