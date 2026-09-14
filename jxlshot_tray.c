@@ -2,7 +2,7 @@
 
 /* ofc this will get flag as a virus
  * because its a c code and need low level access to work
- * there is no malware or monkey
+ * there is no malware or shit
  * 
  * leave the app if you are paranoid ! !
  * trying to implement something will make this just garbage app
@@ -11,7 +11,6 @@
  * RegisterHotKey  is shit tried it and always fail
  *
  * its just a vibe code bullshit
- * there is no malware or monkey
  * leave the app if you are paranoid
  */
 
@@ -302,13 +301,6 @@ static int compare_versions(Version a, Version b) {
     return a.patch - b.patch;
 }
 
-/* ------------------------------------------------------------------ */
-/* Update Check Logic                                                 */
-/* ------------------------------------------------------------------ */
-static void execute_check_update(HWND hwnd) {
-    // Ensure you have a file named 'VERSION' in the root of your GitHub repo containing e.g., "2.1.6"
-    const wchar_t* remote_url = L"https://raw.githubusercontent.com/azizr12/jxlscrenshot/main/VERSION";
-    // ... (rest of the execute_check_update function remains exactly as you wrote it)
 
 /* ------------------------------------------------------------------ */
 /* About Dialog with Clickable Hyperlink and Custom Header Icon       */
