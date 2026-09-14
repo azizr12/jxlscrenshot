@@ -42,6 +42,8 @@
 #include "jxlshot.c" // Pulls in core logic, config, and unified dbg() logger
 
 #include <uxtheme.h>
+#include <urlmon.h>
+#pragma comment(lib, "urlmon.lib") // (For MSVC)
 
 // Undocumented but stable uxtheme APIs for Win32 Dark Mode (Windows 10 1903+)
 typedef enum _PreferredAppMode {
@@ -79,14 +81,15 @@ static HWND g_hwndMenuOwner = NULL;
 #define WM_HOOK_FULL_CAPTURE   (WM_USER + 10)
 #define WM_HOOK_REGION_CAPTURE (WM_USER + 11)
 
-#define ID_TRAY        1
-#define IDM_FULL       101
-#define IDM_REGION     102
-#define IDM_SETPATH    104
-#define IDM_ABOUT      105
-#define IDM_RELOAD     106
-#define IDM_EXIT       103
-#define IDM_OPENCONFIG 107
+#define ID_TRAY          1
+#define IDM_FULL         101
+#define IDM_REGION       102
+#define IDM_SETPATH      104
+#define IDM_ABOUT        105
+#define IDM_RELOAD       106
+#define IDM_EXIT         103
+#define IDM_OPENCONFIG   107
+#define IDM_CHECK_UPDATE 108
 
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
 #define IDI_APP_ICON  1001
@@ -109,6 +112,7 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENCONFIG, L"Open Config File");
     AppendMenuW(hMenu, MF_STRING, IDM_RELOAD, L"Reload Configuration");
+    AppendMenuW(hMenu, MF_STRING, IDM_CHECK_UPDATE, L"Check for Updates...");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, L"About...");
     AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
@@ -180,6 +184,68 @@ static void execute_full_capture(void) {
     free_grab(&g); 
 }
 
+static void execute_check_update(HWND hwnd) {
+    // Ensure you have a file named 'VERSION' in the root of your GitHub repo containing e.g., "2.1.6"
+    const wchar_t* remote_url = L"https://raw.githubusercontent.com/azizr12/jxlscrenshot/main/VERSION";
+    wchar_t temp_path[MAX_PATH];
+    
+    GetTempPathW(MAX_PATH, temp_path);
+    wcscat_s(temp_path, MAX_PATH, L"jxlshot_version.txt");
+
+    // Download the file synchronously (Fast for a tiny text file)
+    HRESULT hr = URLDownloadToFileW(NULL, remote_url, temp_path, 0, NULL);
+    
+    if (FAILED(hr)) {
+        MessageBoxW(hwnd, L"Failed to connect to the update server.\nPlease check your internet connection.", L"Update Check", MB_ICONWARNING | MB_OK);
+        return;
+    }
+
+    HANDLE hFile = CreateFileW(temp_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        MessageBoxW(hwnd, L"Failed to read update information.", L"Update Check", MB_ICONERROR | MB_OK);
+        return;
+    }
+
+    char buffer[64] = {0};
+    DWORD bytes_read = 0;
+    ReadFile(hFile, buffer, sizeof(buffer) - 1, &bytes_read, NULL);
+    CloseHandle(hFile);
+    DeleteFileW(temp_path); // Clean up temp file immediately
+
+    if (bytes_read == 0) {
+        MessageBoxW(hwnd, L"Update server returned empty data.", L"Update Check", MB_ICONERROR | MB_OK);
+        return;
+    }
+
+    wchar_t remote_version_str[64] = {0};
+    MultiByteToWideChar(CP_UTF8, 0, buffer, -1, remote_version_str, 64);
+    
+    // Trim trailing whitespace/newlines
+    for (int i = wcslen(remote_version_str) - 1; i >= 0; i--) {
+        if (remote_version_str[i] == L'\r' || remote_version_str[i] == L'\n' || remote_version_str[i] == L' ') {
+            remote_version_str[i] = L'\0';
+        } else {
+            break;
+        }
+    }
+
+    // Parse and compare versions
+    Version remote_v = parse_version(remote_version_str);
+    Version current_v = parse_version(APP_VERSIONW);
+
+    if (compare_versions(remote_v, current_v) > 0) {
+        wchar_t msg[256];
+        _snwprintf(msg, 256, L"A new version is available!\n\nCurrent Version: %s\nLatest Version:  %s\n\nWould you like to open the releases page?", APP_VERSIONW, remote_version_str);
+        
+        int result = MessageBoxW(hwnd, msg, L"Update Available", MB_ICONINFORMATION | MB_YESNO);
+        if (result == IDYES) {
+            ShellExecuteW(hwnd, L"open", L"https://github.com/azizr12/jxlscrenshot/releases/latest", NULL, NULL, SW_SHOWNORMAL);
+        }
+    } else {
+        MessageBoxW(hwnd, L"You are already using the latest version.", L"Update Check", MB_ICONINFORMATION | MB_OK);
+    }
+}
+
 static void execute_set_path(void) {
     BROWSEINFOW bi = { 0 }; bi.hwndOwner = NULL;
     bi.lpszTitle = L"Select Export Folder for Screenshots";
@@ -216,6 +282,33 @@ static void execute_open_config(HWND hwnd) {
     // Attempt 3: Fallback to simply opening the root folder containing the INI
     ShellExecuteW(hwnd, L"explore", g_exe_dir, NULL, NULL, SW_SHOWNORMAL);
 }
+
+/* ------------------------------------------------------------------ */
+/* Version Parsing Helpers                                            */
+/* ------------------------------------------------------------------ */
+typedef struct { int major, minor, patch; } Version;
+
+static Version parse_version(const wchar_t* str) {
+    Version v = {0, 0, 0};
+    if (str) {
+        swscanf(str, L"%d.%d.%d", &v.major, &v.minor, &v.patch);
+    }
+    return v;
+}
+
+static int compare_versions(Version a, Version b) {
+    if (a.major != b.major) return a.major - b.major;
+    if (a.minor != b.minor) return a.minor - b.minor;
+    return a.patch - b.patch;
+}
+
+/* ------------------------------------------------------------------ */
+/* Update Check Logic                                                 */
+/* ------------------------------------------------------------------ */
+static void execute_check_update(HWND hwnd) {
+    // Ensure you have a file named 'VERSION' in the root of your GitHub repo containing e.g., "2.1.6"
+    const wchar_t* remote_url = L"https://raw.githubusercontent.com/azizr12/jxlscrenshot/main/VERSION";
+    // ... (rest of the execute_check_update function remains exactly as you wrote it)
 
 /* ------------------------------------------------------------------ */
 /* About Dialog with Clickable Hyperlink and Custom Header Icon       */
@@ -634,6 +727,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 case IDM_SETPATH: execute_set_path(); break;
                 case IDM_OPENCONFIG: execute_open_config(hwnd); break;
                 case IDM_RELOAD: reload_config(); break;
+                case IDM_CHECK_UPDATE: execute_check_update(hwnd); break;
                 case IDM_ABOUT: execute_about(); break;
                 case IDM_EXIT: PostQuitMessage(0); break;
             } break;
