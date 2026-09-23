@@ -18,7 +18,8 @@
 /* jxlshot_tray.c — System tray extension for jxlshot.
  *
  * Configuration is read from jxlshot.ini located next to the executable.
- * Debug logs are written to %TEMP%\jxlshot_debug.log       */
+ * Debug logs are written to %TEMP%\jxlshot_debug.log
+ */
 
 
 
@@ -108,9 +109,12 @@ static void uninstall_mouse_hook(void);
 
 static void reload_config(void) { init_config(); }
 
-/* ------------------------------------------------------------------ */
-/* Tray Icon & Context Menu                                           */
-/* ------------------------------------------------------------------ */
+
+
+/* Tray Icon & Context Menu
+*/
+
+
 static void show_tray_menu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
     HMENU hMenu = CreatePopupMenu();
@@ -193,9 +197,12 @@ static void execute_full_capture(void) {
     free_grab(&g); 
 }
 
-/* ------------------------------------------------------------------ */
-/* Version Parsing Helpers                                            */
-/* ------------------------------------------------------------------ */
+
+
+/* Version Parsing Helpers
+*/
+
+
 typedef struct { int major, minor, patch; } Version;
 
 static Version parse_version(const wchar_t* str) {
@@ -329,9 +336,12 @@ static void execute_open_export_folder(void) {
 
 
 
-/* ------------------------------------------------------------------ */
-/* About Dialog with Clickable Hyperlink and Custom Header Icon       */
-/* ------------------------------------------------------------------ */
+
+
+/* About Dialog with Clickable Hyperlink and Custom Header Icon
+*/
+
+
 static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
     // Intercept the exact moment the Task Dialog window is created
     if (msg == TDN_CREATED) {
@@ -388,9 +398,12 @@ static void execute_about(void) {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Interactive Region Selection (Optimized & Ghosting Fixed)          */
-/* ------------------------------------------------------------------ */
+
+
+/* Interactive Region Selection
+*/
+
+
 static HWND    g_hwndRegion = NULL;
 static HDC     g_hdcMem = NULL, g_hdcBlack = NULL;
 static HBITMAP g_hbmScreen = NULL, g_hbmBlack = NULL;
@@ -683,14 +696,10 @@ static void start_region_capture(void) {
     install_mouse_hook();
 }
 
-/* ------------------------------------------------------------------ */
-/* Low-Level Keyboard Hook                                            */
-/* ------------------------------------------------------------------ */
 
-/* Helper function to verify if the required modifier keys are currently pressed */
-/* ------------------------------------------------------------------ */
-/* Low-Level Keyboard Hook (Strict INI Enforcement)                   */
-/* ------------------------------------------------------------------ */
+
+/* Low-Level Keyboard Hook
+*/
 
 /* Helper function to verify EXACT modifier match. 
  * If the INI requires Ctrl, Ctrl must be pressed. 
@@ -791,9 +800,12 @@ static void uninstall_mouse_hook(void) {
     }
 }
 
-/* ------------------------------------------------------------------ */
-/* Tray Window Procedure & Entry Point                                */
-/* ------------------------------------------------------------------ */
+
+
+/* Tray Window Procedure & Entry Point
+*/
+
+
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
     switch (msg) {
         case WM_TRAYICON:
