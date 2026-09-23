@@ -133,11 +133,7 @@ static void uninstall_mouse_hook(void);
 
 static void reload_config(void) { init_config(); }
 
-
-
 // Tray Icon & Context Menu
-
-
 
 static void show_tray_menu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
@@ -222,9 +218,7 @@ static void execute_full_capture(void) {
 }
 
 
-
 // Version Parsing Helpers
-
 
 
 typedef struct { int major, minor, patch; } Version;
@@ -359,66 +353,7 @@ static void execute_open_export_folder(void) {
 }
 
 
-
-
-
-// About Dialog with Clickable Hyperlink and Custom Header Icon
-
-
-
-static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
-    if (msg == TDN_CREATED) {
-        // 1. Opt-in the TaskDialog window to dark mode immediately
-        if (g_pAllowDarkModeForWindow) {
-            g_pAllowDarkModeForWindow(hwnd, TRUE);
-        }
-    }
-    else if (msg == TDN_NAVIGATED) {
-        // 2. TaskDialog needs a second nudge after its content is fully laid out
-        if (g_pAllowDarkModeForWindow) {
-            g_pAllowDarkModeForWindow(hwnd, TRUE);
-        }
-        // 3. Force the window and all its child controls to repaint with the new theme
-        SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
-        RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
-    }
-    
-    if (msg == TDN_HYPERLINK_CLICKED) {
-        ShellExecuteW(hwnd, L"open", (LPCWSTR)lParam, NULL, NULL, SW_SHOWNORMAL);
-    }
-    return S_OK;
-}
-
-static void execute_about(void) {
-    HICON hAppIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON));
-
-    TASKDIALOGCONFIG config = {0};
-    config.cbSize = sizeof(TASKDIALOGCONFIG);
-    
-    // FIX: Use NULL as parent so it acts as a proper top-level window.
-    // This prevents it from being hidden behind other apps due to a hidden parent window.
-    config.hwndParent = NULL;
-    
-    config.hInstance = NULL;
-    config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_HICON_MAIN;
-    config.pszWindowTitle = L"About";
-    config.pszMainIcon = (PCWSTR)hAppIcon; 
-    config.pszMainInstruction = L"JXL Screenshot Tool";
-    config.pszContent = L"Minimal tray screenshot tool using JPEG XL.\n\n"
-                        L"<a href=\"https://github.com/azizr12/jxlscrenshot\">https://github.com/azizr12/jxlscrenshot</a>";
-    config.pfCallback = AboutDialogCallback;
-
-    TaskDialogIndirect(&config, NULL, NULL, NULL);
-
-    if (hAppIcon) {
-        DestroyIcon(hAppIcon);
-    }
-}
-
-
-
 // Interactive Region Selection
-
 
 
 static HWND    g_hwndRegion = NULL;
@@ -714,7 +649,6 @@ static void start_region_capture(void) {
 }
 
 
-
 // Low-Level Keyboard Hook
 
 
@@ -819,9 +753,7 @@ static void uninstall_mouse_hook(void) {
 }
 
 
-
 // Tray Window Procedure & Entry Point
-
 
 
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
