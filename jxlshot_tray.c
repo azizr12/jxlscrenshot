@@ -345,25 +345,9 @@ static void execute_open_export_folder(void) {
 static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
     // Intercept the exact moment the Task Dialog window is created
     if (msg == TDN_CREATED) {
-        HMODULE hUxtheme = LoadLibraryW(L"uxtheme.dll");
-        if (hUxtheme) {
-            // Ordinal 133: AllowDarkModeForWindow
-            typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
-            // Ordinal 136: FlushMenuThemes (ensures child controls render correctly)
-            typedef void (WINAPI *fnFlushMenuThemes)(void);
-            
-            fnAllowDarkModeForWindow pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133));
-            fnFlushMenuThemes pFlushMenuThemes = (fnFlushMenuThemes)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(136));
-
-            if (pAllowDarkModeForWindow) {
-                // Apply dark mode DIRECTLY to the Task Dialog's HWND
-                pAllowDarkModeForWindow(hwnd, TRUE);
-            }
-            if (pFlushMenuThemes) {
-                pFlushMenuThemes();
-            }
-            FreeLibrary(hUxtheme);
-        }
+        // Reuse the existing ApplyDarkMode function to ensure consistent 
+        // dark mode application (including SetPreferredAppMode)
+        ApplyDarkMode(hwnd);
     }
     
     if (msg == TDN_HYPERLINK_CLICKED) {
