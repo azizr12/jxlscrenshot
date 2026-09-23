@@ -222,7 +222,7 @@ static void ensure_default_ini(void) {
                 L"HotkeyRegion=Ctrl+PrintScreen\n"
                 L"BlankCheckMode=2\n"
                 L"ShowCursor=1\n"
-                L"     THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! \n"; 
+                L"     THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! \n";
             
             fputws(default_ini, f);
             fclose(f);
