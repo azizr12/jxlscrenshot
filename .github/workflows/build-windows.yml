@@ -28,10 +28,10 @@ jobs:
 
       - name: Compile and bundle runtime DLLs
         run: |
-          # 1. Compile CLI version
+          # 1. Compile CLI version ( -ljxl_threads before -ljxl)
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
               -mwindows -o jxlshot.exe jxlshot.c \
-              -ljxl -lgdi32 -luser32 -lshell32 -lole32 -ldxgi -ld3d11 -luuid
+              -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lole32 -ldxgi -ld3d11 -luuid
 
           # 2. EXPLICITLY compile the resource file using windres
           windres -i resource.rc -o resource.o
@@ -39,7 +39,7 @@ jobs:
           # 3. Compile Tray version using the compiled resource object
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
               -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.o \
-              -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lurlmon
+              -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lurlmon
 
           # 4. Prepare distribution directory (Required for Inno Setup to package these files)
           mkdir -p dist
