@@ -48,16 +48,31 @@ jobs:
           # Copy auxiliary files
           cp README.md ADD-to-START-UP.bat dist/ 2>/dev/null || true
 
-          # 5. Extract and copy required MinGW/libjxl DLLs
-          # Use objdump to read PE headers directly instead of ldd.
-          # This prevents "Permission denied" errors caused by Windows Defender 
-          # locking newly compiled executables while it scans them.
-          objdump -p jxlshot.exe jxlshot_tray.exe | grep "DLL Name" | sed 's/.*DLL Name: //' | sort -u | while read -r dll; do
-            found=$(find /mingw64/bin -maxdepth 1 -iname "$dll" | head -n 1)
-            if [ -n "$found" ]; then
-              cp "$found" dist/
-            fi
+          # 5. Extract and copy required MinGW/libjxl DLLs (Recursive Resolution)
+          # This bypasses Windows Defender locks AND catches transitive dependencies 
+          # (e.g., libjxl -> libhwy -> libbrotli) which the previous objdump missed.
+          mkdir -p temp_dlls
+          objdump -p jxlshot.exe jxlshot_tray.exe | grep "DLL Name" | sed 's/.*DLL Name: //' | sort -u > dll_list.txt
+          
+          # Loop until no new dependencies are found
+          while true; do
+              count_before=$(wc -l < dll_list.txt)
+              while read -r dll; do
+                  found=$(find /mingw64/bin -maxdepth 1 -iname "$dll" | head -n 1)
+                  if [ -n "$found" ] && [ ! -f "temp_dlls/$dll" ]; then
+                      cp "$found" temp_dlls/
+                      # Scan the newly found DLL for its own dependencies
+                      objdump -p "$found" | grep "DLL Name" | sed 's/.*DLL Name: //' >> dll_list.txt
+                  fi
+              done < dll_list.txt
+              sort -u dll_list.txt -o dll_list.txt
+              count_after=$(wc -l < dll_list.txt)
+              [ "$count_before" -eq "$count_after" ] && break
           done
+          
+          # Copy all resolved DLLs to the distribution folder
+          cp temp_dlls/*.dll dist/
+          rm -rf temp_dlls dll_list.txt
 
       - name: Compress executables and DLLs with UPX
         run: |

@@ -28,7 +28,7 @@ jobs:
 
       - name: Compile and bundle runtime DLLs
         run: |
-          # 1. Compile CLI version ( -ljxl_threads before -ljxl)
+          # 1. Compile CLI version
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
               -mwindows -o jxlshot.exe jxlshot.c \
               -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lole32 -ldxgi -ld3d11 -luuid
@@ -41,17 +41,38 @@ jobs:
               -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.o \
               -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lurlmon
 
-          # 4. Prepare distribution directory (Required for Inno Setup to package these files)
+          # 4. Prepare distribution directory
           mkdir -p dist
           cp jxlshot.exe jxlshot_tray.exe dist/
           
-          # Copy auxiliary files needed by the installer
-          cp README.md dist/ 2>/dev/null || true
+          # Copy auxiliary files
+          cp README.md ADD-to-START-UP.bat dist/ 2>/dev/null || true
 
-          # 5. Extract and copy required MinGW/libjxl DLLs
-          ldd jxlshot.exe jxlshot_tray.exe | grep -o '/mingw64/bin/[^ )]*' | sort -u | while read -r dll; do
-            cp "$dll" dist/
+          # 5. Extract and copy required MinGW/libjxl DLLs (Recursive Resolution)
+          # This bypasses Windows Defender locks AND catches transitive dependencies 
+          # (e.g., libjxl -> libhwy -> libbrotli) which the previous objdump missed.
+          mkdir -p temp_dlls
+          objdump -p jxlshot.exe jxlshot_tray.exe | grep "DLL Name" | sed 's/.*DLL Name: //' | sort -u > dll_list.txt
+          
+          # Loop until no new dependencies are found
+          while true; do
+              count_before=$(wc -l < dll_list.txt)
+              while read -r dll; do
+                  found=$(find /mingw64/bin -maxdepth 1 -iname "$dll" | head -n 1)
+                  if [ -n "$found" ] && [ ! -f "temp_dlls/$dll" ]; then
+                      cp "$found" temp_dlls/
+                      # Scan the newly found DLL for its own dependencies
+                      objdump -p "$found" | grep "DLL Name" | sed 's/.*DLL Name: //' >> dll_list.txt
+                  fi
+              done < dll_list.txt
+              sort -u dll_list.txt -o dll_list.txt
+              count_after=$(wc -l < dll_list.txt)
+              [ "$count_before" -eq "$count_after" ] && break
           done
+          
+          # Copy all resolved DLLs to the distribution folder
+          cp temp_dlls/*.dll dist/
+          rm -rf temp_dlls dll_list.txt
 
       - name: Compress executables and DLLs with UPX
         run: |
