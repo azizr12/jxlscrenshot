@@ -1,6 +1,7 @@
 v2.2.1 - 23 September 2026
 - fix **reload configuration** not working
 - fix **dark mode** not working in about window
+- fix **multithreading** not being used
 
 
 v2.2.0 - 14 September 2026
