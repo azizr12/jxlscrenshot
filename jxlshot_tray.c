@@ -367,11 +367,20 @@ static void execute_open_export_folder(void) {
 
 
 static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
-    // Intercept the exact moment the Task Dialog window is created
     if (msg == TDN_CREATED) {
-        // Reuse the existing ApplyDarkMode function to ensure consistent 
-        // dark mode application (including SetPreferredAppMode)
-        ApplyDarkMode(hwnd);
+        // 1. Opt-in the TaskDialog window to dark mode immediately
+        if (g_pAllowDarkModeForWindow) {
+            g_pAllowDarkModeForWindow(hwnd, TRUE);
+        }
+    }
+    else if (msg == TDN_NAVIGATED) {
+        // 2. TaskDialog needs a second nudge after its content is fully laid out
+        if (g_pAllowDarkModeForWindow) {
+            g_pAllowDarkModeForWindow(hwnd, TRUE);
+        }
+        // 3. Force the window and all its child controls to repaint with the new theme
+        SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
+        RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     }
     
     if (msg == TDN_HYPERLINK_CLICKED) {
