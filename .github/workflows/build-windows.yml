@@ -29,7 +29,7 @@ jobs:
         run: |
           # 1. Compile CLI version
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
-              -mwindows -o jxlshot.exe jxlshot.c \
+              -mwindows -static-libgcc -static-libstdc++ -o jxlshot.exe jxlshot.c \
               -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lole32 -ldxgi -ld3d11 -luuid
 
           # 2. EXPLICITLY compile the resource file using windres
@@ -37,7 +37,7 @@ jobs:
 
           # 3. Compile Tray version using the compiled resource object
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
-              -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.o \
+              -mwindows -static-libgcc -static-libstdc++ -o jxlshot_tray.exe jxlshot_tray.c resource.o \
               -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lurlmon
 
           # 4. Prepare distribution directory
@@ -68,10 +68,6 @@ jobs:
           
           cp temp_dlls/*.dll dist/
           rm -rf temp_dlls dll_list.txt
-
-      # Removed the UPX compression step. 
-      # UPX frequently corrupts the Windows RT_MANIFEST resource in MinGW builds, 
-      # which causes the "Side-by-Side configuration is incorrect" crash on startup.
 
       - name: Build Inno Setup Installer
         shell: pwsh

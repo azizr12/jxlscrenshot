@@ -74,13 +74,7 @@ jobs:
           cp temp_dlls/*.dll dist/
           rm -rf temp_dlls dll_list.txt
 
-      - name: Compress executables and DLLs with UPX
-        run: |
-          upx --best dist/*.exe dist/*.dll || echo "UPX compression completed with warnings"
-          
-          # Create the release archive
-          (cd dist && zip -9 -r ../jxlshot-windows-x64.zip .)
-          ls -la dist/
+      # Removed the UPX compression step. 
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
