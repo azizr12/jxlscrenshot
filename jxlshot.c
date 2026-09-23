@@ -47,7 +47,7 @@
 #include <dxgi1_5.h>
 #include <locale.h>
 #include <objbase.h>
-
+#include <jxl/thread_parallel_runner.h>
 
 
 
@@ -788,8 +788,20 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     int ok = 0;
     uint8_t *buf = NULL;
     JxlEncoderStatus st;
+    
+    // 1. Create a parallel runner to use all available CPU cores (0 = auto-detect)
+    void *runner = JxlThreadParallelRunnerCreate(NULL, 0);
+    
     JxlEncoder *enc = JxlEncoderCreate(NULL);
-    if (!enc) return 0;
+    if (!enc) {
+        if (runner) JxlThreadParallelRunnerDestroy(runner);
+        return 0;
+    }
+
+    // 2. Attach the multithreading runner to the encoder
+    if (runner) {
+        JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner);
+    }
 
     JxlBasicInfo info;
     JxlEncoderInitBasicInfo(&info);
@@ -892,6 +904,10 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
 done:
     free(buf);
     JxlEncoderDestroy(enc);
+    
+    // 3. Clean up the parallel runner
+    if (runner) JxlThreadParallelRunnerDestroy(runner);
+    
     return ok;
 }
 
@@ -921,6 +937,11 @@ typedef struct {
 } EncodeTask;
 
 static DWORD WINAPI EncodeWorker(LPVOID param) {
+    // Tell Windows this is a background task so it yields to the games/OS
+    // This help to avoid hammering perfomance
+    // and then user may experience some sort of lagging
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+
     EncodeTask *task = (EncodeTask *)param;
     
     // Perform the heavy encoding and file I/O in the background
