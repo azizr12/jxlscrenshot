@@ -23,7 +23,6 @@ jobs:
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-libjxl
-            mingw-w64-x86_64-upx
             zip
 
       - name: Compile and bundle runtime DLLs
