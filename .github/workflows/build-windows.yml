@@ -23,7 +23,6 @@ jobs:
           install: >-
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-libjxl
-            mingw-w64-x86_64-upx
             zip
 
       - name: Compile and bundle runtime DLLs
@@ -46,22 +45,19 @@ jobs:
           cp jxlshot.exe jxlshot_tray.exe dist/
           
           # Copy auxiliary files
-          cp README.md ADD-to-START-UP.bat dist/ 2>/dev/null || true
+          cp README.md dist/ 2>/dev/null || true
 
           # 5. Extract and copy required MinGW/libjxl DLLs (Recursive Resolution)
-          # This bypasses Windows Defender locks AND catches transitive dependencies 
-          # (e.g., libjxl -> libhwy -> libbrotli) which the previous objdump missed.
+          # Safely catches all transitive dependencies without executing the .exe
           mkdir -p temp_dlls
           objdump -p jxlshot.exe jxlshot_tray.exe | grep "DLL Name" | sed 's/.*DLL Name: //' | sort -u > dll_list.txt
           
-          # Loop until no new dependencies are found
           while true; do
               count_before=$(wc -l < dll_list.txt)
               while read -r dll; do
                   found=$(find /mingw64/bin -maxdepth 1 -iname "$dll" | head -n 1)
                   if [ -n "$found" ] && [ ! -f "temp_dlls/$dll" ]; then
                       cp "$found" temp_dlls/
-                      # Scan the newly found DLL for its own dependencies
                       objdump -p "$found" | grep "DLL Name" | sed 's/.*DLL Name: //' >> dll_list.txt
                   fi
               done < dll_list.txt
@@ -70,13 +66,12 @@ jobs:
               [ "$count_before" -eq "$count_after" ] && break
           done
           
-          # Copy all resolved DLLs to the distribution folder
           cp temp_dlls/*.dll dist/
           rm -rf temp_dlls dll_list.txt
 
-      - name: Compress executables and DLLs with UPX
-        run: |
-          upx --best dist/*.exe dist/*.dll || echo "UPX compression completed with warnings"
+      # Removed the UPX compression step. 
+      # UPX frequently corrupts the Windows RT_MANIFEST resource in MinGW builds, 
+      # which causes the "Side-by-Side configuration is incorrect" crash on startup.
 
       - name: Build Inno Setup Installer
         shell: pwsh
