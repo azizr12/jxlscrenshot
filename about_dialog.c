@@ -17,6 +17,7 @@ static HFONT g_hTitleFont = NULL;
 static HFONT g_hBodyFont = NULL;
 static HFONT g_hXFont = NULL;
 static HICON g_hAppIcon = NULL;
+static HICON g_hTaskbarIconSmall = NULL;
 static BOOL g_isXHovered = FALSE;
 
 // Forward declaration (assumed to be defined elsewhere in your codebase)
@@ -52,12 +53,16 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             // 3. Create Background Brush (Modern Dark Gray #1E1E1E)
             g_hAboutBgBrush = CreateSolidBrush(RGB(30, 30, 30));
 
-            // 4. Load App Icon (128x128 for large splash display, preserving original aspect)
+            // 4. Load App Icons
+            // Large 128x128 for the splash screen display
             g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, 0);
             
+            // Small 16x16 for Taskbar / Title bar (LR_SHARED prevents memory leaks)
+            g_hTaskbarIconSmall = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_SHARED);
+
             // Set the window's own icon (shows in Taskbar / Alt-Tab)
             SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_hAppIcon);
-            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hAppIcon);
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hTaskbarIconSmall);
 
             // 5. Layout Controls
             
@@ -75,7 +80,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>", 
                 WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 140, 200, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
             
-            // Splash Icon
+            // Splash Icon (Moved left to X=300 to prevent overlap with the X button at X=440)
             HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"", 
                 WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 300, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
             SendMessageW(hIconCtrl, STM_SETICON, (WPARAM)g_hAppIcon, 0);
@@ -84,7 +89,6 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         }
 
         case WM_ERASEBKGND: {
-            // Paint background immediately to prevent white flashing
             HDC hdc = (HDC)wParam;
             RECT rc;
             GetClientRect(hwnd, &rc);
@@ -98,22 +102,17 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             RECT rc;
             GetClientRect(hwnd, &rc);
             
-            // Fill Background
             FillRect(hdc, &rc, g_hAboutBgBrush);
             
-            // Draw Custom '✕' Exit Button (Top Right) in RED
             SetBkMode(hdc, TRANSPARENT);
-            
-            RECT rcX = {440, 10, 480, 50}; // 40x40 clickable area aligned to right edge
+            RECT rcX = {440, 10, 480, 50};
             
             if (g_isXHovered) {
-                // Hover state: darker red background, brighter red text
                 HBRUSH hHoverBrush = CreateSolidBrush(RGB(60, 30, 30));
                 FillRect(hdc, &rcX, hHoverBrush);
                 DeleteObject(hHoverBrush);
                 SetTextColor(hdc, RGB(255, 120, 120));
             } else {
-                // Normal state: transparent background, modern red text
                 SetTextColor(hdc, RGB(255, 85, 85));
             }
             
@@ -133,9 +132,9 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             SetBkMode(hdcStatic, TRANSPARENT);
             
             if (id == IDC_ABOUT_TITLE) {
-                SetTextColor(hdcStatic, RGB(255, 255, 255)); // White
+                SetTextColor(hdcStatic, RGB(255, 255, 255));
             } else if (id == IDC_ABOUT_DESCRIPTION) {
-                SetTextColor(hdcStatic, RGB(160, 160, 160)); // Light Gray
+                SetTextColor(hdcStatic, RGB(160, 160, 160));
             }
             
             return (INT_PTR)g_hAboutBgBrush;
@@ -184,13 +183,11 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
             
-            // Hit-test for custom Red '✕' Exit Button
             if (x >= 440 && x <= 480 && y >= 10 && y <= 50) {
                 DestroyWindow(hwnd);
                 return 0;
             }
             
-            // Allow dragging the window by clicking anywhere on the background
             HWND hChild = ChildWindowFromPoint(hwnd, (POINT){x, y});
             if (hChild == hwnd) {
                 ReleaseCapture();
@@ -210,7 +207,6 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         }
 
         case WM_ACTIVATE:
-            // Keep the splash screen on top if it loses focus
             if (wParam == WA_INACTIVE) {
                 SetForegroundWindow(hwnd);
             }
@@ -223,6 +219,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             if (g_hBodyFont) { DeleteObject(g_hBodyFont); g_hBodyFont = NULL; }
             if (g_hXFont) { DeleteObject(g_hXFont); g_hXFont = NULL; }
             if (g_hAppIcon) { DestroyIcon(g_hAppIcon); g_hAppIcon = NULL; }
+            // Note: g_hTaskbarIconSmall uses LR_SHARED, so the system manages its cleanup.
             PostQuitMessage(0); 
             return 0;
 
@@ -234,17 +231,12 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 }
 
 static void execute_about(void) {
-    // Disable the tray window while the dialog is open (modal behavior)
     EnableWindow(g_hwndTray, FALSE);
-    
-    // Grant this process the right to set its own windows to the foreground
     AllowSetForegroundWindow(GetCurrentProcessId());
 
-    // Ensure common controls (specifically SysLink) are initialized
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LINK_CLASS };
     InitCommonControlsEx(&icc);
 
-    // Dimensions adjusted to comfortably accommodate the larger 128x128 icon
     const int dlgWidth = 480;
     const int dlgHeight = 240;
 
@@ -256,24 +248,25 @@ static void execute_about(void) {
     wc.hbrBackground = NULL; 
     wc.lpszClassName = L"JxlShotAboutClass";
     
-    // Assign the window its own icon for Taskbar and Alt-Tab visibility
-    wc.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON));
-    wc.hIconSm = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON));
+    // TASKBAR ICON LOADING
+    // 32x32 is the standard size Windows expects for the main taskbar button
+    wc.hIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 32, 32, LR_SHARED);
+    // 16x16 is the standard size for the small corner icon / Alt-Tab
+    wc.hIconSm = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_SHARED);
     
     RegisterClassExW(&wc);
 
-    // Center the window on the primary monitor work area
     RECT rc;
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &rc, 0);
     int x = rc.left + (rc.right - rc.left - dlgWidth) / 2;
     int y = rc.top + (rc.bottom - rc.top - dlgHeight) / 2;
 
-    // Create Borderless Window (WS_POPUP)
+    // WS_EX_APPWINDOW forces the taskbar button to appear even for a popup/owned window
     HWND hwndAbout = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_APPWINDOW,
         L"JxlShotAboutClass",
         L"About",
-        WS_POPUP | WS_VISIBLE, // No WS_CAPTION or WS_SYSMENU
+        WS_POPUP | WS_VISIBLE,
         x, y, dlgWidth, dlgHeight,
         g_hwndMenuOwner,
         NULL,
@@ -284,7 +277,6 @@ static void execute_about(void) {
     if (hwndAbout) {
         SetForegroundWindow(hwndAbout);
 
-        // Local modal message loop
         MSG msg;
         while (GetMessage(&msg, NULL, 0, 0)) {
             TranslateMessage(&msg);
