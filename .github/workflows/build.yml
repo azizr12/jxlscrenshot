@@ -49,8 +49,14 @@ jobs:
           cp README.md ADD-to-START-UP.bat dist/ 2>/dev/null || true
 
           # 5. Extract and copy required MinGW/libjxl DLLs
-          ldd jxlshot.exe jxlshot_tray.exe | grep -o '/mingw64/bin/[^ )]*' | sort -u | while read -r dll; do
-            cp "$dll" dist/
+          # FIX: Use objdump to read PE headers directly instead of ldd.
+          # This prevents "Permission denied" errors caused by Windows Defender 
+          # locking newly compiled executables while it scans them.
+          objdump -p jxlshot.exe jxlshot_tray.exe | grep "DLL Name" | sed 's/.*DLL Name: //' | sort -u | while read -r dll; do
+            found=$(find /mingw64/bin -maxdepth 1 -iname "$dll" | head -n 1)
+            if [ -n "$found" ]; then
+              cp "$found" dist/
+            fi
           done
 
       - name: Compress executables and DLLs with UPX
