@@ -1,4 +1,4 @@
-/*       https://github.com/azizr12/jxlscrenshot/        */
+//       https://github.com/azizr12/jxlscrenshot/
 
 /* ofc this will get flag as a virus
  * because its a c code and need low level access to work
@@ -44,35 +44,59 @@
 #include <uxtheme.h>
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib") // (For MSVC)
+#pragma comment(lib, "comctl32.lib")
 
 // Undocumented but stable uxtheme APIs for Win32 Dark Mode (Windows 10 1903+)
+
+// Windows Dark Mode Support
+
+
 typedef enum _PreferredAppMode {
-    Default = 0,
-    AllowDark = 1,
-    ForceDark = 2,
+    Default    = 0,
+    AllowDark  = 1,
+    ForceDark  = 2,
     ForceLight = 3,
-    Max = 4
+    Max        = 4
 } PreferredAppMode;
 
 typedef PreferredAppMode (WINAPI *fnSetPreferredAppMode)(PreferredAppMode appMode);
 typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
 typedef void (WINAPI *fnFlushMenuThemes)(void);
 
-static void ApplyDarkMode(HWND hwnd) {
-    HMODULE hUxtheme = LoadLibraryW(L"uxtheme.dll");
-    if (hUxtheme) {
-        // Ordinals have remained stable since Windows 10 version 1903
-        fnSetPreferredAppMode pSetPreferredAppMode = (fnSetPreferredAppMode)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(135));
-        fnAllowDarkModeForWindow pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(133));
-        fnFlushMenuThemes pFlushMenuThemes = (fnFlushMenuThemes)GetProcAddress(hUxtheme, MAKEINTRESOURCEA(136));
+// Global state to avoid reloading the DLL repeatedly
+static HMODULE g_hUxtheme = NULL;
+static fnSetPreferredAppMode g_pSetPreferredAppMode = NULL;
+static fnAllowDarkModeForWindow g_pAllowDarkModeForWindow = NULL;
+static fnFlushMenuThemes g_pFlushMenuThemes = NULL;
 
-        if (pSetPreferredAppMode && pAllowDarkModeForWindow && pFlushMenuThemes) {
-            pSetPreferredAppMode(AllowDark);
-            pAllowDarkModeForWindow(hwnd, TRUE);
-            pFlushMenuThemes(); // Forces existing menus to redraw with the new theme
-        }
-        FreeLibrary(hUxtheme);
+static void InitializeDarkMode(void) {
+    if (g_hUxtheme) return;
+
+    g_hUxtheme = LoadLibraryW(L"uxtheme.dll");
+    if (!g_hUxtheme) return;
+
+    g_pSetPreferredAppMode = (fnSetPreferredAppMode)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(135));
+    g_pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(133));
+    g_pFlushMenuThemes = (fnFlushMenuThemes)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(136));
+
+    // ForceDark is required for TaskDialogs to reliably apply the theme
+    if (g_pSetPreferredAppMode) {
+        g_pSetPreferredAppMode(ForceDark);
     }
+    if (g_pFlushMenuThemes) {
+        g_pFlushMenuThemes();
+    }
+}
+
+static void ApplyDarkMode(HWND hwnd) {
+    InitializeDarkMode();
+    if (!hwnd || !g_pAllowDarkModeForWindow) return;
+
+    g_pAllowDarkModeForWindow(hwnd, TRUE);
+    
+    // Crucial: Tell the window and its children to redraw with the new theme
+    SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
+    RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
 }
 
 static HWND g_hwndMenuOwner = NULL;
@@ -111,8 +135,8 @@ static void reload_config(void) { init_config(); }
 
 
 
-/* Tray Icon & Context Menu
-*/
+// Tray Icon & Context Menu
+
 
 
 static void show_tray_menu(HWND hwnd) {
@@ -199,8 +223,8 @@ static void execute_full_capture(void) {
 
 
 
-/* Version Parsing Helpers
-*/
+// Version Parsing Helpers
+
 
 
 typedef struct { int major, minor, patch; } Version;
@@ -338,8 +362,8 @@ static void execute_open_export_folder(void) {
 
 
 
-/* About Dialog with Clickable Hyperlink and Custom Header Icon
-*/
+// About Dialog with Clickable Hyperlink and Custom Header Icon
+
 
 
 static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
@@ -384,8 +408,8 @@ static void execute_about(void) {
 
 
 
-/* Interactive Region Selection
-*/
+// Interactive Region Selection
+
 
 
 static HWND    g_hwndRegion = NULL;
@@ -660,7 +684,7 @@ static void start_region_capture(void) {
     
     ShowWindow(g_hwndRegion, SW_SHOW); 
     
-    /* Crucial Fix: Force the overlay to take keyboard focus so it receives WM_KEYDOWN (Escape) */
+    // Crucial Fix: Force the overlay to take keyboard focus so it receives WM_KEYDOWN (Escape)
     // We use AttachThreadInput to bypass Windows' strict SetForegroundWindow limitations
     HWND hCurWnd = GetForegroundWindow();
     DWORD dwCurID = GetCurrentThreadId();
@@ -682,12 +706,13 @@ static void start_region_capture(void) {
 
 
 
-/* Low-Level Keyboard Hook
-*/
+// Low-Level Keyboard Hook
+
 
 /* Helper function to verify EXACT modifier match. 
  * If the INI requires Ctrl, Ctrl must be pressed. 
- * If the INI does NOT require Ctrl, Ctrl must NOT be pressed. */
+ * If the INI does NOT require Ctrl, Ctrl must NOT be pressed.
+ */
 
 static BOOL check_modifiers(UINT required_mod) {
     BOOL ctrl_pressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -786,8 +811,8 @@ static void uninstall_mouse_hook(void) {
 
 
 
-/* Tray Window Procedure & Entry Point
-*/
+// Tray Window Procedure & Entry Point
+
 
 
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
@@ -832,6 +857,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     ensure_default_ini(); 
     init_config();
     dbg_init();
+    // Initialize dark mode BEFORE creating any windows or dialogs
+    InitializeDarkMode();
 
     WNDCLASSEXW wc = {0}; 
     wc.cbSize = sizeof(wc); 
@@ -875,7 +902,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     
     uninstall_keyboard_hook();
     
-    // 2. Clean up COM before exiting
+    // Clean up uxtheme before exiting
+    if (g_hUxtheme) {
+        FreeLibrary(g_hUxtheme);
+        g_hUxtheme = NULL;
+    }
+
+    // Clean up COM before exiting
     CoUninitialize();
     
     return (int)msg.wParam;

@@ -1,3 +1,8 @@
+v2.2.1 - 23 September 2026
+- fix **reload configuration** not working
+- fix **dark mode** not working in about window
+
+
 v2.2.0 - 14 September 2026
 - add **config.ini backward compatibility** with old config.ini or corruption
 - add **open config** to tray menu
@@ -7,6 +12,7 @@ v2.2.0 - 14 September 2026
 - fix bug related to esc button not working
 - fix bug related to mouse right click causing double click
 - fix about window not showing as seperate window
+
 
 v2.1.3 - 13 September 2026
 - Fix the **stuttering** during **capture and decoding**

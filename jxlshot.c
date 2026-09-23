@@ -49,8 +49,8 @@
 
 
 
-/* Forward Declarations
-*/
+// Forward Declarations
+
 
 static void set_dpi_aware(void);
 static void init_paths(void);
@@ -61,8 +61,8 @@ static void build_out_path(wchar_t *path, int n, int is_hdr);
 static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path);
 
 
-/* Configuration (INI)
-*/
+// Configuration (INI)
+
 
 typedef struct {
     int     debug_enabled;
@@ -95,8 +95,8 @@ static void init_paths(void) {
 }
 
 
-/* Hotkey Parsing Logic
-*/
+// Hotkey Parsing Logic
+
 
 static UINT parse_vk(const wchar_t* key) {
     if (!key || !*key) return 0;
@@ -230,7 +230,7 @@ static void ensure_default_ini(void) {
     }
 }
 
-/* Robust INI Parsing with Backward Compatibility Fallbacks */
+// Robust INI Parsing with Backward Compatibility Fallbacks */
 
 static int get_cfg_int(LPCWSTR key, int default_val, LPCWSTR ini_path) {
     wchar_t buf[64];
@@ -332,8 +332,8 @@ static void init_config(void) {
 }
 
 
-/* Unified Debug logging
-*/
+// Unified Debug logging
+
 
 static FILE *g_dbg = NULL;
 
@@ -366,8 +366,8 @@ static void dbg(const char *fmt, ...) {
 }
 
 
-/* Output Paths & DPI awareness
-*/
+// Output Paths & DPI awareness
+
 
 static void set_dpi_aware(void) {
     typedef BOOL (WINAPI *Fn)(HANDLE);
@@ -406,8 +406,8 @@ static void build_out_path(wchar_t *path, int n, int is_hdr) {
 }
 
 
-/* Screen capture (DXGI Desktop Duplication for native SDR/HDR)
-*/
+// Screen capture (DXGI Desktop Duplication for native SDR/HDR)
+
 
 typedef struct {
     uint8_t *bits;
@@ -417,12 +417,12 @@ typedef struct {
 } Grab;
 
 
-/* Blank-frame detection
-*/
+// Blank-frame detection
+
 
 
 /*  THIS FUNTION MAY BE STUPID BUT ITS BETTER TO FIX THE STUPID BLANK SCREENSHOT    */
-/*  ON SOME STUPID HARDWARE                               */
+//  ON SOME STUPID HARDWARE
 /*
  * Checks if a frame is completely blank (all black).
  * 
@@ -474,12 +474,12 @@ static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int samp
         }
     }
 
-    /* Every checked pixel was exactly zero — frame is blank */
+    // Every checked pixel was exactly zero — frame is blank
     return 1;
 }
 
 
-/* GDI BitBlt fallback capture (works without DXGI Desktop Duplication)*/
+// GDI BitBlt fallback capture (works without DXGI Desktop Duplication)
 
 
 /*
@@ -574,8 +574,8 @@ static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
 }
 
 
-/* DXGI Desktop Duplication capture, with retry + blank detection
-*/
+// DXGI Desktop Duplication capture, with retry + blank detection
+
 
 static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
     ZeroMemory(g, sizeof *g);
@@ -760,8 +760,8 @@ cleanup:
 }
 
 
-/* Public entry point: try DXGI first, fall back to GDI
-*/
+// Public entry point: try DXGI first, fall back to GDI
+
 
 static int grab_primary_monitor(Grab *g) {
     HMONITOR target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
@@ -780,8 +780,7 @@ static void free_grab(Grab *g) {
 }
 
 
-/* JPEG XL encoding (Identity SDR/HDR passthrough)
-*/
+// JPEG XL encoding (Identity SDR/HDR passthrough)
 
 static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, uint8_t **out_buf, size_t *out_size) {
     int ok = 0;
@@ -909,8 +908,8 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
 
 
 
-/* Asynchronous Encoding Worker
-*/
+// Asynchronous Encoding Worker
+
 
 typedef struct {
     uint8_t *bits;
@@ -935,15 +934,15 @@ static DWORD WINAPI EncodeWorker(LPVOID param) {
 
 
 
-/* Entry points & main
-*/
+// Entry points & main
+
 
 #ifndef JXLSHOT_TRAY_BUILD
 int main(int argc, char **argv);
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) { return main(__argc, __argv); }
 
 int main(int argc, char **argv) {
-    /* Initialize COM for DXGI/D3D11 stability */
+    // Initialize COM for DXGI/D3D11 stability
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
 
     DWORD wait_ms = 0; int cli_lossless = -1; float cli_distance = -1.0f;
@@ -963,7 +962,7 @@ int main(int argc, char **argv) {
         free_grab(&g); 
         if (g_dbg) { fclose(g_dbg); g_dbg = NULL; }
         
-        /* Uninitialize COM on early exit */
+        // Uninitialize COM on early exit
         CoUninitialize(); 
         return 1; 
     }
@@ -1006,13 +1005,13 @@ int main(int argc, char **argv) {
     
     free_grab(&g); 
     
-    /* Close the debug log file before exiting */
+    // Close the debug log file before exiting
     if (g_dbg) {
         fclose(g_dbg);
         g_dbg = NULL;
     }
     
-    /* Uninitialize COM before normal exit */
+    // Uninitialize COM before normal exit
     CoUninitialize();
     
     return rc;
