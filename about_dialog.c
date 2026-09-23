@@ -1,6 +1,8 @@
 
 // about_dialog.c
 
+// Adobe-Style Frameless Splash About Dialog
+
 
 #include <windows.h>
 #include <windowsx.h> // For GET_X_LPARAM / GET_Y_LPARAM
@@ -10,20 +12,19 @@
 #define IDC_ABOUT_TITLE 1001
 #define IDC_ABOUT_DESCRIPTION 1002
 #define IDC_ABOUT_LINK 1003
-#define IDC_ABOUT_OK 1004
 #define IDC_ABOUT_ICON 1005
 
 static HBRUSH g_hAboutBgBrush = NULL;
 static HFONT g_hTitleFont = NULL;
 static HFONT g_hBodyFont = NULL;
+static HICON g_hAppIcon = NULL;
 
 static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_CREATE: {
             ApplyDarkMode(hwnd);
 
-            // 1. Enable Windows 11 Rounded Corners & Native Drop Shadow dynamically
-            // (Loaded dynamically to prevent linker errors in CI/CD pipelines)
+            // 1. Enable Windows 11 Rounded Corners dynamically
             HMODULE hDwmapi = LoadLibraryW(L"dwmapi.dll");
             if (hDwmapi) {
                 typedef HRESULT (WINAPI *pDwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
@@ -36,41 +37,44 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             }
 
             // 2. Create Modern Typography
-            g_hTitleFont = CreateFontW(-24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            g_hTitleFont = CreateFontW(-24, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Semibold");
             g_hBodyFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
             // 3. Create Background Brush (Modern Dark Gray #1E1E1E)
             g_hAboutBgBrush = CreateSolidBrush(RGB(30, 30, 30));
 
-            // 4. Layout Controls
+            // 4. Load App Icon (128x128 for large splash display)
+            g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, LR_SHARED);
+            
+            // Set the window's own icon (shows in Taskbar / Alt-Tab)
+            SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_hAppIcon);
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hAppIcon);
+
+            // 5. Layout Controls
+            
             // Title (Left aligned)
             HWND hTitle = CreateWindowExW(0, L"STATIC", L"JXL Screenshot Tool", 
-                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 40, 260, 30, hwnd, (HMENU)IDC_ABOUT_TITLE, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 40, 250, 30, hwnd, (HMENU)IDC_ABOUT_TITLE, GetModuleHandleW(NULL), NULL);
             SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hTitleFont, TRUE);
 
             // Description (Left aligned)
             HWND hDesc = CreateWindowExW(0, L"STATIC", L"Minimal tray screenshot tool\nusing JPEG XL.", 
-                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 85, 260, 50, hwnd, (HMENU)IDC_ABOUT_DESCRIPTION, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 80, 250, 50, hwnd, (HMENU)IDC_ABOUT_DESCRIPTION, GetModuleHandleW(NULL), NULL);
             SendMessageW(hDesc, WM_SETFONT, (WPARAM)g_hBodyFont, TRUE);
 
             // Hyperlink (Left aligned)
-            CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>", 
-                WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 145, 150, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
-
-            // Splash Icon (Right aligned, large)
+            HWND hLink = CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>", 
+                WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 140, 200, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
+            
+            // Splash Icon (Right aligned, large 128x128)
             HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"", 
-                WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 320, 40, 96, 96, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
-            HICON hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON));
-            SendMessageW(hIconCtrl, STM_SETICON, (WPARAM)hIcon, 0);
-
-            // OK Button (Bottom Right)
-            CreateWindowExW(0, L"BUTTON", L"OK", 
-                WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP, 320, 160, 100, 32, hwnd, (HMENU)IDC_ABOUT_OK, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | SS_ICON, 320, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
+            SendMessageW(hIconCtrl, STM_SETICON, (WPARAM)g_hAppIcon, 0);
 
             return 0;
-        }
+.        }
 
         case WM_ERASEBKGND: {
             // Paint background immediately to prevent white flashing
@@ -90,15 +94,16 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             // Fill Background
             FillRect(hdc, &rc, g_hAboutBgBrush);
             
-            // Draw Custom '✕' Exit Button (Top Right)
+            // Draw Custom '✕' Exit Button (Top Right) in RED
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(160, 160, 160));
-            HFONT hXFont = CreateFontW(-20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+            SetTextColor(hdc, RGB(255, 85, 85)); // Modern Red
+            
+            HFONT hXFont = CreateFontW(-22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
             HFONT hOldFont = (HFONT)SelectObject(hdc, hXFont);
             
-            RECT rcX = {410, 10, 440, 40};
-            DrawTextW(hdc, L"✕", -1, &rcX, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            RECT rcX = {430, 10, 470, 50};
+            DrawTextW(hdc, L"\u2715", -1, &rcX, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             
             SelectObject(hdc, hOldFont);
             DeleteObject(hXFont);
@@ -123,12 +128,19 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             return (INT_PTR)g_hAboutBgBrush;
         }
 
+        case WM_KEYDOWN:
+            if (wParam == VK_ESCAPE) {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+
         case WM_LBUTTONDOWN: {
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
             
-            // Hit-test for custom '✕' Exit Button
-            if (x >= 410 && x <= 440 && y >= 10 && y <= 40) {
+            // Hit-test for custom Red '✕' Exit Button (430 to 470 X, 10 to 50 Y)
+            if (x >= 430 && x <= 470 && y >= 10 && y <= 50) {
                 DestroyWindow(hwnd);
                 return 0;
             }
@@ -142,13 +154,6 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             return 0;
         }
 
-        case WM_COMMAND:
-            if (LOWORD(wParam) == IDC_ABOUT_OK || LOWORD(wParam) == IDCANCEL) {
-                DestroyWindow(hwnd);
-                return 0;
-            }
-            break;
-
         case WM_NOTIFY: {
             LPNMHDR pnmh = (LPNMHDR)lParam;
             if (pnmh->idFrom == IDC_ABOUT_LINK && pnmh->code == NM_CLICK) {
@@ -158,6 +163,13 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             }
             break;
         }
+
+        case WM_ACTIVATE:
+            // Keep the splash screen on top if it loses focus
+            if (wParam == WA_INACTIVE) {
+                SetForegroundWindow(hwnd);
+            }
+            break;
 
         case WM_DESTROY:
             EnableWindow(g_hwndTray, TRUE);
@@ -175,14 +187,19 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 }
 
 static void execute_about(void) {
+    // Disable the tray window while the dialog is open (modal behavior)
     EnableWindow(g_hwndTray, FALSE);
+    
+    // Grant this process the right to set its own windows to the foreground
     AllowSetForegroundWindow(GetCurrentProcessId());
 
+    // Ensure common controls (specifically SysLink) are initialized
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LINK_CLASS };
     InitCommonControlsEx(&icc);
 
-    const int dlgWidth = 450;
-    const int dlgHeight = 220;
+    // Slightly wider to accommodate the larger 128x128 icon comfortably
+    const int dlgWidth = 480;
+    const int dlgHeight = 240;
 
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
@@ -193,6 +210,7 @@ static void execute_about(void) {
     wc.lpszClassName = L"JxlShotAboutClass";
     RegisterClassExW(&wc);
 
+    // Center the window on the primary monitor work area
     RECT rc;
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &rc, 0);
     int x = rc.left + (rc.right - rc.left - dlgWidth) / 2;
@@ -214,6 +232,7 @@ static void execute_about(void) {
     if (hwndAbout) {
         SetForegroundWindow(hwndAbout);
 
+        // Local modal message loop
         MSG msg;
         while (GetMessage(&msg, NULL, 0, 0)) {
             TranslateMessage(&msg);
