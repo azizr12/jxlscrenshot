@@ -222,7 +222,7 @@ static void ensure_default_ini(void) {
                 L"HotkeyRegion=Ctrl+PrintScreen\n"
                 L"BlankCheckMode=2\n"
                 L"ShowCursor=1\n"
-                L"     THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! \n";
+                L"     THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! \n"; 
             
             fputws(default_ini, f);
             fclose(f);
@@ -230,10 +230,7 @@ static void ensure_default_ini(void) {
     }
 }
 
-
-
-/* Robust INI Parsing with Backward Compatibility Fallbacks
-*/
+/* Robust INI Parsing with Backward Compatibility Fallbacks */
 
 static int get_cfg_int(LPCWSTR key, int default_val, LPCWSTR ini_path) {
     wchar_t buf[64];
@@ -242,9 +239,8 @@ static int get_cfg_int(LPCWSTR key, int default_val, LPCWSTR ini_path) {
     // 2. Try legacy/alternative sections
     if (GetPrivateProfileStringW(L"Settings", key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
     if (GetPrivateProfileStringW(L"General", key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
-    // 3. Try root level (no section header)
-    if (GetPrivateProfileStringW(NULL, key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
     
+    // Remove the NULL fallback. Passing NULL returns section names, not key values.
     return default_val;
 }
 
@@ -261,9 +257,11 @@ static float get_cfg_float(LPCWSTR key, float default_val, LPCWSTR ini_path) {
 
     if (GetPrivateProfileStringW(L"Capture", key, L"", buf, 64, ini_path) > 0) PARSE_FLOAT(buf);
     if (GetPrivateProfileStringW(L"Settings", key, L"", buf, 64, ini_path) > 0) PARSE_FLOAT(buf);
-    if (GetPrivateProfileStringW(NULL, key, L"", buf, 64, ini_path) > 0) PARSE_FLOAT(buf);
+    if (GetPrivateProfileStringW(L"General", key, L"", buf, 64, ini_path) > 0) PARSE_FLOAT(buf); // Added for consistency
     
     #undef PARSE_FLOAT
+    
+    // Remove the NULL fallback.
     return default_val;
 }
 
@@ -273,10 +271,10 @@ static void get_cfg_string(LPCWSTR key, LPCWSTR default_val, LPWSTR out_buf, DWO
     // 2. Try legacy sections
     if (GetPrivateProfileStringW(L"Settings", key, L"", out_buf, buf_size, ini_path) > 0) return;
     if (GetPrivateProfileStringW(L"General", key, L"", out_buf, buf_size, ini_path) > 0) return;
-    // 3. Try root level
-    if (GetPrivateProfileStringW(NULL, key, L"", out_buf, buf_size, ini_path) > 0) return;
     
-    // 4. Fallback to default
+    // Remove the NULL fallback.
+    
+    // 3. Fallback to default
     wcsncpy_s(out_buf, buf_size, default_val, _TRUNCATE);
 }
 
