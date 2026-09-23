@@ -75,9 +75,9 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>", 
                 WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 140, 200, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
             
-            // Splash Icon (Right aligned, large 128x128)
+            // Splash Icon
             HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"", 
-                WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 320, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 300, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
             SendMessageW(hIconCtrl, STM_SETICON, (WPARAM)g_hAppIcon, 0);
 
             return 0;
