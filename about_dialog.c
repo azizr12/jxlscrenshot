@@ -1,8 +1,6 @@
-
 // about_dialog.c
 
 // Adobe-Style Frameless Splash About Dialog
-
 
 #include <windows.h>
 #include <windowsx.h> // For GET_X_LPARAM / GET_Y_LPARAM
@@ -17,7 +15,14 @@
 static HBRUSH g_hAboutBgBrush = NULL;
 static HFONT g_hTitleFont = NULL;
 static HFONT g_hBodyFont = NULL;
+static HFONT g_hXFont = NULL;
 static HICON g_hAppIcon = NULL;
+static BOOL g_isXHovered = FALSE;
+
+// Forward declaration (assumed to be defined elsewhere in your codebase)
+extern void ApplyDarkMode(HWND hwnd);
+extern HWND g_hwndTray;
+extern HWND g_hwndMenuOwner;
 
 static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
@@ -41,12 +46,14 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Semibold");
             g_hBodyFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            g_hXFont = CreateFontW(-20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
             // 3. Create Background Brush (Modern Dark Gray #1E1E1E)
             g_hAboutBgBrush = CreateSolidBrush(RGB(30, 30, 30));
 
-            // 4. Load App Icon (128x128 for large splash display)
-            g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, LR_SHARED);
+            // 4. Load App Icon (128x128 for large splash display, preserving original aspect)
+            g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, 0);
             
             // Set the window's own icon (shows in Taskbar / Alt-Tab)
             SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_hAppIcon);
@@ -65,16 +72,16 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             SendMessageW(hDesc, WM_SETFONT, (WPARAM)g_hBodyFont, TRUE);
 
             // Hyperlink (Left aligned)
-            HWND hLink = CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>", 
+            CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>", 
                 WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 140, 200, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
             
             // Splash Icon (Right aligned, large 128x128)
             HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"", 
-                WS_CHILD | WS_VISIBLE | SS_ICON, 320, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 320, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
             SendMessageW(hIconCtrl, STM_SETICON, (WPARAM)g_hAppIcon, 0);
 
             return 0;
-.        }
+        }
 
         case WM_ERASEBKGND: {
             // Paint background immediately to prevent white flashing
@@ -96,17 +103,23 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             
             // Draw Custom '✕' Exit Button (Top Right) in RED
             SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(255, 85, 85)); // Modern Red
             
-            HFONT hXFont = CreateFontW(-22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-            HFONT hOldFont = (HFONT)SelectObject(hdc, hXFont);
+            RECT rcX = {440, 10, 480, 50}; // 40x40 clickable area aligned to right edge
             
-            RECT rcX = {430, 10, 470, 50};
+            if (g_isXHovered) {
+                // Hover state: darker red background, brighter red text
+                HBRUSH hHoverBrush = CreateSolidBrush(RGB(60, 30, 30));
+                FillRect(hdc, &rcX, hHoverBrush);
+                DeleteObject(hHoverBrush);
+                SetTextColor(hdc, RGB(255, 120, 120));
+            } else {
+                // Normal state: transparent background, modern red text
+                SetTextColor(hdc, RGB(255, 85, 85));
+            }
+            
+            HFONT hOldFont = (HFONT)SelectObject(hdc, g_hXFont);
             DrawTextW(hdc, L"\u2715", -1, &rcX, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            
             SelectObject(hdc, hOldFont);
-            DeleteObject(hXFont);
             
             EndPaint(hwnd, &ps);
             return 0;
@@ -128,6 +141,38 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             return (INT_PTR)g_hAboutBgBrush;
         }
 
+        case WM_MOUSEMOVE: {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            RECT rcX = {440, 10, 480, 50};
+            POINT pt = {x, y};
+            BOOL isHovered = PtInRect(&rcX, pt);
+            
+            if (isHovered != g_isXHovered) {
+                g_isXHovered = isHovered;
+                InvalidateRect(hwnd, &rcX, TRUE);
+                
+                if (isHovered) {
+                    TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+                    TrackMouseEvent(&tme);
+                    SetCursor(LoadCursorW(NULL, IDC_HAND));
+                } else {
+                    SetCursor(LoadCursorW(NULL, IDC_ARROW));
+                }
+            } else if (isHovered) {
+                SetCursor(LoadCursorW(NULL, IDC_HAND));
+            }
+            return 0;
+        }
+
+        case WM_MOUSELEAVE: {
+            g_isXHovered = FALSE;
+            RECT rcX = {440, 10, 480, 50};
+            InvalidateRect(hwnd, &rcX, TRUE);
+            SetCursor(LoadCursorW(NULL, IDC_ARROW));
+            return 0;
+        }
+
         case WM_KEYDOWN:
             if (wParam == VK_ESCAPE) {
                 DestroyWindow(hwnd);
@@ -139,8 +184,8 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
             
-            // Hit-test for custom Red '✕' Exit Button (430 to 470 X, 10 to 50 Y)
-            if (x >= 430 && x <= 470 && y >= 10 && y <= 50) {
+            // Hit-test for custom Red '✕' Exit Button
+            if (x >= 440 && x <= 480 && y >= 10 && y <= 50) {
                 DestroyWindow(hwnd);
                 return 0;
             }
@@ -176,6 +221,8 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             if (g_hAboutBgBrush) { DeleteObject(g_hAboutBgBrush); g_hAboutBgBrush = NULL; }
             if (g_hTitleFont) { DeleteObject(g_hTitleFont); g_hTitleFont = NULL; }
             if (g_hBodyFont) { DeleteObject(g_hBodyFont); g_hBodyFont = NULL; }
+            if (g_hXFont) { DeleteObject(g_hXFont); g_hXFont = NULL; }
+            if (g_hAppIcon) { DestroyIcon(g_hAppIcon); g_hAppIcon = NULL; }
             PostQuitMessage(0); 
             return 0;
 
@@ -197,7 +244,7 @@ static void execute_about(void) {
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LINK_CLASS };
     InitCommonControlsEx(&icc);
 
-    // Slightly wider to accommodate the larger 128x128 icon comfortably
+    // Dimensions adjusted to comfortably accommodate the larger 128x128 icon
     const int dlgWidth = 480;
     const int dlgHeight = 240;
 
@@ -208,6 +255,11 @@ static void execute_about(void) {
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
     wc.hbrBackground = NULL; 
     wc.lpszClassName = L"JxlShotAboutClass";
+    
+    // Assign the window its own icon for Taskbar and Alt-Tab visibility
+    wc.hIcon = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm = LoadIconW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON));
+    
     RegisterClassExW(&wc);
 
     // Center the window on the primary monitor work area
