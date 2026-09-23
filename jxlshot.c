@@ -48,9 +48,10 @@
 
 
 
-/* ------------------------------------------------------------------ */
-/* Forward Declarations                                               */
-/* ------------------------------------------------------------------ */
+
+/* Forward Declarations
+*/
+
 static void set_dpi_aware(void);
 static void init_paths(void);
 static void ensure_default_ini(void);
@@ -59,9 +60,10 @@ static void dbg_init(void);
 static void build_out_path(wchar_t *path, int n, int is_hdr);
 static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path);
 
-/* ------------------------------------------------------------------ */
-/* Configuration (INI)                                                */
-/* ------------------------------------------------------------------ */
+
+/* Configuration (INI)
+*/
+
 typedef struct {
     int     debug_enabled;
     int     lossless;
@@ -92,9 +94,10 @@ static void init_paths(void) {
     g_exe_dir[MAX_PATH - 1] = 0;
 }
 
-/* ------------------------------------------------------------------ */
-/* Hotkey Parsing Logic                                               */
-/* ------------------------------------------------------------------ */
+
+/* Hotkey Parsing Logic
+*/
+
 static UINT parse_vk(const wchar_t* key) {
     if (!key || !*key) return 0;
 
@@ -228,9 +231,10 @@ static void ensure_default_ini(void) {
 }
 
 
-/* ------------------------------------------------------------------ */
-/* Robust INI Parsing with Backward Compatibility Fallbacks           */
-/* ------------------------------------------------------------------ */
+
+/* Robust INI Parsing with Backward Compatibility Fallbacks
+*/
+
 static int get_cfg_int(LPCWSTR key, int default_val, LPCWSTR ini_path) {
     wchar_t buf[64];
     // 1. Try primary section
@@ -279,9 +283,15 @@ static void get_cfg_string(LPCWSTR key, LPCWSTR default_val, LPWSTR out_buf, DWO
 static void init_config(void) {
     wchar_t ini_path[MAX_PATH];
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-    
+
+    // Force Windows to drop its cached copy of this INI and re-read from disk.
+    // Without this, GetPrivateProfileString* can keep serving a stale in-memory
+    // snapshot after the file is edited externally, which is why "Reload
+    // Configuration" will do nothing until the app was fully restarted.
+    WritePrivateProfileStringW(NULL, NULL, NULL, ini_path);
+
     // Set absolute defaults first
-    g_cfg.debug_enabled = 1; 
+    g_cfg.debug_enabled = 1;
     g_cfg.lossless = 1; 
     g_cfg.distance = 1.0f; 
     g_cfg.show_cursor = 1;
@@ -323,9 +333,10 @@ static void init_config(void) {
     parse_hotkey(hk_region_str, &g_cfg.hk_region_mod, &g_cfg.hk_region_vk);
 }
 
-/* ------------------------------------------------------------------ */
-/* Unified Debug logging                                              */
-/* ------------------------------------------------------------------ */
+
+/* Unified Debug logging
+*/
+
 static FILE *g_dbg = NULL;
 
 static void dbg_init(void) {
@@ -356,9 +367,10 @@ static void dbg(const char *fmt, ...) {
     fflush(g_dbg);
 }
 
-/* ------------------------------------------------------------------ */
-/* Output Paths & DPI awareness                                       */
-/* ------------------------------------------------------------------ */
+
+/* Output Paths & DPI awareness
+*/
+
 static void set_dpi_aware(void) {
     typedef BOOL (WINAPI *Fn)(HANDLE);
     Fn f = (Fn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
@@ -395,9 +407,10 @@ static void build_out_path(wchar_t *path, int n, int is_hdr) {
     path[n - 1] = L'\0';
 }
 
-/* ------------------------------------------------------------------ */
-/* Screen capture (DXGI Desktop Duplication for native SDR/HDR)       */
-/* ------------------------------------------------------------------ */
+
+/* Screen capture (DXGI Desktop Duplication for native SDR/HDR)
+*/
+
 typedef struct {
     uint8_t *bits;
     size_t size;
@@ -405,9 +418,10 @@ typedef struct {
     int is_hdr; // 1 if FP16 scRGB, 0 if 8-bit SDR
 } Grab;
 
-/* ------------------------------------------------------------------ */
-/* Blank-frame detection                                              */
-/* ------------------------------------------------------------------ */
+
+/* Blank-frame detection
+*/
+
 
 /*  THIS FUNTION MAY BE STUPID BUT ITS BETTER TO FIX THE STUPID BLANK SCREENSHOT    */
 /*  ON SOME STUPID HARDWARE                               */
@@ -466,9 +480,9 @@ static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int samp
     return 1;
 }
 
-/* ------------------------------------------------------------------ */
+
 /* GDI BitBlt fallback capture (works without DXGI Desktop Duplication)*/
-/* ------------------------------------------------------------------ */
+
 
 /*
  * Classic BitBlt screen capture. Always SDR/8-bit, but far more
@@ -561,9 +575,10 @@ static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
     return 1;
 }
 
-/* ------------------------------------------------------------------ */
-/* DXGI Desktop Duplication capture, with retry + blank detection     */
-/* ------------------------------------------------------------------ */
+
+/* DXGI Desktop Duplication capture, with retry + blank detection
+*/
+
 static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
     ZeroMemory(g, sizeof *g);
 
@@ -746,9 +761,10 @@ cleanup:
     return ok;
 }
 
-/* ------------------------------------------------------------------ */
-/* Public entry point: try DXGI first, fall back to GDI               */
-/* ------------------------------------------------------------------ */
+
+/* Public entry point: try DXGI first, fall back to GDI
+*/
+
 static int grab_primary_monitor(Grab *g) {
     HMONITOR target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
 
@@ -765,9 +781,10 @@ static void free_grab(Grab *g) {
     ZeroMemory(g, sizeof *g);
 }
 
-/* ------------------------------------------------------------------ */
-/* JPEG XL encoding (Identity SDR/HDR passthrough)                    */
-/* ------------------------------------------------------------------ */
+
+/* JPEG XL encoding (Identity SDR/HDR passthrough)
+*/
+
 static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, uint8_t **out_buf, size_t *out_size) {
     int ok = 0;
     uint8_t *buf = NULL;
@@ -893,9 +910,10 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
 
 
 
-/* ------------------------------------------------------------------ */
-/* Asynchronous Encoding Worker                                       */
-/* ------------------------------------------------------------------ */
+
+/* Asynchronous Encoding Worker
+*/
+
 typedef struct {
     uint8_t *bits;
     int w, h, is_hdr, lossless;
@@ -918,9 +936,10 @@ static DWORD WINAPI EncodeWorker(LPVOID param) {
 
 
 
-/* ------------------------------------------------------------------ */
-/* Entry points & main                                                */
-/* ------------------------------------------------------------------ */
+
+/* Entry points & main
+*/
+
 #ifndef JXLSHOT_TRAY_BUILD
 int main(int argc, char **argv);
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) { return main(__argc, __argv); }
