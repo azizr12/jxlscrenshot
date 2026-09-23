@@ -40,7 +40,7 @@
 #include <stdlib.h>
 #include <wchar.h>
 #include "jxlshot.c" // Pulls in core logic, config, and unified dbg() logger
-#include "about_dialog.c" // Pulls in the custom About dialog implementation
+
 
 #include <uxtheme.h>
 #include <urlmon.h>
@@ -789,6 +789,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
     }
     return 0;
 }
+
+#include "about_dialog.c" // Pulls in the custom About dialog implementation
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     // 1. Initialize COM for Shell APIs (SHBrowseForFolder), TaskDialog, and DXGI/D3D11 stability

@@ -4,16 +4,12 @@
 // Custom About Dialog with full Dark Mode and Window Management control
 
 
+// Ensure SysLink controls (NMLINK) are fully defined
+#define _WIN32_IE 0x0600
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
 
-// Forward declarations to access variables from jxlshot_tray.c
-extern HWND g_hwndTray;
-extern HWND g_hwndMenuOwner;
-extern void ApplyDarkMode(HWND hwnd);
-
-#define IDI_APP_ICON 1001
 #define IDC_ABOUT_TITLE 1001
 #define IDC_ABOUT_DESCRIPTION 1002
 #define IDC_ABOUT_LINK 1003
@@ -66,7 +62,7 @@ static INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
         case WM_NOTIFY: {
             LPNMHDR pnmh = (LPNMHDR)lParam;
             if (pnmh->idFrom == IDC_ABOUT_LINK && pnmh->code == NM_CLICK) {
-                LPNMLINK pnmLink = (LPNMLINK)lParam;
+                NMLINK* pnmLink = (NMLINK*)lParam;
                 ShellExecuteW(hwndDlg, L"open", pnmLink->item.szUrl, NULL, NULL, SW_SHOWNORMAL);
                 return TRUE;
             }
@@ -105,7 +101,7 @@ static INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
     return FALSE;
 }
 
-void execute_about(void) {
+static void execute_about(void) {
     // Disable the tray window while the dialog is open (modal behavior)
     EnableWindow(g_hwndTray, FALSE);
 
