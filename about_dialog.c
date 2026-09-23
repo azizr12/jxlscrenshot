@@ -16,8 +16,7 @@ static HBRUSH g_hAboutBgBrush = NULL;
 static HFONT g_hTitleFont = NULL;
 static HFONT g_hBodyFont = NULL;
 static HFONT g_hXFont = NULL;
-static HICON g_hAppIcon = NULL;
-static HICON g_hTaskbarIconSmall = NULL;
+static HICON g_hAppIcon = NULL; // Single global handle for the 128x128 icon
 static BOOL g_isXHovered = FALSE;
 
 // Forward declaration (assumed to be defined elsewhere in your codebase)
@@ -53,16 +52,10 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             // 3. Create Background Brush (Modern Dark Gray #1E1E1E)
             g_hAboutBgBrush = CreateSolidBrush(RGB(30, 30, 30));
 
-            // 4. Load App Icons
-            // Large 128x128 for the splash screen display
-            g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, 0);
-            
-            // Small 16x16 for Taskbar / Title bar (LR_SHARED prevents memory leaks)
-            g_hTaskbarIconSmall = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_SHARED);
-
-            // Set the window's own icon (shows in Taskbar / Alt-Tab)
+            // 4. Apply the EXACT SAME 128x128 icon to the window (Taskbar / Alt-Tab)
+            // (g_hAppIcon is already loaded in execute_about before this window is created)
             SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_hAppIcon);
-            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hTaskbarIconSmall);
+            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hAppIcon);
 
             // 5. Layout Controls
             
@@ -80,7 +73,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>", 
                 WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 140, 200, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
             
-            // Splash Icon (Moved left to X=300 to prevent overlap with the X button at X=440)
+            // Splash Icon (Right aligned, uses the exact same 128x128 icon)
             HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"", 
                 WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 300, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
             SendMessageW(hIconCtrl, STM_SETICON, (WPARAM)g_hAppIcon, 0);
@@ -219,7 +212,6 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             if (g_hBodyFont) { DeleteObject(g_hBodyFont); g_hBodyFont = NULL; }
             if (g_hXFont) { DeleteObject(g_hXFont); g_hXFont = NULL; }
             if (g_hAppIcon) { DestroyIcon(g_hAppIcon); g_hAppIcon = NULL; }
-            // Note: g_hTaskbarIconSmall uses LR_SHARED, so the system manages its cleanup.
             PostQuitMessage(0); 
             return 0;
 
@@ -237,6 +229,11 @@ static void execute_about(void) {
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LINK_CLASS };
     InitCommonControlsEx(&icc);
 
+    // Load the 128x128 icon ONCE to be used universally for Splash Screen and Taskbar
+    if (!g_hAppIcon) {
+        g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, 0);
+    }
+
     const int dlgWidth = 480;
     const int dlgHeight = 240;
 
@@ -248,11 +245,10 @@ static void execute_about(void) {
     wc.hbrBackground = NULL; 
     wc.lpszClassName = L"JxlShotAboutClass";
     
-    // TASKBAR ICON LOADING
-    // 32x32 is the standard size Windows expects for the main taskbar button
-    wc.hIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 32, 32, LR_SHARED);
-    // 16x16 is the standard size for the small corner icon / Alt-Tab
-    wc.hIconSm = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 16, 16, LR_SHARED);
+    // Assign the EXACT SAME 128x128 icon to the window class
+    // Windows will automatically scale it down for the taskbar button
+    wc.hIcon = g_hAppIcon;
+    wc.hIconSm = g_hAppIcon;
     
     RegisterClassExW(&wc);
 
@@ -261,7 +257,6 @@ static void execute_about(void) {
     int x = rc.left + (rc.right - rc.left - dlgWidth) / 2;
     int y = rc.top + (rc.bottom - rc.top - dlgHeight) / 2;
 
-    // WS_EX_APPWINDOW forces the taskbar button to appear even for a popup/owned window
     HWND hwndAbout = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_APPWINDOW,
         L"JxlShotAboutClass",
