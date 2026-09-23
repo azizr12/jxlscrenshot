@@ -23,7 +23,7 @@
 
 
 
-
+#define _WIN32_IE 0x0600
 #define UNICODE
 #define _UNICODE
 #define WINVER 0x0601
@@ -131,6 +131,7 @@ static DWORD           g_regionCaptureEndTime = 0;
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
 static void install_mouse_hook(void);
 static void uninstall_mouse_hook(void);
+static void execute_about(void);
 
 static void reload_config(void) { init_config(); }
 

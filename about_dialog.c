@@ -4,8 +4,6 @@
 // Custom About Dialog with full Dark Mode and Window Management control
 
 
-// Ensure SysLink controls (NMLINK) are fully defined
-#define _WIN32_IE 0x0600
 #include <windows.h>
 #include <commctrl.h>
 #include <shellapi.h>
@@ -28,24 +26,20 @@ static INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
                 SendMessageW(hwndDlg, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
             }
 
-            // Create Title
             CreateWindowExW(0, L"STATIC", L"JXL Screenshot Tool", 
                 WS_CHILD | WS_VISIBLE | SS_LEFT, 60, 15, 260, 25, hwndDlg, (HMENU)IDC_ABOUT_TITLE, GetModuleHandleW(NULL), NULL);
 
-            // Create Description
             CreateWindowExW(0, L"STATIC", L"Minimal tray screenshot tool using JPEG XL.", 
                 WS_CHILD | WS_VISIBLE | SS_LEFT, 60, 45, 260, 40, hwndDlg, (HMENU)IDC_ABOUT_DESCRIPTION, GetModuleHandleW(NULL), NULL);
 
-            // Create SysLink (Hyperlink)
             CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>", 
                 WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 60, 90, 260, 20, hwndDlg, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
 
-            // Create OK Button
             CreateWindowExW(0, L"BUTTON", L"OK", 
                 WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP, 120, 130, 100, 28, hwndDlg, (HMENU)IDC_ABOUT_OK, GetModuleHandleW(NULL), NULL);
 
             if (!g_hAboutBgBrush) {
-                g_hAboutBgBrush = CreateSolidBrush(RGB(45, 45, 48)); // Windows Dark Gray (#2D2D30)
+                g_hAboutBgBrush = CreateSolidBrush(RGB(45, 45, 48));
             }
 
             SetFocus(GetDlgItem(hwndDlg, IDC_ABOUT_OK));
@@ -70,7 +64,6 @@ static INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
         }
 
         case WM_ACTIVATE:
-            // If the dialog loses focus, force it back to the foreground
             if (wParam == WA_INACTIVE) {
                 SetForegroundWindow(hwndDlg);
             }
@@ -85,13 +78,12 @@ static INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
         }
 
         case WM_DESTROY:
-            // Re-enable the main tray window when the dialog closes
             EnableWindow(g_hwndTray, TRUE);
             if (g_hAboutBgBrush) {
                 DeleteObject(g_hAboutBgBrush);
                 g_hAboutBgBrush = NULL;
             }
-            PostQuitMessage(0); // Breaks the modal message loop
+            PostQuitMessage(0);
             return TRUE;
 
         case WM_CLOSE:
@@ -102,23 +94,18 @@ static INT_PTR CALLBACK AboutDialogProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, 
 }
 
 static void execute_about(void) {
-    // Disable the tray window while the dialog is open (modal behavior)
     EnableWindow(g_hwndTray, FALSE);
-
-    // Grant this process the right to set its own windows to the foreground
     AllowSetForegroundWindow(GetCurrentProcessId());
 
-    // Ensure common controls (specifically SysLink) are initialized
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LINK_CLASS };
     InitCommonControlsEx(&icc);
 
     const int dlgWidth = 340;
     const int dlgHeight = 190;
 
-    // Create the dialog window manually for maximum control over appearance and Z-order
     HWND hwndAbout = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_APPWINDOW | WS_EX_DLGMODALFRAME,
-        L"#32770", // Standard Windows dialog class
+        L"#32770",
         L"About",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT, CW_USEDEFAULT, dlgWidth, dlgHeight,
@@ -129,19 +116,16 @@ static void execute_about(void) {
     );
 
     if (hwndAbout) {
-        // Center the window on the primary monitor work area
         RECT rc;
         SystemParametersInfoW(SPI_GETWORKAREA, 0, &rc, 0);
         int x = rc.left + (rc.right - rc.left - dlgWidth) / 2;
         int y = rc.top + (rc.bottom - rc.top - dlgHeight) / 2;
         
         SetWindowPos(hwndAbout, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
-        
         ShowWindow(hwndAbout, SW_SHOW);
         UpdateWindow(hwndAbout);
         SetForegroundWindow(hwndAbout);
 
-        // Run a local modal message loop
         MSG msg;
         while (GetMessage(&msg, NULL, 0, 0)) {
             if (!IsDialogMessage(hwndAbout, &msg)) {
