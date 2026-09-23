@@ -368,8 +368,19 @@ static void execute_open_export_folder(void) {
 
 static HRESULT CALLBACK AboutDialogCallback(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam, LONG_PTR lpRefData) {
     if (msg == TDN_CREATED) {
-        // Apply dark mode to the TaskDialog as soon as it's created
-        ApplyDarkMode(hwnd);
+        // 1. Opt-in the TaskDialog window to dark mode immediately
+        if (g_pAllowDarkModeForWindow) {
+            g_pAllowDarkModeForWindow(hwnd, TRUE);
+        }
+    }
+    else if (msg == TDN_NAVIGATED) {
+        // 2. TaskDialog needs a second nudge after its content is fully laid out
+        if (g_pAllowDarkModeForWindow) {
+            g_pAllowDarkModeForWindow(hwnd, TRUE);
+        }
+        // 3. Force the window and all its child controls to repaint with the new theme
+        SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
+        RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     }
     
     if (msg == TDN_HYPERLINK_CLICKED) {
@@ -384,13 +395,10 @@ static void execute_about(void) {
     TASKDIALOGCONFIG config = {0};
     config.cbSize = sizeof(TASKDIALOGCONFIG);
     
-    // Temporarily make the parent window "visible" to the OS 
-    // window manager without activating it. This prevents the TaskDialog 
-    // from getting lost behind other applications, while still allowing it 
-    // to inherit the dark mode theme from g_hwndMenuOwner.
-    ShowWindow(g_hwndMenuOwner, SW_SHOWNOACTIVATE);
+    // FIX: Use NULL as parent so it acts as a proper top-level window.
+    // This prevents it from being hidden behind other apps due to a hidden parent window.
+    config.hwndParent = NULL;
     
-    config.hwndParent = g_hwndMenuOwner;
     config.hInstance = NULL;
     config.dwFlags = TDF_ENABLE_HYPERLINKS | TDF_ALLOW_DIALOG_CANCELLATION | TDF_USE_HICON_MAIN;
     config.pszWindowTitle = L"About";
@@ -400,11 +408,7 @@ static void execute_about(void) {
                         L"<a href=\"https://github.com/azizr12/jxlscrenshot\">https://github.com/azizr12/jxlscrenshot</a>";
     config.pfCallback = AboutDialogCallback;
 
-    // Show the dialog (it will now behave as a proper top-level window)
     TaskDialogIndirect(&config, NULL, NULL, NULL);
-
-    // Hide the parent window again after the dialog is closed
-    ShowWindow(g_hwndMenuOwner, SW_HIDE);
 
     if (hAppIcon) {
         DestroyIcon(hAppIcon);
