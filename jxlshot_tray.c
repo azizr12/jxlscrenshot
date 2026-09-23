@@ -40,6 +40,7 @@
 #include <stdlib.h>
 #include <wchar.h>
 #include "jxlshot.c" // Pulls in core logic, config, and unified dbg() logger
+#include "about_dialog.c" // Pulls in the custom About dialog implementation
 
 #include <uxtheme.h>
 #include <urlmon.h>
