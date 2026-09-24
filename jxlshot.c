@@ -201,7 +201,7 @@ static void ensure_default_ini(void) {
                 L"; [General Settings Reference]\n"
                 L";   Debug          : 1 = enable debug logging; 0 = disable.\n"
                 L";   Lossless       : 1 = Force mathematically lossless mode.\n"
-                //L";   ShowCursor     : 1 = Include mouse cursor; 0 = Hide it.\n"
+                // L";   ShowCursor     : 1 = Include mouse cursor; 0 = Hide it.\n"
                 L";   ExportPath     : Custom directory for saving screenshots.\n"
                 L";   HotkeyFull     : Keyboard shortcut to capture entire screen.\n"
                 L";   HotkeyRegion   : Keyboard shortcut to capture specific region.\n"
@@ -216,9 +216,9 @@ static void ensure_default_ini(void) {
                 L"ExportPath=\n"
                 L"HotkeyFull=PrintScreen\n"
                 L"HotkeyRegion=Ctrl+PrintScreen\n"
-                L"BlankCheckMode=2\n"
-                //L"ShowCursor=1\n"
-                //L"     THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! \n";
+                L"BlankCheckMode=2\n";
+                // L"ShowCursor=1\n"
+                // L"     THE CURSOR FEATURE IS BROKEN DONT TOUCH IT PLEASE !! \n"
             
             fputws(default_ini, f);
             fclose(f);
@@ -226,7 +226,7 @@ static void ensure_default_ini(void) {
     }
 }
 
-// Robust INI Parsing with Backward Compatibility Fallbacks */
+// Robust INI Parsing with Backward Compatibility Fallbacks
 
 static int get_cfg_int(LPCWSTR key, int default_val, LPCWSTR ini_path) {
     wchar_t buf[64];
