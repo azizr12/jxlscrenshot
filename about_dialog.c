@@ -17,7 +17,6 @@ static HFONT g_hTitleFont = NULL;
 static HFONT g_hBodyFont = NULL;
 static HFONT g_hXFont = NULL;
 static HICON g_hAppIcon = NULL; // Single global handle for the 128x128 icon
-static BOOL g_isXHovered = FALSE;
 
 // Forward declaration (assumed to be defined elsewhere in your codebase)
 extern void ApplyDarkMode(HWND hwnd);
@@ -100,14 +99,8 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             SetBkMode(hdc, TRANSPARENT);
             RECT rcX = {440, 10, 480, 50};
             
-            if (g_isXHovered) {
-                HBRUSH hHoverBrush = CreateSolidBrush(RGB(60, 30, 30));
-                FillRect(hdc, &rcX, hHoverBrush);
-                DeleteObject(hHoverBrush);
-                SetTextColor(hdc, RGB(255, 120, 120));
-            } else {
-                SetTextColor(hdc, RGB(255, 85, 85));
-            }
+            // Always use the default "X" color without hover effects
+            SetTextColor(hdc, RGB(255, 85, 85));
             
             HFONT hOldFont = (HFONT)SelectObject(hdc, g_hXFont);
             DrawTextW(hdc, L"\u2715", -1, &rcX, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
@@ -154,38 +147,6 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             
             // 3. Everywhere else acts as the title bar (fully draggable by the OS)
             return HTCAPTION;
-        }
-
-        case WM_MOUSEMOVE: {
-            int x = GET_X_LPARAM(lParam);
-            int y = GET_Y_LPARAM(lParam);
-            RECT rcX = {440, 10, 480, 50};
-            POINT pt = {x, y};
-            BOOL isHovered = PtInRect(&rcX, pt);
-            
-            if (isHovered != g_isXHovered) {
-                g_isXHovered = isHovered;
-                InvalidateRect(hwnd, &rcX, TRUE);
-                
-                if (isHovered) {
-                    TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
-                    TrackMouseEvent(&tme);
-                    SetCursor(LoadCursorW(NULL, IDC_HAND));
-                } else {
-                    SetCursor(LoadCursorW(NULL, IDC_ARROW));
-                }
-            } else if (isHovered) {
-                SetCursor(LoadCursorW(NULL, IDC_HAND));
-            }
-            return 0;
-        }
-
-        case WM_MOUSELEAVE: {
-            g_isXHovered = FALSE;
-            RECT rcX = {440, 10, 480, 50};
-            InvalidateRect(hwnd, &rcX, TRUE);
-            SetCursor(LoadCursorW(NULL, IDC_ARROW));
-            return 0;
         }
 
         case WM_KEYDOWN:
