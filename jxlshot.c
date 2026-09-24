@@ -1013,7 +1013,8 @@ int main(int argc, char **argv) {
             dbg("main: encoding offloaded to background thread");
             
             // CRITICAL: Wait for the thread to finish. 
-            // Returning from main() calls ExitProcess(), which instantly 
+            // Returning from main() calls ExitProcess()
+            // which instantly 
             // kills all background threads, aborting the save.
             WaitForSingleObject(hThread, INFINITE);
             CloseHandle(hThread);
