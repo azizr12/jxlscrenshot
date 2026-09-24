@@ -940,25 +940,26 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
     } else {
         DWORD err = GetLastError();
         const wchar_t *err_desc = L"Unknown error";
-        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-            err_desc = L"Path not found (directory does not exist)";
-        } else if (err == ERROR_ACCESS_DENIED) {
-            err_desc = L"Access denied (permission issue or file is locked)";
-        } else if (err == ERROR_DISK_FULL) {
-            err_desc = L"Disk full";
-        } else if (err == ERROR_INVALID_NAME) {
-            err_desc = L"Invalid file name";
-        }
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) err_desc = L"Path not found";
+        else if (err == ERROR_ACCESS_DENIED) err_desc = L"Access denied";
+        else if (err == ERROR_DISK_FULL) err_desc = L"Disk full";
         dbg("save_rgb_as_jxl: _wfopen FAILED for path '%ls'. Error code: %lu (%ls)", path, err, err_desc);
     }
     
     if (!ok) {
-        // Fallback logic: try saving to the executable directory
-        dbg("save_rgb_as_jxl: Primary save failed. Attempting fallback to executable directory.");
+        // Fallback logic: try saving to the user's Pictures folder
+        dbg("save_rgb_as_jxl: Primary save failed. Attempting fallback to User Pictures folder.");
         
         wchar_t fallback_path[MAX_PATH];
         wchar_t fallback_dir[MAX_PATH];
-        wcsncpy_s(fallback_dir, MAX_PATH, g_exe_dir, _TRUNCATE);
+        
+        // Get the standard User Pictures folder
+        if (FAILED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, SHGFP_TYPE_CURRENT, fallback_dir))) {
+            // Fallback to USERPROFILE\Pictures if SHGetFolderPath fails
+            GetEnvironmentVariableW(L"USERPROFILE", fallback_dir, MAX_PATH);
+            wcscat_s(fallback_dir, MAX_PATH, L"\\Pictures");
+        }
+        
         size_t len = wcslen(fallback_dir);
         if (len > 0 && fallback_dir[len - 1] != L'\\') {
             wcsncat_s(fallback_dir, MAX_PATH, L"\\", _TRUNCATE);
@@ -976,35 +977,31 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
         if (f_fallback) {
             size_t written_fb = fwrite(buf, 1, size, f_fallback);
             if (written_fb != size) {
-                dbg("save_rgb_as_jxl: fallback fwrite failed (written %zu of %zu). ferror: %d, GetLastError: %lu", 
-                    written_fb, size, ferror(f_fallback), GetLastError());
+                dbg("save_rgb_as_jxl: fallback fwrite failed. ferror: %d", ferror(f_fallback));
                 ok = 0;
             } else if (fflush(f_fallback) != 0) {
-                dbg("save_rgb_as_jxl: fallback fflush failed. ferror: %d, GetLastError: %lu", 
-                    ferror(f_fallback), GetLastError());
+                dbg("save_rgb_as_jxl: fallback fflush failed. ferror: %d", ferror(f_fallback));
                 ok = 0;
             } else {
                 ok = 1; // Fallback succeeded
             }
             fclose(f_fallback);
         } else {
-            DWORD err_fb = GetLastError();
-            const wchar_t *err_desc_fb = (err_fb == ERROR_ACCESS_DENIED) ? L"Access denied" : L"Path not found";
-            dbg("save_rgb_as_jxl: fallback _wfopen FAILED for path '%ls'. Error code: %lu (%ls)", fallback_path, err_fb, err_desc_fb);
+            dbg("save_rgb_as_jxl: fallback _wfopen FAILED. GetLastError: %lu", GetLastError());
         }
         
         // User Notifications
         if (!ok) {
             wchar_t err_msg[512];
             _snwprintf(err_msg, 512, 
-                L"Failed to save screenshot to:\n%s\n\nFallback to:\n%s\nalso failed.\n\n"
-                L"Please check:\n- Available disk space\n- Folder permissions\n- Antivirus interference", 
+                L"Failed to save screenshot to:\n%s\n\nFallback to Pictures folder:\n%s\nalso failed.\n\n"
+                L"Please check disk space and permissions.", 
                 path, fallback_path);
             MessageBoxW(NULL, err_msg, L"jxlshot Save Error", MB_ICONERROR | MB_OK | MB_SYSTEMMODAL);
         } else {
             wchar_t success_msg[512];
             _snwprintf(success_msg, 512, 
-                L"Failed to save to configured export path (write error or 0-byte file detected).\n\n"
+                L"Failed to save to configured export path.\n\n"
                 L"Screenshot was successfully saved to fallback location:\n%s", 
                 fallback_path);
             MessageBoxW(NULL, success_msg, L"jxlshot Fallback Save", MB_ICONWARNING | MB_OK | MB_SYSTEMMODAL);
