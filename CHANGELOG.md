@@ -1,6 +1,6 @@
 v2.2.2 - 24 September 2026
 - fix thread may **terminated** if write didnt finish or app exit
-- fix **picture folde**r name may be localized which will cause path to fail
+- fix **picture folder** name may be localized which will cause path to fail
 - add notification pop up if something goes wrong with path or writing!
 
 
@@ -10,6 +10,7 @@ v2.2.1 - 23 September 2026
 - fix **multithreading** not being used
 - removed upx compressing that cause **false positive** for anti-viruses software
 - made about window act as simply **splash screen** instead of window
+
 
 v2.2.0 - 14 September 2026
 - add **config.ini backward compatibility** with old config.ini or corruption
