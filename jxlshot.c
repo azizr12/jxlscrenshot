@@ -1009,9 +1009,15 @@ int main(int argc, char **argv) {
         // Spawn the background thread
         HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
         if (hThread) {
-            CloseHandle(hThread);      // Detach thread; OS keeps process alive until it finishes
-            g.bits = NULL;             // Prevent free_grab from freeing the buffer (thread owns it now)
+            g.bits = NULL; // Prevent free_grab from freeing the buffer (thread owns it now)
             dbg("main: encoding offloaded to background thread");
+            
+            // CRITICAL: Wait for the thread to finish. 
+            // Returning from main() calls ExitProcess(), which instantly 
+            // kills all background threads, aborting the save.
+            WaitForSingleObject(hThread, INFINITE);
+            CloseHandle(hThread);
+            dbg("main: background thread completed");
         } else {
             // Fallback to synchronous if thread creation fails
             dbg("main: CreateThread failed, falling back to synchronous save");
