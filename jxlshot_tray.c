@@ -568,7 +568,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_isDragging = FALSE;
             g_rcSel.left = g_rcSel.top = g_rcSel.right = g_rcSel.bottom = 0;
             
-            if (!g_cfg.show_cursor) ShowCursor(TRUE);
+            // if (!g_cfg.show_cursor) ShowCursor(TRUE);
             return 0;
         }
     }
@@ -626,7 +626,7 @@ static void start_region_capture(void) {
         return;
     }
 
-    if (!g_cfg.show_cursor) ShowCursor(FALSE);
+    // if (!g_cfg.show_cursor) ShowCursor(FALSE);
     
     ShowWindow(g_hwndRegion, SW_SHOW); 
     
