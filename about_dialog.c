@@ -133,6 +133,29 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             return (INT_PTR)g_hAboutBgBrush;
         }
 
+        case WM_NCHITTEST: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
+            
+            // 1. Close button area: Treat as client so WM_LBUTTONDOWN can handle the click
+            RECT rcX = {440, 10, 480, 50};
+            if (PtInRect(&rcX, pt)) {
+                return HTCLIENT;
+            }
+            
+            // 2. Interactive controls (e.g., hyperlink): Treat as client so they can be clicked
+            HWND hChild = ChildWindowFromPoint(hwnd, pt);
+            if (hChild != NULL && hChild != hwnd) {
+                int id = GetDlgCtrlID(hChild);
+                if (id == IDC_ABOUT_LINK) {
+                    return HTCLIENT; 
+                }
+            }
+            
+            // 3. Everywhere else acts as the title bar (fully draggable by the OS)
+            return HTCAPTION;
+        }
+
         case WM_MOUSEMOVE: {
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
@@ -176,16 +199,14 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
             
+            // Handle close button click exclusively
             if (x >= 440 && x <= 480 && y >= 10 && y <= 50) {
                 DestroyWindow(hwnd);
                 return 0;
             }
             
-            HWND hChild = ChildWindowFromPoint(hwnd, (POINT){x, y});
-            if (hChild == hwnd) {
-                ReleaseCapture();
-                SendMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, MAKELPARAM(x, y));
-            }
+            // Dragging is fully handled by WM_NCHITTEST returning HTCAPTION.
+            // Manual ReleaseCapture / SendMessage is not needed.
             return 0;
         }
 
