@@ -70,7 +70,7 @@ typedef struct {
     int     debug_enabled;
     int     lossless;
     float   distance;
-    int     show_cursor;
+    //int     show_cursor;
     int blank_check_mode; /* 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels */
     wchar_t export_path[MAX_PATH];
     UINT    hk_full_mod;
@@ -294,7 +294,7 @@ static void init_config(void) {
     g_cfg.debug_enabled = 1;
     g_cfg.lossless = 1; 
     g_cfg.distance = 1.0f; 
-    g_cfg.show_cursor = 1;
+    //g_cfg.show_cursor = 1;
     g_cfg.blank_check_mode = 2;
     g_cfg.hk_full_mod = 0; 
     g_cfg.hk_full_vk = VK_SNAPSHOT;
@@ -309,7 +309,7 @@ static void init_config(void) {
     // Use robust fallback getters instead of direct GetPrivateProfile* calls
     g_cfg.debug_enabled = get_cfg_int(L"Debug", 1, ini_path);
     g_cfg.lossless = get_cfg_int(L"Lossless", 1, ini_path);
-    g_cfg.show_cursor = get_cfg_int(L"ShowCursor", 1, ini_path);
+    //g_cfg.show_cursor = get_cfg_int(L"ShowCursor", 1, ini_path);
     g_cfg.blank_check_mode = get_cfg_int(L"BlankCheckMode", 2, ini_path);
     
     if (g_cfg.blank_check_mode < 0) g_cfg.blank_check_mode = 0;
