@@ -905,15 +905,114 @@ done:
 }
 
 static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path) {
-    uint8_t *buf = NULL; size_t size = 0;
-    if (!encode_jxl_identity(rgb, w, h, is_hdr, lossless, distance, &buf, &size)) return 0;
+    uint8_t *buf = NULL; 
+    size_t size = 0;
     
-    int ok = 0; FILE *f = _wfopen(path, L"wb");
+    if (!encode_jxl_identity(rgb, w, h, is_hdr, lossless, distance, &buf, &size)) {
+        dbg("save_rgb_as_jxl: encode_jxl_identity failed");
+        return 0;
+    }
+    
+    // Safeguard: If the encoder somehow produced 0 bytes, treat it as a failure.
+    if (size == 0) {
+        dbg("save_rgb_as_jxl: Encoder produced 0 bytes. Aborting write.");
+        free(buf);
+        return 0;
+    }
+
+    int ok = 0; 
+    FILE *f = _wfopen(path, L"wb");
     if (f) {
         size_t written = fwrite(buf, 1, size, f);
-        ok = (written == size); fclose(f);
+        if (written != size) {
+            dbg("save_rgb_as_jxl: fwrite failed (written %zu of %zu). ferror: %d, GetLastError: %lu", 
+                written, size, ferror(f), GetLastError());
+            ok = 0;
+        } else if (fflush(f) != 0) {
+            // Crucial: Catch disk-full or I/O errors that happen during buffer flush
+            dbg("save_rgb_as_jxl: fflush failed (potential disk full or I/O error). ferror: %d, GetLastError: %lu", 
+                ferror(f), GetLastError());
+            ok = 0;
+        } else {
+            ok = 1; // Write and flush succeeded
+        }
+        fclose(f);
+    } else {
+        DWORD err = GetLastError();
+        const wchar_t *err_desc = L"Unknown error";
+        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+            err_desc = L"Path not found (directory does not exist)";
+        } else if (err == ERROR_ACCESS_DENIED) {
+            err_desc = L"Access denied (permission issue or file is locked)";
+        } else if (err == ERROR_DISK_FULL) {
+            err_desc = L"Disk full";
+        } else if (err == ERROR_INVALID_NAME) {
+            err_desc = L"Invalid file name";
+        }
+        dbg("save_rgb_as_jxl: _wfopen FAILED for path '%ls'. Error code: %lu (%ls)", path, err, err_desc);
     }
-    free(buf); return ok;
+    
+    if (!ok) {
+        // Fallback logic: try saving to the executable directory
+        dbg("save_rgb_as_jxl: Primary save failed. Attempting fallback to executable directory.");
+        
+        wchar_t fallback_path[MAX_PATH];
+        wchar_t fallback_dir[MAX_PATH];
+        wcsncpy_s(fallback_dir, MAX_PATH, g_exe_dir, _TRUNCATE);
+        size_t len = wcslen(fallback_dir);
+        if (len > 0 && fallback_dir[len - 1] != L'\\') {
+            wcsncat_s(fallback_dir, MAX_PATH, L"\\", _TRUNCATE);
+        }
+        
+        const wchar_t *filename = wcsrchr(path, L'\\');
+        filename = filename ? filename + 1 : path;
+        
+        _snwprintf(fallback_path, MAX_PATH, L"%s%s", fallback_dir, filename);
+        fallback_path[MAX_PATH - 1] = L'\0';
+        
+        dbg("save_rgb_as_jxl: Retrying save to fallback path: %ls", fallback_path);
+        
+        FILE *f_fallback = _wfopen(fallback_path, L"wb");
+        if (f_fallback) {
+            size_t written_fb = fwrite(buf, 1, size, f_fallback);
+            if (written_fb != size) {
+                dbg("save_rgb_as_jxl: fallback fwrite failed (written %zu of %zu). ferror: %d, GetLastError: %lu", 
+                    written_fb, size, ferror(f_fallback), GetLastError());
+                ok = 0;
+            } else if (fflush(f_fallback) != 0) {
+                dbg("save_rgb_as_jxl: fallback fflush failed. ferror: %d, GetLastError: %lu", 
+                    ferror(f_fallback), GetLastError());
+                ok = 0;
+            } else {
+                ok = 1; // Fallback succeeded
+            }
+            fclose(f_fallback);
+        } else {
+            DWORD err_fb = GetLastError();
+            const wchar_t *err_desc_fb = (err_fb == ERROR_ACCESS_DENIED) ? L"Access denied" : L"Path not found";
+            dbg("save_rgb_as_jxl: fallback _wfopen FAILED for path '%ls'. Error code: %lu (%ls)", fallback_path, err_fb, err_desc_fb);
+        }
+        
+        // User Notifications
+        if (!ok) {
+            wchar_t err_msg[512];
+            _snwprintf(err_msg, 512, 
+                L"Failed to save screenshot to:\n%s\n\nFallback to:\n%s\nalso failed.\n\n"
+                L"Please check:\n- Available disk space\n- Folder permissions\n- Antivirus interference", 
+                path, fallback_path);
+            MessageBoxW(NULL, err_msg, L"jxlshot Save Error", MB_ICONERROR | MB_OK | MB_SYSTEMMODAL);
+        } else {
+            wchar_t success_msg[512];
+            _snwprintf(success_msg, 512, 
+                L"Failed to save to configured export path (write error or 0-byte file detected).\n\n"
+                L"Screenshot was successfully saved to fallback location:\n%s", 
+                fallback_path);
+            MessageBoxW(NULL, success_msg, L"jxlshot Fallback Save", MB_ICONWARNING | MB_OK | MB_SYSTEMMODAL);
+        }
+    }
+    
+    free(buf); 
+    return ok;
 }
 
 
