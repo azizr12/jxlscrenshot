@@ -1,3 +1,9 @@
+v2.2.2 - 24 September 2026
+- fix thread may **terminated** if write didnt finish or app exit
+- fix **picture folde**r name may be localized which will cause path to fail
+- add notification pop up if something goes wrong with path or writing!
+
+
 v2.2.1 - 23 September 2026
 - fix **reload configuration** not working
 - fix **dark mode** not working in about window
