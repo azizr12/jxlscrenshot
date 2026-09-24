@@ -6,16 +6,10 @@
 *   jxlshot.exe -q             lossy capture, default distance 1.0
 *   jxlshot.exe -q -d 3.0      lossy capture, distance 3.0 (lower = better)
 *   jxlshot.exe -w 3000        wait 3000 ms before capturing
-*  
 *
 *
 *  THE PICTURE EXPORTING FOLLOW THE EXPORT PATH !!!!!!!
 *
-*
-*
-*
-*
-
 * Configuration is read from jxlshot.ini located next to the executable.
 * Debug logs are written to %TMP%\jxlshot_debug.log
 *
@@ -420,7 +414,6 @@ typedef struct {
 
 
 // Blank-frame detection
-
 
 
 /*  THIS FUNTION MAY BE STUPID BUT ITS BETTER TO FIX THE STUPID BLANK SCREENSHOT    */
@@ -924,8 +917,6 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
 }
 
 
-
-
 // Asynchronous Encoding Worker
 
 
@@ -952,9 +943,6 @@ static DWORD WINAPI EncodeWorker(LPVOID param) {
     free(task);
     return 0;
 }
-
-
-
 
 
 // Entry points & main
