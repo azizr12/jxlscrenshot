@@ -149,6 +149,28 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             return HTCAPTION;
         }
 
+        case WM_MOUSEMOVE: {
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            
+            // Check if cursor is within the "X" button bounds
+            if (x >= 440 && x <= 480 && y >= 10 && y <= 50) {
+                SetCursor(LoadCursorW(NULL, IDC_HAND));
+                
+                // Request a WM_MOUSELEAVE message when the cursor exits the window
+                TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+                TrackMouseEvent(&tme);
+            } else {
+                SetCursor(LoadCursorW(NULL, IDC_ARROW));
+            }
+            return 0;
+        }
+
+        case WM_MOUSELEAVE: {
+            SetCursor(LoadCursorW(NULL, IDC_ARROW));
+            return 0;
+        }
+
         case WM_KEYDOWN:
             if (wParam == VK_ESCAPE) {
                 DestroyWindow(hwnd);
