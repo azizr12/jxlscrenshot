@@ -42,6 +42,7 @@
 #include <locale.h>
 #include <objbase.h>
 #include <jxl/thread_parallel_runner.h>
+#include <knownfolders.h> // Required for FOLDERID_Pictures
 
 
 
@@ -295,9 +296,15 @@ static void init_config(void) {
     g_cfg.hk_region_mod = MOD_CONTROL; 
     g_cfg.hk_region_vk = VK_SNAPSHOT;
     
-    if (FAILED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, SHGFP_TYPE_CURRENT, g_cfg.export_path))) {
+    // Use Known Folders API to correctly resolve localized folder names
+    PWSTR pszPicturesPath = NULL;
+    if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_Pictures, 0, NULL, &pszPicturesPath))) {
+        wcsncpy_s(g_cfg.export_path, MAX_PATH, pszPicturesPath, _TRUNCATE);
+        CoTaskMemFree(pszPicturesPath); // Free the memory allocated by the API
+    } else {
+        // Absolute last-resort fallback: Just use the User Profile root directory.
+        // Intentionally DO NOT append "\Pictures" here to avoid creating mismatched language folders.
         GetEnvironmentVariableW(L"USERPROFILE", g_cfg.export_path, MAX_PATH);
-        wcscat_s(g_cfg.export_path, MAX_PATH, L"\\Pictures");
     }
 
     // Use robust fallback getters instead of direct GetPrivateProfile* calls
@@ -947,17 +954,20 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
     }
     
     if (!ok) {
-        // Fallback logic: try saving to the user's Pictures folder
+        // Fallback logic: try saving to the user's localized Pictures folder
         dbg("save_rgb_as_jxl: Primary save failed. Attempting fallback to User Pictures folder.");
         
         wchar_t fallback_path[MAX_PATH];
         wchar_t fallback_dir[MAX_PATH];
         
-        // Get the standard User Pictures folder
-        if (FAILED(SHGetFolderPathW(NULL, CSIDL_MYPICTURES, NULL, SHGFP_TYPE_CURRENT, fallback_dir))) {
-            // Fallback to USERPROFILE\Pictures if SHGetFolderPath fails
+        // Use Known Folders API to guarantee the correct localized folder name
+        PWSTR pszPicturesPath = NULL;
+        if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_Pictures, 0, NULL, &pszPicturesPath))) {
+            wcsncpy_s(fallback_dir, MAX_PATH, pszPicturesPath, _TRUNCATE);
+            CoTaskMemFree(pszPicturesPath); // Free the memory allocated by the API
+        } else {
+            // Absolute last-resort fallback: Just use the User Profile root directory.
             GetEnvironmentVariableW(L"USERPROFILE", fallback_dir, MAX_PATH);
-            wcscat_s(fallback_dir, MAX_PATH, L"\\Pictures");
         }
         
         size_t len = wcslen(fallback_dir);
