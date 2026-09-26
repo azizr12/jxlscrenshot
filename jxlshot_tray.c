@@ -145,16 +145,10 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     
-    // Single Dynamic Toggle
-    // MF_CHECKED is the native, reliable Windows indicator for an active toggle state
-    UINT mode_flags = MF_STRING;
-    const wchar_t* mode_text = g_cfg.lossless ? L"Lossless" : L"Lossy";
-    
-    if (g_cfg.lossless) {
-        mode_flags |= MF_CHECKED; // Adds a checkmark next to the active mode
-    }
-    
-    AppendMenuW(hMenu, mode_flags, IDM_TOGGLE_MODE, mode_text);
+    // Owner-Drawn Toggle
+    // MF_OWNERDRAW allows us to manually render the text in bold, 
+    // bypassing the dark mode hook that strips MF_DEFAULT.
+    AppendMenuW(hMenu, MF_STRING | MF_OWNERDRAW, IDM_TOGGLE_MODE, (LPCTSTR)IDM_TOGGLE_MODE);
     
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
@@ -776,6 +770,53 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
         case WM_TRAYICON:
             if (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP) show_tray_menu(hwnd);
             break;
+
+        // Owner-Drawn Menu Handling for Bold Toggle
+        case WM_MEASUREITEM: {
+            MEASUREITEMSTRUCT* pMIS = (MEASUREITEMSTRUCT*)lParam;
+            if (pMIS->CtlType == ODT_MENU && pMIS->itemID == IDM_TOGGLE_MODE) {
+                pMIS->itemWidth = 120;
+                pMIS->itemHeight = 24;
+            }
+            return TRUE;
+        }
+
+        case WM_DRAWITEM: {
+            DRAWITEMSTRUCT* pDIS = (DRAWITEMSTRUCT*)lParam;
+            if (pDIS->CtlType == ODT_MENU && pDIS->itemID == IDM_TOGGLE_MODE) {
+                // 1. Draw Background (Match dark mode theme)
+                COLORREF bgColor = (pDIS->itemState & ODS_SELECTED) ? RGB(65, 65, 65) : RGB(30, 30, 30);
+                HBRUSH hBrush = CreateSolidBrush(bgColor);
+                FillRect(pDIS->hDC, &pDIS->rcItem, hBrush);
+                DeleteObject(hBrush);
+
+                // 2. Setup Text Rendering
+                SetBkMode(pDIS->hDC, TRANSPARENT);
+                SetTextColor(pDIS->hDC, RGB(255, 255, 255));
+                
+                // 3. Create a BOLD Font (This guarantees the bold appearance)
+                LOGFONTW lf = {0};
+                lf.lfHeight = -12;
+                lf.lfWeight = FW_BOLD; 
+                wcscpy(lf.lfFaceName, L"Segoe UI");
+                HFONT hFont = CreateFontIndirectW(&lf);
+                HFONT hOldFont = (HFONT)SelectObject(pDIS->hDC, hFont);
+
+                // 4. Draw the dynamic text ("Lossless" or "Lossy")
+                const wchar_t* text = g_cfg.lossless ? L"Lossless" : L"Lossy";
+                RECT rcText = pDIS->rcItem;
+                rcText.left += 24; // Indent slightly for visual alignment
+                DrawTextW(pDIS->hDC, text, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+                // 5. Cleanup
+                SelectObject(pDIS->hDC, hOldFont);
+                DeleteObject(hFont);
+                return TRUE;
+            }
+            break;
+        }
+
+
         case WM_HOOK_FULL_CAPTURE: execute_full_capture(); break;
         case WM_HOOK_REGION_CAPTURE: start_region_capture(); break;
         case WM_COMMAND:

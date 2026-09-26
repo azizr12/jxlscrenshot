@@ -69,9 +69,9 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             
             // Extract libjxl version
             uint32_t jxl_ver = JxlEncoderVersion();
-            int jxl_major = (jxl_ver >> 24) & 0xFF;
-            int jxl_minor = (jxl_ver >> 16) & 0xFF;
-            int jxl_patch = (jxl_ver >> 8) & 0xFF;
+            int jxl_major = jxl_ver / 1000000;
+            int jxl_minor = (jxl_ver / 1000) % 1000;
+            int jxl_patch = jxl_ver % 1000;
 
             // Define fallback constants for older Windows SDK headers
 #ifndef PF_AVX512F_INSTRUCTIONS_AVAILABLE
