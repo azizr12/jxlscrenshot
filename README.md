@@ -1,6 +1,5 @@
-<img alt="Logo" src="icon.ico" />
-<img alt="helpful photo" src="tray_menu.png" />
-
+<img alt="Logo" src="icon.ico" style="display: inline-block; vertical-align: middle;" />
+<img alt="helpful photo" src="tray_menu.png" style="display: inline-block; vertical-align: middle;" />
 
 [![Download Windows Installer](https://img.shields.io/badge/⬇_Download-Windows_Installer-2ea44f?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/azizr12/jxlscrenshot/releases/latest/download/jxlshot-setup-x64.exe)
 
