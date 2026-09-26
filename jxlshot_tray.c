@@ -555,7 +555,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         
         case WM_DESTROY: {
             g_isRegionCapturing = FALSE;
-            g_regionCaptureEndTime = GetTickCount(); // Start the 50ms block grace period
+            g_regionCaptureEndTime = GetTickCount(); // Start the 500ms block grace period
             
             // DO NOT call uninstall_mouse_hook() here anymore!
             if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
@@ -582,8 +582,6 @@ static void start_region_capture(void) {
     g_regionCaptureEndTime = 0;
 
     if (g_hwndRegion) return;
-
-    g_isRegionCapturing = TRUE;
 
     // Ensure a completely clean slate before starting a new capture
     g_isDragging = FALSE;
@@ -720,7 +718,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
 
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
-        // Block if currently capturing, OR within 25ms after capturing ended (catches the mouse release)
+        // Block if currently capturing, OR within 500ms after capturing ended (catches the mouse release)
         BOOL is_active = g_isRegionCapturing || (GetTickCount() - g_regionCaptureEndTime < 500);
         
         if (is_active && (wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP)) {
