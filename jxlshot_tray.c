@@ -22,6 +22,7 @@
  */
 
 
+
 #define _WIN32_IE 0x0600
 #define UNICODE
 #define _UNICODE
@@ -62,18 +63,12 @@ typedef enum _PreferredAppMode {
 typedef PreferredAppMode (WINAPI *fnSetPreferredAppMode)(PreferredAppMode appMode);
 typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
 typedef void (WINAPI *fnFlushMenuThemes)(void);
-// SetWindowTheme IS a documented, by-name export of uxtheme.dll (unlike the ordinal-only
-// functions above), but we still resolve it dynamically via GetProcAddress instead of
-// linking -luxtheme directly, since the build script does not link uxtheme and this keeps
-// every uxtheme entry point loaded the same way, from the same already-loaded g_hUxtheme.
-typedef HRESULT (WINAPI *fnSetWindowTheme)(HWND hwnd, LPCWSTR pszSubAppName, LPCWSTR pszSubIdList);
 
 // Global state to avoid reloading the DLL repeatedly
 static HMODULE g_hUxtheme = NULL;
 static fnSetPreferredAppMode g_pSetPreferredAppMode = NULL;
 static fnAllowDarkModeForWindow g_pAllowDarkModeForWindow = NULL;
 static fnFlushMenuThemes g_pFlushMenuThemes = NULL;
-static fnSetWindowTheme g_pSetWindowTheme = NULL;
 
 static void InitializeDarkMode(void) {
     if (g_hUxtheme) return;
@@ -84,7 +79,6 @@ static void InitializeDarkMode(void) {
     g_pSetPreferredAppMode = (fnSetPreferredAppMode)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(135));
     g_pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(133));
     g_pFlushMenuThemes = (fnFlushMenuThemes)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(136));
-    g_pSetWindowTheme = (fnSetWindowTheme)GetProcAddress(g_hUxtheme, "SetWindowTheme");
 
     // ForceDark is required for TaskDialogs to reliably apply the theme
     if (g_pSetPreferredAppMode) {
@@ -100,12 +94,7 @@ static void ApplyDarkMode(HWND hwnd) {
     if (!hwnd || !g_pAllowDarkModeForWindow) return;
 
     g_pAllowDarkModeForWindow(hwnd, TRUE);
-
-
-    if (g_pSetWindowTheme) {
-        g_pSetWindowTheme(hwnd, L"DarkMode_Explorer", NULL);
-    }
-
+    
     // Crucial: Tell the window and its children to redraw with the new theme
     SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
     RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
@@ -127,7 +116,6 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDM_OPENCONFIG   107
 #define IDM_CHECK_UPDATE 108
 #define IDM_OPENEXPORT   109
-#define IDM_TOGGLE_MODE  110  // Single toggle for Lossless/Lossy
 
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
 #define IDI_APP_ICON  1001
@@ -149,51 +137,11 @@ static void reload_config(void) { init_config(); }
 
 // Tray Icon & Context Menu
 
-// Global hook to catch the popup menu window creation
-static HHOOK g_hMenuHook = NULL;
-
-static LRESULT CALLBACK MenuHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
-    if (nCode == HCBT_CREATEWND) {
-        CBT_CREATEWNDW* cbt = (CBT_CREATEWNDW*)lParam;
-        LPCWSTR className = cbt->lpcs->lpszClass;
-        
-        // Check if the created window is a popup menu (class "#32768")
-        // It can be passed as a string or as a system atom (32768)
-        BOOL isMenu = FALSE;
-        if (HIWORD(className) == 0) {
-            if ((DWORD_PTR)className == 32768) isMenu = TRUE;
-        } else {
-            if (wcscmp(className, L"#32768") == 0) isMenu = TRUE;
-        }
-
-        if (isMenu) {
-            HWND hMenuWnd = (HWND)wParam;
-            // Apply dark mode directly to the menu window
-            if (g_pAllowDarkModeForWindow) {
-                g_pAllowDarkModeForWindow(hMenuWnd, TRUE);
-            }
-            if (g_pSetWindowTheme) {
-                g_pSetWindowTheme(hMenuWnd, L"DarkMode_Explorer", NULL);
-            }
-        }
-    }
-    return CallNextHookEx(g_hMenuHook, nCode, wParam, lParam);
-}
-
-
-
 static void show_tray_menu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
     HMENU hMenu = CreatePopupMenu();
     AppendMenuW(hMenu, MF_STRING, IDM_FULL, L"Capture Full Screen");
     AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    
-    // Owner-Drawn Toggle
-    // MF_OWNERDRAW allows us to manually render the text in bold, 
-    // bypassing the dark mode hook that strips MF_DEFAULT.
-    AppendMenuW(hMenu, MF_STRING | MF_OWNERDRAW, IDM_TOGGLE_MODE, (LPCTSTR)IDM_TOGGLE_MODE);
-    
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, L"Open Export Folder");
@@ -208,7 +156,7 @@ static void show_tray_menu(HWND hwnd) {
     if (g_hwndMenuOwner) {
         ApplyDarkMode(g_hwndMenuOwner);
     }
-
+    
     // Bring the hidden menu owner to the foreground so the menu inherits its theme
     if (g_hwndMenuOwner) {
         SetForegroundWindow(g_hwndMenuOwner);
@@ -217,23 +165,9 @@ static void show_tray_menu(HWND hwnd) {
     }
     
     // Pass g_hwndMenuOwner, NOT the message-only g_hwndTray
-    
-    // Install hook to catch the menu window (#32768) creation
-    g_hMenuHook = SetWindowsHookExW(WH_CBT, MenuHookProc, NULL, GetCurrentThreadId());
-    
     TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_hwndMenuOwner ? g_hwndMenuOwner : hwnd, NULL);
-    
-    // Unhook immediately after the menu is dismissed
-    if (g_hMenuHook) {
-        UnhookWindowsHookEx(g_hMenuHook);
-        g_hMenuHook = NULL;
-    }
-    
-    DestroyMenu(hMenu); 
-    PostMessage(hwnd, WM_NULL, 0, 0);
+    DestroyMenu(hMenu); PostMessage(hwnd, WM_NULL, 0, 0);
 }
-
-
 
 static void execute_full_capture(void) {
     Grab g;
@@ -827,69 +761,12 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
         case WM_TRAYICON:
             if (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP) show_tray_menu(hwnd);
             break;
-
-        // Owner-Drawn Menu Handling for Bold Toggle
-        case WM_MEASUREITEM: {
-            MEASUREITEMSTRUCT* pMIS = (MEASUREITEMSTRUCT*)lParam;
-            if (pMIS->CtlType == ODT_MENU && pMIS->itemID == IDM_TOGGLE_MODE) {
-                pMIS->itemWidth = 120;
-                pMIS->itemHeight = 24;
-            }
-            return TRUE;
-        }
-
-        case WM_DRAWITEM: {
-            DRAWITEMSTRUCT* pDIS = (DRAWITEMSTRUCT*)lParam;
-            if (pDIS->CtlType == ODT_MENU && pDIS->itemID == IDM_TOGGLE_MODE) {
-                // 1. Draw Background (Match dark mode theme)
-                COLORREF bgColor = (pDIS->itemState & ODS_SELECTED) ? RGB(65, 65, 65) : RGB(30, 30, 30);
-                HBRUSH hBrush = CreateSolidBrush(bgColor);
-                FillRect(pDIS->hDC, &pDIS->rcItem, hBrush);
-                DeleteObject(hBrush);
-
-                // 2. Setup Text Rendering
-                SetBkMode(pDIS->hDC, TRANSPARENT);
-                SetTextColor(pDIS->hDC, RGB(255, 255, 255));
-                
-                // 3. Create a BOLD Font (This guarantees the bold appearance)
-                LOGFONTW lf = {0};
-                lf.lfHeight = -12;
-                lf.lfWeight = FW_BOLD; 
-                wcscpy(lf.lfFaceName, L"Segoe UI");
-                HFONT hFont = CreateFontIndirectW(&lf);
-                HFONT hOldFont = (HFONT)SelectObject(pDIS->hDC, hFont);
-
-                // 4. Draw the dynamic text ("Lossless" or "Lossy")
-                const wchar_t* text = g_cfg.lossless ? L"Lossless" : L"Lossy";
-                RECT rcText = pDIS->rcItem;
-                rcText.left += 24; // Indent slightly for visual alignment
-                DrawTextW(pDIS->hDC, text, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-                // 5. Cleanup
-                SelectObject(pDIS->hDC, hOldFont);
-                DeleteObject(hFont);
-                return TRUE;
-            }
-            break;
-        }
-
-
         case WM_HOOK_FULL_CAPTURE: execute_full_capture(); break;
         case WM_HOOK_REGION_CAPTURE: start_region_capture(); break;
         case WM_COMMAND:
             switch (LOWORD(wp)) {
                 case IDM_FULL: execute_full_capture(); break;
                 case IDM_REGION: start_region_capture(); break;
-                case IDM_TOGGLE_MODE:
-                    g_cfg.lossless = !g_cfg.lossless; // Flip the state instantly in RAM
-                    {
-                        wchar_t ini_path[MAX_PATH];
-                        _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-                        // Write "1" if lossless, "0" if lossy
-                        WritePrivateProfileStringW(L"Capture", L"Lossless", g_cfg.lossless ? L"1" : L"0", ini_path);
-                    }
-                    break;
-
                 case IDM_SETPATH: execute_set_path(); break;
                 case IDM_OPENEXPORT: execute_open_export_folder(); break;
                 case IDM_OPENCONFIG: execute_open_config(hwnd); break;
@@ -953,18 +830,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     g_nid.uID = ID_TRAY;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; 
     g_nid.uCallbackMessage = WM_TRAYICON;
-
-    // FIX Tray Icon Loading
-    // Use LoadImageW instead of LoadIconW for proper DPI scaling and reliability.
-    // SM_CXSMICON gets the correct system tray icon size (e.g., 16x16 or 24x24 depending on DPI).
-    int trayIconSize = GetSystemMetrics(SM_CXSMICON);
-    g_nid.hIcon = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 
-                                    trayIconSize, trayIconSize, LR_SHARED);
     
-    // Fallback to a default system icon if the custom one fails to load
-    if (!g_nid.hIcon) {
-        g_nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
-    }
+    g_nid.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON)); 
     wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
