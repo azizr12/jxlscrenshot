@@ -642,6 +642,8 @@ static void uninstall_mouse_hook(void) {
     }
 }
 
+#include "custom_theme.c"
+
 // Tray Window Procedure & Entry Point
 
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
