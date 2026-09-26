@@ -91,12 +91,14 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 
             // Format the final string.
             // Double-space after each label gives a little breathing room without needing tabs.
-            _snwprintf(desc_text, 512,
+            _snwprintf(desc_text, 511, // Changed 512 to 511 to leave room for null terminator
                 L"Minimal tray screenshot tool using JPEG XL.\n\n"
                 L"App Version:  %s\n"
                 L"libjxl Version:  %d.%d.%d\n"
                 L"CPU Architecture:  x86-64 (%s)",
                 APP_VERSIONW, jxl_major, jxl_minor, jxl_patch, cpu_ext);
+            
+            desc_text[511] = L'\0'; // Guarantee null-termination
 
             // Description
             // Y=87 (72 + 15px gap), Height=140 -> Bottom edge = 227
@@ -306,6 +308,18 @@ static void execute_about(void) {
 
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
+    
+    // Only register the class if it hasn't been registered yet
+    if (!GetClassInfoExW(GetModuleHandleW(NULL), L"JxlShotAboutClass", &wc)) {
+        wc.lpfnWndProc = AboutWindowProc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        wc.hbrBackground = NULL;
+        wc.lpszClassName = L"JxlShotAboutClass";
+        wc.hIcon = g_hAppIcon;
+        wc.hIconSm = g_hAppIcon;
+        RegisterClassExW(&wc);
+    }
     wc.lpfnWndProc = AboutWindowProc;
     wc.hInstance = GetModuleHandleW(NULL);
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
@@ -337,12 +351,9 @@ static void execute_about(void) {
 
     if (hwndAbout) {
         SetForegroundWindow(hwndAbout);
-
-        MSG msg;
-        while (GetMessage(&msg, NULL, 0, 0)) {
-            TranslateMessage(&msg);
-            DispatchMessage(&msg);
-        }
+        
+        // REMOVED the local while(GetMessage) loop.
+        // The main application's message loop will handle this window automatically.
     } else {
         EnableWindow(g_hwndTray, TRUE);
         MessageBoxW(NULL, L"Failed to create About dialog.", L"jxlshot", MB_ICONERROR);
