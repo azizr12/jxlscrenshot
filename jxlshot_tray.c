@@ -117,6 +117,9 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDM_CHECK_UPDATE 108
 #define IDM_OPENEXPORT   109
 
+#define IDM_MODE_LOSSLESS 110
+#define IDM_MODE_LOSSY    111
+
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
 #define IDI_APP_ICON  1001
 
@@ -142,6 +145,13 @@ static void show_tray_menu(HWND hwnd) {
     HMENU hMenu = CreatePopupMenu();
     AppendMenuW(hMenu, MF_STRING, IDM_FULL, L"Capture Full Screen");
     AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+    
+    // --- COMPRESSION MODE TOGGLE HERE ---
+    // MF_DEFAULT makes the text render in bold
+    AppendMenuW(hMenu, MF_STRING | (g_cfg.lossless ? MF_DEFAULT : 0), IDM_MODE_LOSSLESS, L"LOSSLESS");
+    AppendMenuW(hMenu, MF_STRING | (!g_cfg.lossless ? MF_DEFAULT : 0), IDM_MODE_LOSSY, L"LOSSY");
+    
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, L"Open Export Folder");
@@ -767,6 +777,22 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
             switch (LOWORD(wp)) {
                 case IDM_FULL: execute_full_capture(); break;
                 case IDM_REGION: start_region_capture(); break;
+                case IDM_MODE_LOSSLESS:
+                    g_cfg.lossless = 1;
+                    {
+                        wchar_t ini_path[MAX_PATH];
+                        _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+                        WritePrivateProfileStringW(L"Capture", L"Lossless", L"1", ini_path);
+                    }
+                    break;
+                case IDM_MODE_LOSSY:
+                    g_cfg.lossless = 0;
+                    {
+                        wchar_t ini_path[MAX_PATH];
+                        _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+                        WritePrivateProfileStringW(L"Capture", L"Lossless", L"0", ini_path);
+                    }
+                    break;
                 case IDM_SETPATH: execute_set_path(); break;
                 case IDM_OPENEXPORT: execute_open_export_folder(); break;
                 case IDM_OPENCONFIG: execute_open_config(hwnd); break;
