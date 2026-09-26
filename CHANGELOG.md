@@ -6,7 +6,6 @@ v2.2.2 - 26 September 2026
 - removed cursors **dead code** and other redundant code
 
 
-
 v2.2.1 - 23 September 2026
 - fix **reload configuration** not working
 - fix **dark mode** not working in about window
