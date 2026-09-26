@@ -15,11 +15,11 @@
  */
 
 
-/* jxlshot_tray.c — System tray extension for jxlshot.
- *
- * Configuration is read from jxlshot.ini located next to the executable.
- * Debug logs are written to %TEMP%\jxlshot_debug.log
- */
+// jxlshot_tray.c — System tray extension for jxlshot.
+
+// Configuration is read from jxlshot.ini located next to the executable.
+// Debug logs are written to %TEMP%\jxlshot_debug.log
+
 
 
 
@@ -207,7 +207,7 @@ static void execute_full_capture(void) {
             }
             free(task->bits);
             free(task);
-            g.bits = NULL;
+            g.bits = NULL; 
         }
     } else {
         dbg("execute_full_capture: malloc failed, falling back to synchronous");
@@ -652,10 +652,10 @@ static void start_region_capture(void) {
 // Low-Level Keyboard Hook
 
 
-/* Helper function to verify EXACT modifier match. 
- * If the INI requires Ctrl, Ctrl must be pressed. 
- * If the INI does NOT require Ctrl, Ctrl must NOT be pressed.
- */
+// Helper function to verify EXACT modifier match. 
+// If the INI requires Ctrl, Ctrl must be pressed. 
+// If the INI does NOT require Ctrl, Ctrl must NOT be pressed.
+
 
 static BOOL check_modifiers(UINT required_mod) {
     BOOL ctrl_pressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
