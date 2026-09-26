@@ -42,11 +42,26 @@
 #include <wchar.h>
 #include "jxlshot.c" // Pulls in core logic, config, and unified dbg() logger
 
+#define WM_TRAYICON            (WM_USER + 1)
+#define WM_HOOK_FULL_CAPTURE   (WM_USER + 10)
+#define WM_HOOK_REGION_CAPTURE (WM_USER + 11)
+
+#define ID_TRAY          1
+#define IDM_FULL         101
+#define IDM_REGION       102
+#define IDM_SETPATH      104
+#define IDM_ABOUT        105
+#define IDM_RELOAD       106
+#define IDM_EXIT         103
+#define IDM_OPENCONFIG   107
+#define IDM_CHECK_UPDATE 108
+#define IDM_OPENEXPORT   109
+
 // Forward declarations to fix implicit declaration errors
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
 static void install_mouse_hook(void);
 static void uninstall_mouse_hook(void);
-static void execute_about(void);
+void execute_about(void);
 
 // UI declarations (defined in custom_theme.c)
 extern void InitializeDarkMode(void);
