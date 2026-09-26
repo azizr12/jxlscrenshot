@@ -274,7 +274,12 @@ static void execute_about(void) {
 
     // Load the 128x128 icon ONCE to be used universally for Splash Screen and Taskbar
     if (!g_hAppIcon) {
-        g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, 0);
+        g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, LR_SHARED);
+        
+        // Fallback if the resource is missing
+        if (!g_hAppIcon) {
+            g_hAppIcon = LoadIconW(NULL, IDI_APPLICATION);
+        }
     }
 
     const int dlgWidth = 480;

@@ -896,8 +896,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     g_nid.uID = ID_TRAY;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; 
     g_nid.uCallbackMessage = WM_TRAYICON;
+
+    // FIX Tray Icon Loading
+    // Use LoadImageW instead of LoadIconW for proper DPI scaling and reliability.
+    // SM_CXSMICON gets the correct system tray icon size (e.g., 16x16 or 24x24 depending on DPI).
+    int trayIconSize = GetSystemMetrics(SM_CXSMICON);
+    g_nid.hIcon = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 
+                                    trayIconSize, trayIconSize, LR_SHARED);
     
-    g_nid.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON)); 
+    // Fallback to a default system icon if the custom one fails to load
+    if (!g_nid.hIcon) {
+        g_nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    }
     wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
