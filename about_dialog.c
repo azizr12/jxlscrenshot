@@ -95,7 +95,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
                 L"Minimal tray screenshot tool using JPEG XL.\n\n"
                 L"App Version:  %s\n"
                 L"libjxl Version:  %d.%d.%d\n"
-                L"Architecture:  x86-64 (%s)",
+                L"CPU Architecture:  x86-64 (%s)",
                 APP_VERSIONW, jxl_major, jxl_minor, jxl_patch, cpu_ext);
 
             // Description
@@ -270,27 +270,31 @@ static void execute_about(void) {
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LINK_CLASS };
     InitCommonControlsEx(&icc);
 
-    // Load the 128x128 icon ONCE to be used universally for Splash Screen and Taskbar.
-    // NOTE: LR_SHARED was removed. LR_SHARED caches the returned handle keyed by
-    // (resource, size, flags); if any other part of the app (e.g. the tray icon setup)
-    // loads the same IDI_APP_ICON resource at a *different* size, the shared cache can
-    // hand back a mismatched or NULL handle depending on load order. LR_DEFAULTCOLOR
-    // gives us our own private, correctly-sized 128x128 handle every time.
+    // ICON LOADING
+    // Modern .ico files often skip 128x128 and go straight to 256x256 (PNG compressed).
+    // We cascade through sizes to guarantee we get the custom icon, not the generic fallback.
     if (!g_hAppIcon) {
+        // Attempt 1: Exact 128x128
         g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, LR_DEFAULTCOLOR);
-
-        // Fallback if the resource is missing -- log why, so a NULL icon doesn't have to
-        // be debugged blind next time.
+        
+        // Attempt 2: Fallback to 256x256 (Windows will smoothly scale this down)
         if (!g_hAppIcon) {
-            wchar_t dbg[64];
-            wsprintfW(dbg, L"LoadImage(IDI_APP_ICON) failed, GetLastError=%lu", GetLastError());
-            OutputDebugStringW(dbg);
+            g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 256, 256, LR_DEFAULTCOLOR);
+        }
+        
+        // Attempt 3: Fallback to default system size if specific sizes are missing
+        if (!g_hAppIcon) {
+            g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 0, 0, LR_DEFAULTCOLOR);
+        }
+
+        // Attempt 4: Absolute fallback to system default
+        if (!g_hAppIcon) {
             g_hAppIcon = LoadIconW(NULL, IDI_APPLICATION);
         }
     }
 
     const int dlgWidth = 480;
-    const int dlgHeight = 280; // Grown from 240 to fit the taller description + repositioned link + 15px spacing
+    const int dlgHeight = 280;
 
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
@@ -300,8 +304,7 @@ static void execute_about(void) {
     wc.hbrBackground = NULL;
     wc.lpszClassName = L"JxlShotAboutClass";
 
-    // Assign the EXACT SAME 128x128 icon to the window class
-    // Windows will automatically scale it down for the taskbar button
+    // Assign the loaded icon to the window class
     wc.hIcon = g_hAppIcon;
     wc.hIconSm = g_hAppIcon;
 
