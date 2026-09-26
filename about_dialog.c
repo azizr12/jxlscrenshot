@@ -99,7 +99,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
                 L"Minimal tray screenshot tool using JPEG XL.\n\n"
                 L"App Version: %s\n"
                 L"libjxl Version: %d.%d.%d\n"
-                L"Architecture: x86_64 (%s)", 
+                L"Architecture: x86-64 (%s)", 
                 APP_VERSIONW, jxl_major, jxl_minor, jxl_patch, cpu_ext);
 
             // Description
