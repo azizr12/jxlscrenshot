@@ -29,25 +29,25 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         case WM_CREATE: {
             ApplyDarkMode(hwnd);
 
-            // Windows 11 rounded-corner DWM call has been removed on purpose.
-            // This window is a plain rectangular Win32 popup now (no DwmSetWindowAttribute /
-            // DWMWA_WINDOW_CORNER_PREFERENCE call). Custom dark background painting below
-            // (WM_ERASEBKGND / WM_PAINT) is unchanged.
-
             // 1. Create Modern Typography
-            g_hTitleFont = CreateFontW(-24, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Semibold");
+            // "Segoe UI" with FW_BOLD (700) for reliable, non-skinny rendering
+            g_hTitleFont = CreateFontW(-24, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            
             g_hBodyFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            
             g_hXFont = CreateFontW(-20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
-            // 2. Create Background Brush (Modern Dark Gray #1E1E1E)
+            // 2. Create Background Brush
             g_hAboutBgBrush = CreateSolidBrush(RGB(30, 30, 30));
 
-            // 3. Apply the EXACT SAME 128x128 icon to the window (Taskbar / Alt-Tab)
+            // 3. Apply the EXACT SAME 128x128 icon to the window
             SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_hAppIcon);
             SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hAppIcon);
+
+
 
             // 4. Layout Controls (Strict 15px vertical spacing between text elements)
 
@@ -248,12 +248,20 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 
         case WM_DESTROY:
             EnableWindow(g_hwndTray, TRUE);
+            
+            // Clean up GDI objects safely
             if (g_hAboutBgBrush) { DeleteObject(g_hAboutBgBrush); g_hAboutBgBrush = NULL; }
             if (g_hTitleFont) { DeleteObject(g_hTitleFont); g_hTitleFont = NULL; }
             if (g_hBodyFont) { DeleteObject(g_hBodyFont); g_hBodyFont = NULL; }
             if (g_hXFont) { DeleteObject(g_hXFont); g_hXFont = NULL; }
-            if (g_hAppIcon) { DestroyIcon(g_hAppIcon); g_hAppIcon = NULL; }
-            PostQuitMessage(0);
+            
+            // CRITICAL: DO NOT destroy g_hAppIcon here. 
+            // It is shared with the main tray application. Destroying it here 
+            // is what causes the "broken icon" bug in the system tray.
+            
+            // CRITICAL: DO NOT call PostQuitMessage(0) here. 
+            // It will terminate your entire tray application when this dialog closes.
+            
             return 0;
 
         case WM_CLOSE:
@@ -316,7 +324,7 @@ static void execute_about(void) {
     int y = rc.top + (rc.bottom - rc.top - dlgHeight) / 2;
 
     HWND hwndAbout = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_APPWINDOW,
+        WS_EX_TOPMOST, // Remove WS_EX_APPWINDOW
         L"JxlShotAboutClass",
         L"About",
         WS_POPUP | WS_VISIBLE,
