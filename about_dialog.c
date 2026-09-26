@@ -18,12 +18,16 @@ static HFONT g_hBodyFont = NULL;
 static HFONT g_hXFont = NULL;
 static HICON g_hAppIcon = NULL; // Single global handle for the 128x128 icon
 
-// Forward declaration for core tray state
+// Forward declaration (assumed to be defined elsewhere in your codebase)
+extern void ApplyDarkMode(HWND hwnd);
 extern HWND g_hwndTray;
+extern HWND g_hwndMenuOwner;
 
 static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_CREATE: {
+            ApplyDarkMode(hwnd);
+
             // 1. Enable Windows 11 Rounded Corners dynamically
             HMODULE hDwmapi = LoadLibraryW(L"dwmapi.dll");
             if (hDwmapi) {
@@ -263,7 +267,7 @@ static void execute_about(void) {
         L"About",
         WS_POPUP | WS_VISIBLE,
         x, y, dlgWidth, dlgHeight,
-        g_hwndTray,
+        g_hwndMenuOwner,
         NULL,
         GetModuleHandleW(NULL),
         NULL
