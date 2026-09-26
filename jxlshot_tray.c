@@ -149,6 +149,39 @@ static void reload_config(void) { init_config(); }
 
 // Tray Icon & Context Menu
 
+// Global hook to catch the popup menu window creation
+static HHOOK g_hMenuHook = NULL;
+
+static LRESULT CALLBACK MenuHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
+    if (nCode == HCBT_CREATEWND) {
+        CBT_CREATEWNDW* cbt = (CBT_CREATEWNDW*)lParam;
+        LPCWSTR className = cbt->lpcs->lpszClass;
+        
+        // Check if the created window is a popup menu (class "#32768")
+        // It can be passed as a string or as a system atom (32768)
+        BOOL isMenu = FALSE;
+        if (HIWORD(className) == 0) {
+            if ((DWORD_PTR)className == 32768) isMenu = TRUE;
+        } else {
+            if (wcscmp(className, L"#32768") == 0) isMenu = TRUE;
+        }
+
+        if (isMenu) {
+            HWND hMenuWnd = (HWND)wParam;
+            // Apply dark mode directly to the menu window
+            if (g_pAllowDarkModeForWindow) {
+                g_pAllowDarkModeForWindow(hMenuWnd, TRUE);
+            }
+            if (g_pSetWindowTheme) {
+                g_pSetWindowTheme(hMenuWnd, L"DarkMode_Explorer", NULL);
+            }
+        }
+    }
+    return CallNextHookEx(g_hMenuHook, nCode, wParam, lParam);
+}
+
+
+
 static void show_tray_menu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
     HMENU hMenu = CreatePopupMenu();
@@ -176,7 +209,6 @@ static void show_tray_menu(HWND hwnd) {
         ApplyDarkMode(g_hwndMenuOwner);
     }
 
-    
     // Bring the hidden menu owner to the foreground so the menu inherits its theme
     if (g_hwndMenuOwner) {
         SetForegroundWindow(g_hwndMenuOwner);
@@ -185,9 +217,23 @@ static void show_tray_menu(HWND hwnd) {
     }
     
     // Pass g_hwndMenuOwner, NOT the message-only g_hwndTray
+    
+    // Install hook to catch the menu window (#32768) creation
+    g_hMenuHook = SetWindowsHookExW(WH_CBT, MenuHookProc, NULL, GetCurrentThreadId());
+    
     TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_hwndMenuOwner ? g_hwndMenuOwner : hwnd, NULL);
-    DestroyMenu(hMenu); PostMessage(hwnd, WM_NULL, 0, 0);
+    
+    // Unhook immediately after the menu is dismissed
+    if (g_hMenuHook) {
+        UnhookWindowsHookEx(g_hMenuHook);
+        g_hMenuHook = NULL;
+    }
+    
+    DestroyMenu(hMenu); 
+    PostMessage(hwnd, WM_NULL, 0, 0);
 }
+
+
 
 static void execute_full_capture(void) {
     Grab g;
