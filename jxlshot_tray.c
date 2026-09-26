@@ -22,6 +22,7 @@
  */
 
 
+// jxlshot_tray.c — System tray extension for jxlshot.
 
 #define _WIN32_IE 0x0600
 #define UNICODE
@@ -41,133 +42,29 @@
 #include <wchar.h>
 #include "jxlshot.c" // Pulls in core logic, config, and unified dbg() logger
 
-
-#include <uxtheme.h>
-#include <urlmon.h>
-#pragma comment(lib, "urlmon.lib") // (For MSVC)
-#pragma comment(lib, "comctl32.lib")
-
-// Undocumented but stable uxtheme APIs for Win32 Dark Mode (Windows 10 1903+)
-
-// Windows Dark Mode Support
-
-
-typedef enum _PreferredAppMode {
-    Default    = 0,
-    AllowDark  = 1,
-    ForceDark  = 2,
-    ForceLight = 3,
-    Max        = 4
-} PreferredAppMode;
-
-typedef PreferredAppMode (WINAPI *fnSetPreferredAppMode)(PreferredAppMode appMode);
-typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
-typedef void (WINAPI *fnFlushMenuThemes)(void);
-
-// Global state to avoid reloading the DLL repeatedly
-static HMODULE g_hUxtheme = NULL;
-static fnSetPreferredAppMode g_pSetPreferredAppMode = NULL;
-static fnAllowDarkModeForWindow g_pAllowDarkModeForWindow = NULL;
-static fnFlushMenuThemes g_pFlushMenuThemes = NULL;
-
-static void InitializeDarkMode(void) {
-    if (g_hUxtheme) return;
-
-    g_hUxtheme = LoadLibraryW(L"uxtheme.dll");
-    if (!g_hUxtheme) return;
-
-    g_pSetPreferredAppMode = (fnSetPreferredAppMode)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(135));
-    g_pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(133));
-    g_pFlushMenuThemes = (fnFlushMenuThemes)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(136));
-
-    // ForceDark is required for TaskDialogs to reliably apply the theme
-    if (g_pSetPreferredAppMode) {
-        g_pSetPreferredAppMode(ForceDark);
-    }
-    if (g_pFlushMenuThemes) {
-        g_pFlushMenuThemes();
-    }
-}
-
-static void ApplyDarkMode(HWND hwnd) {
-    InitializeDarkMode();
-    if (!hwnd || !g_pAllowDarkModeForWindow) return;
-
-    g_pAllowDarkModeForWindow(hwnd, TRUE);
-    
-    // Crucial: Tell the window and its children to redraw with the new theme
-    SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
-    RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
-}
-
-static HWND g_hwndMenuOwner = NULL;
-
-#define WM_TRAYICON            (WM_USER + 1)
-#define WM_HOOK_FULL_CAPTURE   (WM_USER + 10)
-#define WM_HOOK_REGION_CAPTURE (WM_USER + 11)
-
-#define ID_TRAY          1
-#define IDM_FULL         101
-#define IDM_REGION       102
-#define IDM_SETPATH      104
-#define IDM_ABOUT        105
-#define IDM_RELOAD       106
-#define IDM_EXIT         103
-#define IDM_OPENCONFIG   107
-#define IDM_CHECK_UPDATE 108
-#define IDM_OPENEXPORT   109
-
-// Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
-#define IDI_APP_ICON  1001
-
-static NOTIFYICONDATAW g_nid;
-static HWND            g_hwndTray = NULL;
-static HHOOK           g_hhkKeyboard = NULL;
-static HHOOK           g_hhkMouse = NULL;
-static BOOL            g_isRegionCapturing = FALSE;
-static DWORD           g_regionCaptureEndTime = 0;
-
 // Forward declarations to fix implicit declaration errors
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
 static void install_mouse_hook(void);
 static void uninstall_mouse_hook(void);
 static void execute_about(void);
 
+// UI declarations (defined in custom_theme.c)
+extern void InitializeDarkMode(void);
+extern void ApplyDarkMode(HWND hwnd);
+extern void CleanupUxtheme(void);
+extern void show_tray_menu(HWND hwnd);
+extern void init_custom_ui(HINSTANCE hInst, HWND hwndTray);
+extern void destroy_custom_ui(void);
+
 static void reload_config(void) { init_config(); }
 
-// Tray Icon & Context Menu
-
-static void show_tray_menu(HWND hwnd) {
-    POINT pt; GetCursorPos(&pt);
-    HMENU hMenu = CreatePopupMenu();
-    AppendMenuW(hMenu, MF_STRING, IDM_FULL, L"Capture Full Screen");
-    AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
-    AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, L"Open Export Folder");
-    AppendMenuW(hMenu, MF_STRING, IDM_OPENCONFIG, L"Open Config File");
-    AppendMenuW(hMenu, MF_STRING, IDM_RELOAD, L"Reload Configuration");
-    AppendMenuW(hMenu, MF_STRING, IDM_CHECK_UPDATE, L"Check for Updates...");
-    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, L"About...");
-    AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
-    
-    // Force dark mode on the transient menu window before displaying it
-    if (g_hwndMenuOwner) {
-        ApplyDarkMode(g_hwndMenuOwner);
-    }
-    
-    // Bring the hidden menu owner to the foreground so the menu inherits its theme
-    if (g_hwndMenuOwner) {
-        SetForegroundWindow(g_hwndMenuOwner);
-    } else {
-        SetForegroundWindow(hwnd);
-    }
-    
-    // Pass g_hwndMenuOwner, NOT the message-only g_hwndTray
-    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_hwndMenuOwner ? g_hwndMenuOwner : hwnd, NULL);
-    DestroyMenu(hMenu); PostMessage(hwnd, WM_NULL, 0, 0);
-}
+// Global state
+HWND g_hwndTray = NULL;
+static HHOOK g_hhkKeyboard = NULL;
+static HHOOK g_hhkMouse = NULL;
+static BOOL g_isRegionCapturing = FALSE;
+static DWORD g_regionCaptureEndTime = 0;
+static NOTIFYICONDATAW g_nid;
 
 static void execute_full_capture(void) {
     Grab g;
@@ -219,9 +116,7 @@ static void execute_full_capture(void) {
     free_grab(&g); 
 }
 
-
 // Version Parsing Helpers
-
 
 typedef struct { int major, minor, patch; } Version;
 
@@ -238,7 +133,6 @@ static int compare_versions(Version a, Version b) {
     if (a.minor != b.minor) return a.minor - b.minor;
     return a.patch - b.patch;
 }
-
 
 static void execute_check_update(HWND hwnd) {
     // Cache-busting URL to guarantee a fresh download every time
@@ -354,9 +248,7 @@ static void execute_open_export_folder(void) {
     ShellExecuteW(NULL, L"explore", path_to_open, NULL, NULL, SW_SHOWNORMAL);
 }
 
-
 // Interactive Region Selection
-
 
 static HWND    g_hwndRegion = NULL;
 static HDC     g_hdcMem = NULL, g_hdcBlack = NULL;
@@ -648,9 +540,7 @@ static void start_region_capture(void) {
     install_mouse_hook();
 }
 
-
 // Low-Level Keyboard Hook
-
 
 /* Helper function to verify EXACT modifier match. 
  * If the INI requires Ctrl, Ctrl must be pressed. 
@@ -752,9 +642,7 @@ static void uninstall_mouse_hook(void) {
     }
 }
 
-
 // Tray Window Procedure & Entry Point
-
 
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
     switch (msg) {
@@ -779,17 +667,12 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
             uninstall_keyboard_hook();
             uninstall_mouse_hook(); // clean up when the app fully exits
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
-            if (g_hwndMenuOwner) {
-                DestroyWindow(g_hwndMenuOwner);
-                g_hwndMenuOwner = NULL;
-            }
+            destroy_custom_ui();
             PostQuitMessage(0); break;
         default: return DefWindowProcW(hwnd, msg, wp, lParam);
     }
     return 0;
 }
-
-#include "about_dialog.c" // Pulls in the custom About dialog implementation
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     // 1. Initialize COM for Shell APIs (SHBrowseForFolder), TaskDialog, and DXGI/D3D11 stability
@@ -800,8 +683,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     ensure_default_ini(); 
     init_config();
     dbg_init();
-    // Initialize dark mode BEFORE creating any windows or dialogs
-    InitializeDarkMode();
 
     WNDCLASSEXW wc = {0}; 
     wc.cbSize = sizeof(wc); 
@@ -812,17 +693,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     
     g_hwndTray = CreateWindowExW(0, L"JxlShotTrayClass", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInst, NULL);
     
-    // Create a hidden popup window specifically to own the context menu
-    g_hwndMenuOwner = CreateWindowExW(
-        WS_EX_TOOLWINDOW,
-        L"JxlShotTrayClass",
-        L"", 
-        WS_POPUP,
-        0, 0, 0, 0,
-        NULL, NULL, hInst, NULL
-    );
-    ShowWindow(g_hwndMenuOwner, SW_HIDE);
-    ApplyDarkMode(g_hwndMenuOwner);
+    // Initialize custom UI (registers menu class and hidden menu owner window)
+    init_custom_ui(hInst, g_hwndTray);
     
     ZeroMemory(&g_nid, sizeof(g_nid));
     g_nid.cbSize = sizeof(g_nid); 
@@ -846,10 +718,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     uninstall_keyboard_hook();
     
     // Clean up uxtheme before exiting
-    if (g_hUxtheme) {
-        FreeLibrary(g_hUxtheme);
-        g_hUxtheme = NULL;
-    }
+    CleanupUxtheme();
 
     // Clean up COM before exiting
     CoUninitialize();
