@@ -180,94 +180,145 @@ static void ensure_default_ini(void) {
     wchar_t ini_path[MAX_PATH];
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
     
-    if (GetFileAttributesW(ini_path) == INVALID_FILE_ATTRIBUTES) {
+    BOOL file_exists = (GetFileAttributesW(ini_path) != INVALID_FILE_ATTRIBUTES);
+    
+    // 1. Read existing values if the file exists, using a marker to detect missing keys.
+    // We check [Capture], [Settings], and [General] to support seamless migration from older versions.
+    const wchar_t *marker = L"__JXLSHOT_KEY_NOT_FOUND__";
+    wchar_t buf[512];
+    
+    wchar_t val_debug[64] = L"";
+    wchar_t val_lossless[64] = L"";
+    wchar_t val_distance[64] = L"";
+    wchar_t val_export_path[MAX_PATH] = L"";
+    wchar_t val_hotkey_full[128] = L"";
+    wchar_t val_hotkey_region[128] = L"";
+    wchar_t val_blank_check[64] = L"";
+    
+    BOOL has_debug = FALSE;
+    BOOL has_lossless = FALSE;
+    BOOL has_distance = FALSE;
+    BOOL has_export_path = FALSE;
+    BOOL has_hotkey_full = FALSE;
+    BOOL has_hotkey_region = FALSE;
+    BOOL has_blank_check = FALSE;
+
+    if (file_exists) {
+        #define CHECK_KEY(key, val_buf, size, has_flag) \
+            do { \
+                if (GetPrivateProfileStringW(L"Capture", key, marker, buf, 512, ini_path) > 0 && wcscmp(buf, marker) != 0) { \
+                    wcsncpy_s(val_buf, size, buf, _TRUNCATE); has_flag = TRUE; \
+                } else if (GetPrivateProfileStringW(L"Settings", key, marker, buf, 512, ini_path) > 0 && wcscmp(buf, marker) != 0) { \
+                    wcsncpy_s(val_buf, size, buf, _TRUNCATE); has_flag = TRUE; \
+                } else if (GetPrivateProfileStringW(L"General", key, marker, buf, 512, ini_path) > 0 && wcscmp(buf, marker) != 0) { \
+                    wcsncpy_s(val_buf, size, buf, _TRUNCATE); has_flag = TRUE; \
+                } \
+            } while(0)
+
+        CHECK_KEY(L"Debug", val_debug, 64, has_debug);
+        CHECK_KEY(L"Lossless", val_lossless, 64, has_lossless);
+        CHECK_KEY(L"Distance", val_distance, 64, has_distance);
+        CHECK_KEY(L"ExportPath", val_export_path, MAX_PATH, has_export_path);
+        CHECK_KEY(L"HotkeyFull", val_hotkey_full, 128, has_hotkey_full);
+        CHECK_KEY(L"HotkeyRegion", val_hotkey_region, 128, has_hotkey_region);
+        CHECK_KEY(L"BlankCheckMode", val_blank_check, 64, has_blank_check);
+        
+        #undef CHECK_KEY
+    }
+    
+    // 2. Write the full default template. 
+    // This guarantees that any new keys or comments added in newer versions are present in the file.
+    FILE *f = _wfopen(ini_path, L"wb");
+    if (f) {
         // Use binary write to explicitly control the encoding
-        FILE *f = _wfopen(ini_path, L"wb");
-        if (f) {
-            // 1. Write UTF-16 LE Byte Order Mark (BOM)
-            unsigned short bom = 0xFEFF;
-            fwrite(&bom, sizeof(bom), 1, f);
-            
-            // 2. Write the configuration in UTF-16 LE
-            const wchar_t *default_ini = 
-                L"; ==============================================================================\n"
-                L"; JXLShot Configuration File\n"
-                L"; ==============================================================================\n"
-                L";\n"
-                L"; [Quality & Compression Guide]\n"
-                L";   Distance       : Controls the quality vs. file size trade-off.\n"
-                L";                    0.0 = True lossless (exact pixel match, larger file).\n"
-                L";                    1.0 = Visually lossless (recommended for screenshots).\n"
-                L";                    2.0+ = Higher compression, slight quality reduction.\n"
-                L";   Lossless       : If set to 1, strictly forces true lossless (overrides Distance).\n"
-                L";                    If set to 0, the encoder uses the 'Distance' value above.\n"
-                L";\n"
-                L"; [General Settings]\n"
-                L";   Debug          : 1 = Enable debug logging; 0 = Disable.\n"
-                L";   ExportPath     : Custom directory for saving screenshots (leave blank for default).\n"
-                L";   HotkeyFull     : Keyboard shortcut to capture the entire screen.\n"
-                L";   HotkeyRegion   : Keyboard shortcut to capture a specific region.\n"
-                L";   BlankCheckMode : 0 = Disabled, 1 = Basic, 2 = Advanced, 3 = HARDCORE.\n"
-                L";\n"
-                L"; ==============================================================================\n"
-                L"\n"
-                L"[Capture]\n"
-                L"Debug=0\n"
-                L"Lossless=0\n"
-                L"Distance=1.0\n"
-                L"ExportPath=\n"
-                L"HotkeyFull=PrintScreen\n"
-                L"HotkeyRegion=Ctrl+PrintScreen\n"
-                L"BlankCheckMode=2\n";
-            
-            fputws(default_ini, f);
-            fclose(f);
-        }
+        
+        // 1. Write UTF-16 LE Byte Order Mark (BOM)
+        unsigned short bom = 0xFEFF;
+        fwrite(&bom, sizeof(bom), 1, f);
+        
+        // 2. Write the configuration in UTF-16 LE
+        const wchar_t *default_ini = 
+            L"; ==============================================================================\n"
+            L"; JXLShot Configuration File\n"
+            L"; ==============================================================================\n"
+            L";\n"
+            L"; [Quality & Compression Guide]\n"
+            L";   Distance       : Controls the quality vs. file size trade-off.\n"
+            L";                    0.0 = True lossless (exact pixel match, larger file).\n"
+            L";                    1.0 = Visually lossless (recommended for screenshots).\n"
+            L";                    2.0+ = Higher compression, slight quality reduction.\n"
+            L";   Lossless       : If set to 1, strictly forces true lossless (overrides Distance).\n"
+            L";                    If set to 0, the encoder uses the 'Distance' value above.\n"
+            L";\n"
+            L"; [General Settings]\n"
+            L";   Debug          : 1 = Enable debug logging; 0 = Disable.\n"
+            L";   ExportPath     : Custom directory for saving screenshots.\n"
+            L";                    Leave blank to use the default Windows Pictures folder.\n"
+            L";   HotkeyFull     : Keyboard shortcut to capture the entire screen.\n"
+            L";   HotkeyRegion   : Keyboard shortcut to capture a specific region.\n"
+            L";   BlankCheckMode : 0 = Disabled, 1 = Basic, 2 = Advanced, 3 = HARDCORE.\n"
+            L";\n"
+            L"; ==============================================================================\n"
+            L"\n"
+            L"[Capture]\n"
+            L"Debug=0\n"
+            L"Lossless=0\n"
+            L"Distance=1.0\n"
+            L"ExportPath=\n"
+            L"HotkeyFull=PrintScreen\n"
+            L"HotkeyRegion=Ctrl+PrintScreen\n"
+            L"BlankCheckMode=2\n";
+        
+        fputws(default_ini, f);
+        fclose(f);
+    } else {
+        return; // Failed to create file
+    }
+    
+    // 3. Restore the user's custom values (only if they existed previously).
+    // WritePrivateProfileStringW will cleanly find and replace the default values with the user's custom ones.
+    if (file_exists) {
+        if (has_debug) WritePrivateProfileStringW(L"Capture", L"Debug", val_debug, ini_path);
+        if (has_lossless) WritePrivateProfileStringW(L"Capture", L"Lossless", val_lossless, ini_path);
+        if (has_distance) WritePrivateProfileStringW(L"Capture", L"Distance", val_distance, ini_path);
+        if (has_export_path) WritePrivateProfileStringW(L"Capture", L"ExportPath", val_export_path, ini_path);
+        if (has_hotkey_full) WritePrivateProfileStringW(L"Capture", L"HotkeyFull", val_hotkey_full, ini_path);
+        if (has_hotkey_region) WritePrivateProfileStringW(L"Capture", L"HotkeyRegion", val_hotkey_region, ini_path);
+        if (has_blank_check) WritePrivateProfileStringW(L"Capture", L"BlankCheckMode", val_blank_check, ini_path);
     }
 }
 
-// Robust INI Parsing with Backward Compatibility Fallbacks
+
+
+// Simplified INI Parsing 
+// (Relies on ensure_default_ini to normalize the file strictly to [Capture])
+
 
 static int get_cfg_int(LPCWSTR key, int default_val, LPCWSTR ini_path) {
     wchar_t buf[64];
-    // Try primary section
-    if (GetPrivateProfileStringW(L"Capture", key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
-    if (GetPrivateProfileStringW(L"Settings", key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
-    if (GetPrivateProfileStringW(L"General", key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
+    if (GetPrivateProfileStringW(L"Capture", key, L"", buf, 64, ini_path) > 0) {
+        return _wtoi(buf);
+    }
     return default_val;
 }
 
 static float get_cfg_float(LPCWSTR key, float default_val, LPCWSTR ini_path) {
     wchar_t buf[64];
-    // Helper lambda-style block to parse float safely with C locale
-    #define PARSE_FLOAT(buf) \
-        do { \
-            _locale_t c_locale = _create_locale(LC_NUMERIC, "C"); \
-            float val = (float)_wcstod_l(buf, NULL, c_locale); \
-            _free_locale(c_locale); \
-            return val; \
-        } while(0)
-
-    if (GetPrivateProfileStringW(L"Capture", key, L"", buf, 64, ini_path) > 0) PARSE_FLOAT(buf);
-    if (GetPrivateProfileStringW(L"Settings", key, L"", buf, 64, ini_path) > 0) PARSE_FLOAT(buf);
-    if (GetPrivateProfileStringW(L"General", key, L"", buf, 64, ini_path) > 0) PARSE_FLOAT(buf); // Added for consistency
-    
-    #undef PARSE_FLOAT
-    
-    // Remove the NULL fallback.
+    if (GetPrivateProfileStringW(L"Capture", key, L"", buf, 64, ini_path) > 0) {
+        // Safely parse float using C locale to prevent comma/dot decimal issues in different regions
+        _locale_t c_locale = _create_locale(LC_NUMERIC, "C");
+        float val = (float)_wcstod_l(buf, NULL, c_locale);
+        _free_locale(c_locale);
+        return val;
+    }
     return default_val;
 }
 
 static void get_cfg_string(LPCWSTR key, LPCWSTR default_val, LPWSTR out_buf, DWORD buf_size, LPCWSTR ini_path) {
-    // 1. Try primary section
-    if (GetPrivateProfileStringW(L"Capture", key, L"", out_buf, buf_size, ini_path) > 0) return;
-    // 2. Try legacy sections
-    if (GetPrivateProfileStringW(L"Settings", key, L"", out_buf, buf_size, ini_path) > 0) return;
-    if (GetPrivateProfileStringW(L"General", key, L"", out_buf, buf_size, ini_path) > 0) return;
-    
-    // Remove the NULL fallback.
-    
-    // 3. Fallback to default
+    if (GetPrivateProfileStringW(L"Capture", key, L"", out_buf, buf_size, ini_path) > 0) {
+        return; // Successfully read from [Capture]
+    }
+    // Fallback to default value if key is missing or empty
     wcsncpy_s(out_buf, buf_size, default_val, _TRUNCATE);
 }
 
