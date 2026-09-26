@@ -1,4 +1,4 @@
-<div style="display: flex; align-items: center; gap: 10px;">
+<div style="display: flex; align-items: center; gap: 20px;">
     <img alt="Logo" src="icon.ico" />
     <img alt="helpful photo" src="tray_menu.png" />
 </div>
