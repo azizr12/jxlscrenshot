@@ -4,6 +4,8 @@ v2.2.2 - 26 September 2026
 - add notification pop up if something goes wrong with path or writing!
 - fixed about **fail** to drag on text and icon
 - removed cursors **dead code** and other redundant code
+- add **libjxl version** info  and **app versio**n and **cpu instruction** info to about window
+- add toggling beetwen lossy or lossless from tray menu
 
 
 v2.2.1 - 23 September 2026
