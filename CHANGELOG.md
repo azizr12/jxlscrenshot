@@ -1,7 +1,10 @@
-v2.2.2 - 24 September 2026
+v2.2.2 - 26 September 2026
 - fix thread may **terminated** if write didnt finish or app exit
 - fix **picture folder** name may be localized which will cause path to fail
 - add notification pop up if something goes wrong with path or writing!
+- fixed about **fail** to drag on text and icon
+- removed cursors **dead code** and other redundant code
+
 
 
 v2.2.1 - 23 September 2026
