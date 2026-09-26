@@ -116,7 +116,6 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDM_OPENCONFIG   107
 #define IDM_CHECK_UPDATE 108
 #define IDM_OPENEXPORT   109
-#define IDM_OPENEXPORT   109
 #define IDM_TOGGLE_MODE  110  // Single toggle for Lossless/Lossy
 
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
