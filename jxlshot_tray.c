@@ -116,9 +116,8 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDM_OPENCONFIG   107
 #define IDM_CHECK_UPDATE 108
 #define IDM_OPENEXPORT   109
-
-#define IDM_MODE_LOSSLESS 110
-#define IDM_MODE_LOSSY    111
+#define IDM_OPENEXPORT   109
+#define IDM_TOGGLE_MODE  110  // Single toggle for Lossless/Lossy
 
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
 #define IDI_APP_ICON  1001
@@ -147,10 +146,16 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     
-    // --- COMPRESSION MODE TOGGLE HERE ---
-    // MF_DEFAULT makes the text render in bold
-    AppendMenuW(hMenu, MF_STRING | (g_cfg.lossless ? MF_DEFAULT : 0), IDM_MODE_LOSSLESS, L"LOSSLESS");
-    AppendMenuW(hMenu, MF_STRING | (!g_cfg.lossless ? MF_DEFAULT : 0), IDM_MODE_LOSSY, L"LOSSY");
+    // Single Dynamic Toggle
+    // MF_CHECKED is the native, reliable Windows indicator for an active toggle state
+    UINT mode_flags = MF_STRING;
+    const wchar_t* mode_text = g_cfg.lossless ? L"Lossless" : L"Lossy";
+    
+    if (g_cfg.lossless) {
+        mode_flags |= MF_CHECKED; // Adds a checkmark next to the active mode
+    }
+    
+    AppendMenuW(hMenu, mode_flags, IDM_TOGGLE_MODE, mode_text);
     
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
@@ -166,6 +171,7 @@ static void show_tray_menu(HWND hwnd) {
     if (g_hwndMenuOwner) {
         ApplyDarkMode(g_hwndMenuOwner);
     }
+
     
     // Bring the hidden menu owner to the foreground so the menu inherits its theme
     if (g_hwndMenuOwner) {
@@ -777,22 +783,16 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
             switch (LOWORD(wp)) {
                 case IDM_FULL: execute_full_capture(); break;
                 case IDM_REGION: start_region_capture(); break;
-                case IDM_MODE_LOSSLESS:
-                    g_cfg.lossless = 1;
+                case IDM_TOGGLE_MODE:
+                    g_cfg.lossless = !g_cfg.lossless; // Flip the state instantly in RAM
                     {
                         wchar_t ini_path[MAX_PATH];
                         _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-                        WritePrivateProfileStringW(L"Capture", L"Lossless", L"1", ini_path);
+                        // Write "1" if lossless, "0" if lossy
+                        WritePrivateProfileStringW(L"Capture", L"Lossless", g_cfg.lossless ? L"1" : L"0", ini_path);
                     }
                     break;
-                case IDM_MODE_LOSSY:
-                    g_cfg.lossless = 0;
-                    {
-                        wchar_t ini_path[MAX_PATH];
-                        _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-                        WritePrivateProfileStringW(L"Capture", L"Lossless", L"0", ini_path);
-                    }
-                    break;
+
                 case IDM_SETPATH: execute_set_path(); break;
                 case IDM_OPENEXPORT: execute_open_export_folder(); break;
                 case IDM_OPENCONFIG: execute_open_config(hwnd); break;
