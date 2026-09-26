@@ -6,6 +6,8 @@
 #include <windowsx.h> // For GET_X_LPARAM / GET_Y_LPARAM
 #include <commctrl.h>
 #include <shellapi.h>
+#include <windowsx.h> // For GET_X_LPARAM / GET_Y_LPARAM
+#include "resource.h" // for APP_VERSIONW
 
 #define IDC_ABOUT_TITLE 1001
 #define IDC_ABOUT_DESCRIPTION 1002
@@ -52,7 +54,6 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             g_hAboutBgBrush = CreateSolidBrush(RGB(30, 30, 30));
 
             // 4. Apply the EXACT SAME 128x128 icon to the window (Taskbar / Alt-Tab)
-            // (g_hAppIcon is already loaded in execute_about before this window is created)
             SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_hAppIcon);
             SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hAppIcon);
 
@@ -63,16 +64,54 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
                 WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 40, 250, 30, hwnd, (HMENU)IDC_ABOUT_TITLE, GetModuleHandleW(NULL), NULL);
             SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hTitleFont, TRUE);
 
-            // Description (Left aligned)
-            HWND hDesc = CreateWindowExW(0, L"STATIC", L"Minimal tray screenshot tool\nusing JPEG XL.", 
-                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 80, 250, 50, hwnd, (HMENU)IDC_ABOUT_DESCRIPTION, GetModuleHandleW(NULL), NULL);
+            // Build dynamic description with Version and CPU info
+            wchar_t desc_text[512];
+            
+            // Extract libjxl version
+            uint32_t jxl_ver = JxlEncoderVersion();
+            int jxl_major = (jxl_ver >> 24) & 0xFF;
+            int jxl_minor = (jxl_ver >> 16) & 0xFF;
+            int jxl_patch = (jxl_ver >> 8) & 0xFF;
+
+            // Define fallback constants for older Windows SDK headers
+#ifndef PF_AVX512F_INSTRUCTIONS_AVAILABLE
+#define PF_AVX512F_INSTRUCTIONS_AVAILABLE 41
+#endif
+#ifndef PF_AVX2_INSTRUCTIONS_AVAILABLE
+#define PF_AVX2_INSTRUCTIONS_AVAILABLE 34
+#endif
+#ifndef PF_AVX_INSTRUCTIONS_AVAILABLE
+#define PF_AVX_INSTRUCTIONS_AVAILABLE 33
+#endif
+
+            // Detect CPU instruction sets
+            BOOL has_avx512 = IsProcessorFeaturePresent(PF_AVX512F_INSTRUCTIONS_AVAILABLE);
+            BOOL has_avx2 = IsProcessorFeaturePresent(PF_AVX2_INSTRUCTIONS_AVAILABLE);
+            BOOL has_avx = IsProcessorFeaturePresent(PF_AVX_INSTRUCTIONS_AVAILABLE);
+            
+            const wchar_t* cpu_ext = L"SSE2";
+            if (has_avx512) cpu_ext = L"AVX-512";
+            else if (has_avx2) cpu_ext = L"AVX2";
+            else if (has_avx) cpu_ext = L"AVX";
+
+            // Format the final string
+            _snwprintf(desc_text, 512, 
+                L"Minimal tray screenshot tool using JPEG XL.\n\n"
+                L"App Version: %s\n"
+                L"libjxl Version: %d.%d.%d\n"
+                L"Architecture: x86_64 (%s)", 
+                APP_VERSIONW, jxl_major, jxl_minor, jxl_patch, cpu_ext);
+
+            // Description
+            HWND hDesc = CreateWindowExW(0, L"STATIC", desc_text, 
+                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 80, 250, 110, hwnd, (HMENU)IDC_ABOUT_DESCRIPTION, GetModuleHandleW(NULL), NULL);
             SendMessageW(hDesc, WM_SETFONT, (WPARAM)g_hBodyFont, TRUE);
 
-            // Hyperlink (Left aligned)
+            // Hyperlink
             CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>", 
-                WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 140, 200, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 200, 200, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
             
-            // Splash Icon (Right aligned, uses the exact same 128x128 icon)
+            // Splash Icon
             HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"", 
                 WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 300, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
             SendMessageW(hIconCtrl, STM_SETICON, (WPARAM)g_hAppIcon, 0);
