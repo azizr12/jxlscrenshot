@@ -6,7 +6,7 @@ v2.2.2 - 26 September 2026
 - removed cursors **dead code** and other redundant code
 - add **libjxl version** (0.12.0) info  and **app version** and **cpu instruction** info to about window
 - Fixed the Confusing **ini config**
-- fixed **ini config** doesnt show new fixed comment
+- Fixed **ini config** doesnt show new fixed comment
 
 
 v2.2.1 - 23 September 2026
