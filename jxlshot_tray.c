@@ -22,7 +22,6 @@
  */
 
 
-
 #define _WIN32_IE 0x0600
 #define UNICODE
 #define _UNICODE
@@ -63,12 +62,18 @@ typedef enum _PreferredAppMode {
 typedef PreferredAppMode (WINAPI *fnSetPreferredAppMode)(PreferredAppMode appMode);
 typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
 typedef void (WINAPI *fnFlushMenuThemes)(void);
+// SetWindowTheme IS a documented, by-name export of uxtheme.dll (unlike the ordinal-only
+// functions above), but we still resolve it dynamically via GetProcAddress instead of
+// linking -luxtheme directly, since the build script does not link uxtheme and this keeps
+// every uxtheme entry point loaded the same way, from the same already-loaded g_hUxtheme.
+typedef HRESULT (WINAPI *fnSetWindowTheme)(HWND hwnd, LPCWSTR pszSubAppName, LPCWSTR pszSubIdList);
 
 // Global state to avoid reloading the DLL repeatedly
 static HMODULE g_hUxtheme = NULL;
 static fnSetPreferredAppMode g_pSetPreferredAppMode = NULL;
 static fnAllowDarkModeForWindow g_pAllowDarkModeForWindow = NULL;
 static fnFlushMenuThemes g_pFlushMenuThemes = NULL;
+static fnSetWindowTheme g_pSetWindowTheme = NULL;
 
 static void InitializeDarkMode(void) {
     if (g_hUxtheme) return;
@@ -79,6 +84,7 @@ static void InitializeDarkMode(void) {
     g_pSetPreferredAppMode = (fnSetPreferredAppMode)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(135));
     g_pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(133));
     g_pFlushMenuThemes = (fnFlushMenuThemes)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(136));
+    g_pSetWindowTheme = (fnSetWindowTheme)GetProcAddress(g_hUxtheme, "SetWindowTheme");
 
     // ForceDark is required for TaskDialogs to reliably apply the theme
     if (g_pSetPreferredAppMode) {
@@ -94,7 +100,12 @@ static void ApplyDarkMode(HWND hwnd) {
     if (!hwnd || !g_pAllowDarkModeForWindow) return;
 
     g_pAllowDarkModeForWindow(hwnd, TRUE);
-    
+
+
+    if (g_pSetWindowTheme) {
+        g_pSetWindowTheme(hwnd, L"DarkMode_Explorer", NULL);
+    }
+
     // Crucial: Tell the window and its children to redraw with the new theme
     SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
     RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);

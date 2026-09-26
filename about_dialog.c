@@ -6,7 +6,6 @@
 #include <windowsx.h> // For GET_X_LPARAM / GET_Y_LPARAM
 #include <commctrl.h>
 #include <shellapi.h>
-#include <windowsx.h> // For GET_X_LPARAM / GET_Y_LPARAM
 #include "resource.h" // for APP_VERSIONW
 
 #define IDC_ABOUT_TITLE 1001
@@ -36,16 +35,13 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             // (WM_ERASEBKGND / WM_PAINT) is unchanged.
 
             // 1. Create Typography
-            // Segoe UI Variable is Windows 11's modern system font and renders noticeably
-            // cleaner than plain "Segoe UI" at these sizes, especially for the title. It's
-            // present on Win10 21H2+/Win11 out of the box; CreateFontW silently falls back
-            // to plain "Segoe UI" on older systems since GDI matches by family name.
+            // Times New Roman is a classic serif font widely available across all Windows versions.
             g_hTitleFont = CreateFontW(-26, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_NATURAL_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Display");
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_NATURAL_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Times New Roman");
             g_hBodyFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_NATURAL_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_NATURAL_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Times New Roman");
             g_hXFont = CreateFontW(-20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_NATURAL_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_NATURAL_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Times New Roman");
 
             // 2. Create Background Brush (Modern Dark Gray #1E1E1E)
             g_hAboutBgBrush = CreateSolidBrush(RGB(30, 30, 30));
@@ -54,9 +50,10 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_hAppIcon);
             SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hAppIcon);
 
-            // 4. Layout Controls
+            // 4. Layout Controls (Strict 15px vertical spacing between text elements)
 
             // Title (Left aligned)
+            // Y=40, Height=32 -> Bottom edge = 72
             HWND hTitle = CreateWindowExW(0, L"STATIC", L"JXL Screenshot Tool",
                 WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 40, 260, 32, hwnd, (HMENU)IDC_ABOUT_TITLE, GetModuleHandleW(NULL), NULL);
             SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hTitleFont, TRUE);
@@ -103,16 +100,15 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
                 APP_VERSIONW, jxl_major, jxl_minor, jxl_patch, cpu_ext);
 
             // Description
-            // Box made taller (140px) and moved down slightly so the wrapped intro
-            // sentence + 3 version lines don't get clipped or crowd the hyperlink below.
+            // Y=87 (72 + 15px gap), Height=140 -> Bottom edge = 227
             HWND hDesc = CreateWindowExW(0, L"STATIC", desc_text,
-                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 85, 260, 140, hwnd, (HMENU)IDC_ABOUT_DESCRIPTION, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 87, 260, 140, hwnd, (HMENU)IDC_ABOUT_DESCRIPTION, GetModuleHandleW(NULL), NULL);
             SendMessageW(hDesc, WM_SETFONT, (WPARAM)g_hBodyFont, TRUE);
 
             // Hyperlink
-            // Moved down to y=235 to clear the taller description box above.
+            // Y=242 (227 + 15px gap), Height=20 -> Bottom edge = 262
             CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>",
-                WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 235, 220, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 242, 220, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
 
             // Splash Icon
             HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"",
@@ -295,7 +291,7 @@ static void execute_about(void) {
     }
 
     const int dlgWidth = 480;
-    const int dlgHeight = 280; // grown from 240 to fit the taller description + repositioned link
+    const int dlgHeight = 280; // Grown from 240 to fit the taller description + repositioned link + 15px spacing
 
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
