@@ -24,6 +24,9 @@ extern void ApplyDarkMode(HWND hwnd);
 extern HWND g_hwndTray;
 extern HWND g_hwndMenuOwner;
 
+// Close ("X") button hit-box, kept in one place so paint/hit-test/mouse code all agree.
+static const RECT kCloseBtnRect = {472, 10, 512, 50};
+
 static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     switch (uMsg) {
         case WM_CREATE: {
@@ -32,13 +35,14 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             // 1. Create Modern Typography (Consolas Regular)
             // FW_NORMAL (400) ensures the "Regular" weight. 
             // FIXED_PITCH | FF_MODERN is the correct flag for monospaced fonts like Consolas.
-            g_hTitleFont = CreateFontW(-24, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+            // Sizes bumped up slightly for better legibility on the larger window.
+            g_hTitleFont = CreateFontW(-27, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
             
-            g_hBodyFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+            g_hBodyFont = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
             
-            g_hXFont = CreateFontW(-20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+            g_hXFont = CreateFontW(-22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
             // 2. Create Background Brush
             g_hAboutBgBrush = CreateSolidBrush(RGB(30, 30, 30));
@@ -50,11 +54,13 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 
 
             // 4. Layout Controls (Strict 15px vertical spacing between text elements)
+            // Text column is kept narrower than the window and stops well short of the
+            // icon on the right, so there's a clear gap between the copy and the artwork.
 
             // Title (Left aligned)
-            // Y=40, Height=32 -> Bottom edge = 72
+            // Y=40, Height=36 -> Bottom edge = 76
             HWND hTitle = CreateWindowExW(0, L"STATIC", L"JXL Screenshot Tool",
-                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 40, 260, 32, hwnd, (HMENU)IDC_ABOUT_TITLE, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 40, 290, 36, hwnd, (HMENU)IDC_ABOUT_TITLE, GetModuleHandleW(NULL), NULL);
             SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hTitleFont, TRUE);
 
             // Build dynamic description with Version and CPU info
@@ -101,19 +107,20 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             desc_text[511] = L'\0'; // Guarantee null-termination
 
             // Description
-            // Y=87 (72 + 15px gap), Height=140 -> Bottom edge = 227
+            // Y=91 (76 + 15px gap), Height=150 -> Bottom edge = 241
             HWND hDesc = CreateWindowExW(0, L"STATIC", desc_text,
-                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 87, 260, 140, hwnd, (HMENU)IDC_ABOUT_DESCRIPTION, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 91, 290, 150, hwnd, (HMENU)IDC_ABOUT_DESCRIPTION, GetModuleHandleW(NULL), NULL);
             SendMessageW(hDesc, WM_SETFONT, (WPARAM)g_hBodyFont, TRUE);
 
             // Hyperlink
-            // Y=242 (227 + 15px gap), Height=20 -> Bottom edge = 262
+            // Y=256 (241 + 15px gap), Height=22 -> Bottom edge = 278
             CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>",
-                WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 242, 220, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 256, 250, 22, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
 
             // Splash Icon
+            // Pushed further right (x=350) so there's a clear gap between it and the text column.
             HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"",
-                WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 300, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 350, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
             SendMessageW(hIconCtrl, STM_SETICON, (WPARAM)g_hAppIcon, 0);
 
             return 0;
@@ -136,7 +143,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             FillRect(hdc, &rc, g_hAboutBgBrush);
 
             SetBkMode(hdc, TRANSPARENT);
-            RECT rcX = {440, 10, 480, 50};
+            RECT rcX = kCloseBtnRect;
 
             // Always use the default "X" color without hover effects
             SetTextColor(hdc, RGB(255, 85, 85));
@@ -170,8 +177,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             ScreenToClient(hwnd, &pt);
 
             // 1. Close button area: Treat as client so WM_LBUTTONDOWN can handle the click
-            RECT rcX = {440, 10, 480, 50};
-            if (PtInRect(&rcX, pt)) {
+            if (PtInRect(&kCloseBtnRect, pt)) {
                 return HTCLIENT;
             }
 
@@ -189,11 +195,10 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         }
 
         case WM_MOUSEMOVE: {
-            int x = GET_X_LPARAM(lParam);
-            int y = GET_Y_LPARAM(lParam);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
             // Check if cursor is within the "X" button bounds
-            if (x >= 440 && x <= 480 && y >= 10 && y <= 50) {
+            if (PtInRect(&kCloseBtnRect, pt)) {
                 SetCursor(LoadCursorW(NULL, IDC_HAND));
 
                 // Request a WM_MOUSELEAVE message when the cursor exits the window
@@ -218,11 +223,10 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             break;
 
         case WM_LBUTTONDOWN: {
-            int x = GET_X_LPARAM(lParam);
-            int y = GET_Y_LPARAM(lParam);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
             // Handle close button click exclusively
-            if (x >= 440 && x <= 480 && y >= 10 && y <= 50) {
+            if (PtInRect(&kCloseBtnRect, pt)) {
                 DestroyWindow(hwnd);
                 return 0;
             }
@@ -303,8 +307,10 @@ static void execute_about(void) {
         }
     }
 
-    const int dlgWidth = 480;
-    const int dlgHeight = 280;
+    // Window bumped up slightly (520x300) to accommodate the larger fonts and
+    // give the icon more breathing room away from the text column.
+    const int dlgWidth = 520;
+    const int dlgHeight = 300;
 
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
