@@ -20,7 +20,7 @@ static HFONT g_hBodyFont = NULL;
 static HFONT g_hXFont = NULL;
 static HICON g_hAppIcon = NULL; // Single global handle for the 128x128 icon
 
-// Forward declaration (assumed to be defined elsewhere in your codebase)
+// Forward declaration
 extern void ApplyDarkMode(HWND hwnd);
 extern HWND g_hwndTray;
 extern HWND g_hwndMenuOwner;
@@ -30,44 +30,43 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         case WM_CREATE: {
             ApplyDarkMode(hwnd);
 
-            // 1. Enable Windows 11 Rounded Corners dynamically
-            HMODULE hDwmapi = LoadLibraryW(L"dwmapi.dll");
-            if (hDwmapi) {
-                typedef HRESULT (WINAPI *pDwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
-                pDwmSetWindowAttribute pDwmSet = (pDwmSetWindowAttribute)GetProcAddress(hDwmapi, "DwmSetWindowAttribute");
-                if (pDwmSet) {
-                    int preference = 2; // DWMWCP_ROUND
-                    pDwmSet(hwnd, 33, &preference, sizeof(preference)); // 33 = DWMWA_WINDOW_CORNER_PREFERENCE
-                }
-                FreeLibrary(hDwmapi);
-            }
+            // Windows 11 rounded-corner DWM call has been removed on purpose.
+            // This window is a plain rectangular Win32 popup now (no DwmSetWindowAttribute /
+            // DWMWA_WINDOW_CORNER_PREFERENCE call). Custom dark background painting below
+            // (WM_ERASEBKGND / WM_PAINT) is unchanged.
 
-            // 2. Create Modern Typography
-            g_hTitleFont = CreateFontW(-24, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Semibold");
-            g_hBodyFont = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-            g_hXFont = CreateFontW(-20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
-                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+            // 1. Create Typography
+            // Segoe UI Variable is Windows 11's modern system font and renders noticeably
+            // cleaner than plain "Segoe UI" at these sizes, especially for the title. It's
+            // present on Win10 21H2+/Win11 out of the box; CreateFontW silently falls back
+            // to plain "Segoe UI" on older systems since GDI matches by family name.
+            g_hTitleFont = CreateFontW(-26, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_NATURAL_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Display");
+            g_hBodyFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_NATURAL_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI Variable Text");
+            g_hXFont = CreateFontW(-20, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_NATURAL_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 
-            // 3. Create Background Brush (Modern Dark Gray #1E1E1E)
+            // 2. Create Background Brush (Modern Dark Gray #1E1E1E)
             g_hAboutBgBrush = CreateSolidBrush(RGB(30, 30, 30));
 
-            // 4. Apply the EXACT SAME 128x128 icon to the window (Taskbar / Alt-Tab)
+            // 3. Apply the EXACT SAME 128x128 icon to the window (Taskbar / Alt-Tab)
             SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_hAppIcon);
             SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hAppIcon);
 
-            // 5. Layout Controls
-            
+            // 4. Layout Controls
+
             // Title (Left aligned)
-            HWND hTitle = CreateWindowExW(0, L"STATIC", L"JXL Screenshot Tool", 
-                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 40, 250, 30, hwnd, (HMENU)IDC_ABOUT_TITLE, GetModuleHandleW(NULL), NULL);
+            HWND hTitle = CreateWindowExW(0, L"STATIC", L"JXL Screenshot Tool",
+                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 40, 260, 32, hwnd, (HMENU)IDC_ABOUT_TITLE, GetModuleHandleW(NULL), NULL);
             SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hTitleFont, TRUE);
 
             // Build dynamic description with Version and CPU info
             wchar_t desc_text[512];
-            
-            // Extract libjxl version
+
+            // Extract libjxl version.
+            // JxlEncoderVersion() returns a DECIMAL-encoded integer: major*1000000 + minor*1000 + patch.
+            // (It is NOT byte-packed, so it must not be right-shifted/masked like a Windows FILEVERSION.)
             uint32_t jxl_ver = JxlEncoderVersion();
             int jxl_major = jxl_ver / 1000000;
             int jxl_minor = (jxl_ver / 1000) % 1000;
@@ -88,31 +87,35 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             BOOL has_avx512 = IsProcessorFeaturePresent(PF_AVX512F_INSTRUCTIONS_AVAILABLE);
             BOOL has_avx2 = IsProcessorFeaturePresent(PF_AVX2_INSTRUCTIONS_AVAILABLE);
             BOOL has_avx = IsProcessorFeaturePresent(PF_AVX_INSTRUCTIONS_AVAILABLE);
-            
+
             const wchar_t* cpu_ext = L"SSE2";
             if (has_avx512) cpu_ext = L"AVX-512";
             else if (has_avx2) cpu_ext = L"AVX2";
             else if (has_avx) cpu_ext = L"AVX";
 
-            // Format the final string
-            _snwprintf(desc_text, 512, 
+            // Format the final string.
+            // Double-space after each label gives a little breathing room without needing tabs.
+            _snwprintf(desc_text, 512,
                 L"Minimal tray screenshot tool using JPEG XL.\n\n"
-                L"App Version: %s\n"
-                L"libjxl Version: %d.%d.%d\n"
-                L"Architecture: x86-64 (%s)", 
+                L"App Version:  %s\n"
+                L"libjxl Version:  %d.%d.%d\n"
+                L"Architecture:  x86-64 (%s)",
                 APP_VERSIONW, jxl_major, jxl_minor, jxl_patch, cpu_ext);
 
             // Description
-            HWND hDesc = CreateWindowExW(0, L"STATIC", desc_text, 
-                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 80, 250, 110, hwnd, (HMENU)IDC_ABOUT_DESCRIPTION, GetModuleHandleW(NULL), NULL);
+            // Box made taller (140px) and moved down slightly so the wrapped intro
+            // sentence + 3 version lines don't get clipped or crowd the hyperlink below.
+            HWND hDesc = CreateWindowExW(0, L"STATIC", desc_text,
+                WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 85, 260, 140, hwnd, (HMENU)IDC_ABOUT_DESCRIPTION, GetModuleHandleW(NULL), NULL);
             SendMessageW(hDesc, WM_SETFONT, (WPARAM)g_hBodyFont, TRUE);
 
             // Hyperlink
-            CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>", 
-                WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 200, 200, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
-            
+            // Moved down to y=235 to clear the taller description box above.
+            CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>",
+                WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 235, 220, 20, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
+
             // Splash Icon
-            HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"", 
+            HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"",
                 WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 300, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
             SendMessageW(hIconCtrl, STM_SETICON, (WPARAM)g_hAppIcon, 0);
 
@@ -124,7 +127,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             RECT rc;
             GetClientRect(hwnd, &rc);
             FillRect(hdc, &rc, g_hAboutBgBrush);
-            return 1; 
+            return 1;
         }
 
         case WM_PAINT: {
@@ -132,19 +135,19 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             HDC hdc = BeginPaint(hwnd, &ps);
             RECT rc;
             GetClientRect(hwnd, &rc);
-            
+
             FillRect(hdc, &rc, g_hAboutBgBrush);
-            
+
             SetBkMode(hdc, TRANSPARENT);
             RECT rcX = {440, 10, 480, 50};
-            
+
             // Always use the default "X" color without hover effects
             SetTextColor(hdc, RGB(255, 85, 85));
-            
+
             HFONT hOldFont = (HFONT)SelectObject(hdc, g_hXFont);
             DrawTextW(hdc, L"\u2715", -1, &rcX, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             SelectObject(hdc, hOldFont);
-            
+
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -153,37 +156,37 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             HDC hdcStatic = (HDC)wParam;
             HWND hCtrl = (HWND)lParam;
             int id = GetDlgCtrlID(hCtrl);
-            
+
             SetBkMode(hdcStatic, TRANSPARENT);
-            
+
             if (id == IDC_ABOUT_TITLE) {
                 SetTextColor(hdcStatic, RGB(255, 255, 255));
             } else if (id == IDC_ABOUT_DESCRIPTION) {
                 SetTextColor(hdcStatic, RGB(160, 160, 160));
             }
-            
+
             return (INT_PTR)g_hAboutBgBrush;
         }
 
         case WM_NCHITTEST: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
-            
+
             // 1. Close button area: Treat as client so WM_LBUTTONDOWN can handle the click
             RECT rcX = {440, 10, 480, 50};
             if (PtInRect(&rcX, pt)) {
                 return HTCLIENT;
             }
-            
+
             // 2. Interactive controls (e.g., hyperlink): Treat as client so they can be clicked
             HWND hChild = ChildWindowFromPoint(hwnd, pt);
             if (hChild != NULL && hChild != hwnd) {
                 int id = GetDlgCtrlID(hChild);
                 if (id == IDC_ABOUT_LINK) {
-                    return HTCLIENT; 
+                    return HTCLIENT;
                 }
             }
-            
+
             // 3. Everywhere else acts as the title bar (fully draggable by the OS)
             return HTCAPTION;
         }
@@ -191,11 +194,11 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         case WM_MOUSEMOVE: {
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
-            
+
             // Check if cursor is within the "X" button bounds
             if (x >= 440 && x <= 480 && y >= 10 && y <= 50) {
                 SetCursor(LoadCursorW(NULL, IDC_HAND));
-                
+
                 // Request a WM_MOUSELEAVE message when the cursor exits the window
                 TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
                 TrackMouseEvent(&tme);
@@ -220,13 +223,13 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         case WM_LBUTTONDOWN: {
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
-            
+
             // Handle close button click exclusively
             if (x >= 440 && x <= 480 && y >= 10 && y <= 50) {
                 DestroyWindow(hwnd);
                 return 0;
             }
-            
+
             // Dragging is fully handled by WM_NCHITTEST returning HTCAPTION.
             // Manual ReleaseCapture / SendMessage is not needed.
             return 0;
@@ -255,7 +258,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             if (g_hBodyFont) { DeleteObject(g_hBodyFont); g_hBodyFont = NULL; }
             if (g_hXFont) { DeleteObject(g_hXFont); g_hXFont = NULL; }
             if (g_hAppIcon) { DestroyIcon(g_hAppIcon); g_hAppIcon = NULL; }
-            PostQuitMessage(0); 
+            PostQuitMessage(0);
             return 0;
 
         case WM_CLOSE:
@@ -272,32 +275,41 @@ static void execute_about(void) {
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LINK_CLASS };
     InitCommonControlsEx(&icc);
 
-    // Load the 128x128 icon ONCE to be used universally for Splash Screen and Taskbar
+    // Load the 128x128 icon ONCE to be used universally for Splash Screen and Taskbar.
+    // NOTE: LR_SHARED was removed. LR_SHARED caches the returned handle keyed by
+    // (resource, size, flags); if any other part of the app (e.g. the tray icon setup)
+    // loads the same IDI_APP_ICON resource at a *different* size, the shared cache can
+    // hand back a mismatched or NULL handle depending on load order. LR_DEFAULTCOLOR
+    // gives us our own private, correctly-sized 128x128 handle every time.
     if (!g_hAppIcon) {
-        g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, LR_SHARED);
-        
-        // Fallback if the resource is missing
+        g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, LR_DEFAULTCOLOR);
+
+        // Fallback if the resource is missing -- log why, so a NULL icon doesn't have to
+        // be debugged blind next time.
         if (!g_hAppIcon) {
+            wchar_t dbg[64];
+            wsprintfW(dbg, L"LoadImage(IDI_APP_ICON) failed, GetLastError=%lu", GetLastError());
+            OutputDebugStringW(dbg);
             g_hAppIcon = LoadIconW(NULL, IDI_APPLICATION);
         }
     }
 
     const int dlgWidth = 480;
-    const int dlgHeight = 240;
+    const int dlgHeight = 280; // grown from 240 to fit the taller description + repositioned link
 
     WNDCLASSEXW wc = {0};
     wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = AboutWindowProc;
     wc.hInstance = GetModuleHandleW(NULL);
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-    wc.hbrBackground = NULL; 
+    wc.hbrBackground = NULL;
     wc.lpszClassName = L"JxlShotAboutClass";
-    
+
     // Assign the EXACT SAME 128x128 icon to the window class
     // Windows will automatically scale it down for the taskbar button
     wc.hIcon = g_hAppIcon;
     wc.hIconSm = g_hAppIcon;
-    
+
     RegisterClassExW(&wc);
 
     RECT rc;
