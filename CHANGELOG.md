@@ -1,4 +1,4 @@
-v2.2.3 - 26 September 2026
+v2.2.4 - 26 September 2026
 - fix thread may **terminated** if write didnt finish or app exit
 - fix **picture folder** name may be localized which will cause path to fail
 - add notification pop up if something goes wrong with path or writing!

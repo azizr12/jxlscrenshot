@@ -1,5 +1,5 @@
 #define MyAppName "jxlshot"
-#define MyAppVersion "2.2.2"
+#define MyAppVersion "2.2.4"
 #define MyAppPublisher "azizr12"
 #define MyAppURL "https://github.com/azizr12/jxlshot"
 #define MyAppExeName "jxlshot_tray.exe"
