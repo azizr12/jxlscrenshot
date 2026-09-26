@@ -231,13 +231,10 @@ static void ensure_default_ini(void) {
 
 static int get_cfg_int(LPCWSTR key, int default_val, LPCWSTR ini_path) {
     wchar_t buf[64];
-    // 1. Try primary section
+    // Try primary section
     if (GetPrivateProfileStringW(L"Capture", key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
-    // 2. Try legacy/alternative sections
     if (GetPrivateProfileStringW(L"Settings", key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
     if (GetPrivateProfileStringW(L"General", key, L"", buf, 64, ini_path) > 0) return _wtoi(buf);
-    
-    // Remove the NULL fallback. Passing NULL returns section names, not key values.
     return default_val;
 }
 
