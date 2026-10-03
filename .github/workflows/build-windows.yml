@@ -1,6 +1,11 @@
 name: build-windows installer
 on:
   push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
@@ -27,47 +32,24 @@ jobs:
 
       - name: Compile and bundle runtime DLLs
         run: |
-          # 1. Compile CLI version
-          gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
-              -mwindows -static-libgcc -static-libstdc++ -o jxlshot.exe jxlshot.c \
-              -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lole32 -ldxgi -ld3d11 -luuid
-
-          # 2. EXPLICITLY compile the resource file using windres
+          # EXPLICITLY compile the resource file using windres
           windres -i resource.rc -o resource.o
 
-          # 3. Compile Tray version using the compiled resource object
+          # Compile Tray version using the compiled resource object
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
-              -mwindows -static-libgcc -static-libstdc++ -o jxlshot_tray.exe jxlshot_tray.c resource.o \
+              -mwindows -static-libgcc -static-libstdc++ -o jxlshot_tray.exe jxlshot.c jxlshot_tray.c resource.o \
               -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lurlmon
 
-          # 4. Prepare distribution directory
+          # Prepare distribution directory
           mkdir -p dist
-          cp jxlshot.exe jxlshot_tray.exe dist/
+          cp jxlshot_tray.exe dist/
           
           # Copy auxiliary files
           cp README.md dist/ 2>/dev/null || true
 
-          # 5. Extract and copy required MinGW/libjxl DLLs (Recursive Resolution)
-          # Safely catches all transitive dependencies without executing the .exe
-          mkdir -p temp_dlls
-          objdump -p jxlshot.exe jxlshot_tray.exe | grep "DLL Name" | sed 's/.*DLL Name: //' | sort -u > dll_list.txt
-          
-          while true; do
-              count_before=$(wc -l < dll_list.txt)
-              while read -r dll; do
-                  found=$(find /mingw64/bin -maxdepth 1 -iname "$dll" | head -n 1)
-                  if [ -n "$found" ] && [ ! -f "temp_dlls/$dll" ]; then
-                      cp "$found" temp_dlls/
-                      objdump -p "$found" | grep "DLL Name" | sed 's/.*DLL Name: //' >> dll_list.txt
-                  fi
-              done < dll_list.txt
-              sort -u dll_list.txt -o dll_list.txt
-              count_after=$(wc -l < dll_list.txt)
-              [ "$count_before" -eq "$count_after" ] && break
-          done
-          
-          cp temp_dlls/*.dll dist/
-          rm -rf temp_dlls dll_list.txt
+          # Extract and copy required MinGW/libjxl DLLs
+          # Safely catches all transitive dependencies without executing the .exe (using ldd)
+          ldd jxlshot_tray.exe | grep "/mingw64/bin" | awk '{print $3}' | sort -u | xargs -I {} cp {} dist/
 
       - name: Build Inno Setup Installer
         shell: pwsh
@@ -84,7 +66,7 @@ jobs:
           & $iscc setup.iss
           
           # Move the setup executable to the dist folder for the release
-          mv Output/jxlshot-setup-x64.exe dist/
+          Move-Item -Path "Output\jxlshot-setup-x64.exe" -Destination "dist\" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
