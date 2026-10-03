@@ -32,7 +32,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         case WM_CREATE: {
             ApplyDarkMode(hwnd);
 
-            // 1. Create Modern Typography (Consolas Regular)
+            // Create Modern Typography (Consolas Regular)
             // FW_NORMAL (400) ensures the "Regular" weight. 
             // FIXED_PITCH | FF_MODERN is the correct flag for monospaced fonts like Consolas.
             // Sizes bumped up slightly for better legibility on the larger window.
@@ -44,16 +44,10 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             
             g_hXFont = CreateFontW(-22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-            // 2. Create Background Brush
+            // Create Background Brush
             g_hAboutBgBrush = CreateSolidBrush(RGB(30, 30, 30));
 
-            // 3. Apply the EXACT SAME 128x128 icon to the window
-            SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)g_hAppIcon);
-            SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)g_hAppIcon);
-
-
-
-            // 4. Layout Controls (Strict 15px vertical spacing between text elements)
+            // Layout Controls (Strict 15px vertical spacing between text elements)
             // Text column is kept narrower than the window and stops well short of the
             // icon on the right, so there's a clear gap between the copy and the artwork.
 
@@ -286,7 +280,7 @@ static void execute_about(void) {
 
     // ICON LOADING
     // Modern .ico files often skip 128x128 and go straight to 256x256 (PNG compressed).
-    // We cascade through sizes to guarantee we get the custom icon, not the generic fallback.
+    // We cascade through these specific sizes to guarantee we retrieve the custom icon.
     if (!g_hAppIcon) {
         // Attempt 1: Exact 128x128
         g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, LR_DEFAULTCOLOR);
@@ -294,16 +288,6 @@ static void execute_about(void) {
         // Attempt 2: Fallback to 256x256 (Windows will smoothly scale this down)
         if (!g_hAppIcon) {
             g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 256, 256, LR_DEFAULTCOLOR);
-        }
-        
-        // Attempt 3: Fallback to default system size if specific sizes are missing
-        if (!g_hAppIcon) {
-            g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 0, 0, LR_DEFAULTCOLOR);
-        }
-
-        // Attempt 4: Absolute fallback to system default
-        if (!g_hAppIcon) {
-            g_hAppIcon = LoadIconW(NULL, IDI_APPLICATION);
         }
     }
 
@@ -322,8 +306,6 @@ static void execute_about(void) {
         wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
         wc.hbrBackground = NULL;
         wc.lpszClassName = L"JxlShotAboutClass";
-        wc.hIcon = g_hAppIcon;
-        wc.hIconSm = g_hAppIcon;
         RegisterClassExW(&wc);
     }
     wc.lpfnWndProc = AboutWindowProc;
