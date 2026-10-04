@@ -189,7 +189,7 @@ static void ensure_default_ini(void) {
             L"\n"
             L"[Capture]\n"
             L"Debug=0\n"
-            L"Lossless=0\n"
+            L"Lossless=1\n"
             L"Distance=1.0\n"
             L"ExportPath=\n"
             L"HotkeyFullVK=44\n"
