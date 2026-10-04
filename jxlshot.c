@@ -1,11 +1,19 @@
 /*
 * Captures the primary monitor and saves it as JPEG XL (.jxl).
+*
+* Usage:
+*   jxlshot.exe                capture, lossless (default)
+*   jxlshot.exe -q             lossy capture, default distance 1.0
+*   jxlshot.exe -q -d 3.0      lossy capture, distance 3.0 (lower = better)
+*   jxlshot.exe -w 3000        wait 3000 ms before capturing
+*
+*
 *  THE PICTURE EXPORTING FOLLOW THE EXPORT PATH !!!!!!!
 *
 * Configuration is read from jxlshot.ini located next to the executable.
 * Debug logs are written to %TMP%\jxlshot_debug.log
 *
-* jxlshot.c
+* jxlshot.c — minimal command-line screenshot tool for Windows.
 *
 */
 
@@ -24,7 +32,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <wchar.h>
+#include <ctype.h>
 #include <stdarg.h>
+#include <errno.h>
 #include <jxl/encode.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -56,7 +66,7 @@ typedef struct {
     int     lossless;
     float   distance;
     //int     show_cursor;
-    int blank_check_mode; /* 0=Disabled, 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels */
+    int blank_check_mode; /* 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels */
     wchar_t export_path[MAX_PATH];
     UINT    hk_full_mod;
     UINT    hk_full_vk;
@@ -68,14 +78,17 @@ static AppConfig g_cfg;
 static wchar_t   g_exe_dir[MAX_PATH];
 
 static void init_paths(void) {
-    DWORD len = GetModuleFileNameW(NULL, g_exe_dir, MAX_PATH);
-    if (len == 0 || len == MAX_PATH) {
+    wchar_t tmp[32768]; // Support Windows long paths
+    DWORD len = GetModuleFileNameW(NULL, tmp, 32768);
+    if (len == 0 || len == 32768) {
         // Fallback to current directory if path is too long or fails
         wcscpy(g_exe_dir, L".");
         return;
     }
-    wchar_t *slash = wcsrchr(g_exe_dir, L'\\');
+    wchar_t *slash = wcsrchr(tmp, L'\\');
     if (slash) *slash = 0;
+    wcsncpy(g_exe_dir, tmp, MAX_PATH - 1);
+    g_exe_dir[MAX_PATH - 1] = 0;
 }
 
 
@@ -112,9 +125,7 @@ static UINT parse_vk(const wchar_t* key) {
     }
 
     if (key[1] == L'\0') {
-        wchar_t c = (wchar_t)towupper(key[0]);
-        if ((c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9')) return (UINT)c;
-        return 0;
+        return (UINT)towupper(key[0]);
     }
 
     if (_wcsicmp(key, L"NumPad0") == 0) return VK_NUMPAD0;
@@ -136,87 +147,46 @@ static UINT parse_vk(const wchar_t* key) {
     return 0;
 }
 
-
-
-// guards against empty tokens ("Ctrl+", "++") so p + len - 1 never
-// points before the buffer
-// ignores empty tokens instead of passing them to parse_vk
-
 static BOOL parse_hotkey(const wchar_t* str, UINT* mod, UINT* vk) {
     *mod = 0; *vk = 0;
     if (!str || !*str) return FALSE;
-
-    wchar_t buf[512];
-    wcsncpy(buf, str, 511); buf[511] = 0;
+    
+    wchar_t buf[256];
+    wcsncpy(buf, str, 255); buf[255] = 0;
     wchar_t* p = buf;
     wchar_t* token;
-
+    
     while (1) {
         token = wcschr(p, L'+');
         if (token) *token = L'\0';
-
-        while (*p == L' ') p++;
         
-        /* skip empty tokens */
-        if (*p) {
-            wchar_t* end = p + wcslen(p) - 1;
-            /* safe: *p != 0 */
-            while (end > p && *end == L' ') { *end = L'\0'; end--; }
-
-            if (_wcsicmp(p, L"Ctrl") == 0) *mod |= MOD_CONTROL;
-            else if (_wcsicmp(p, L"Shift") == 0) *mod |= MOD_SHIFT;
-            else if (_wcsicmp(p, L"Alt") == 0) *mod |= MOD_ALT;
-            else if (_wcsicmp(p, L"Win") == 0) *mod |= MOD_WIN;
-            else *vk = parse_vk(p);
-        }
-
+        while (*p == L' ') p++;
+        wchar_t* end = p + wcslen(p) - 1;
+        while (end > p && *end == L' ') { *end = L'\0'; end--; }
+        
+        if (_wcsicmp(p, L"Ctrl") == 0) *mod |= MOD_CONTROL;
+        else if (_wcsicmp(p, L"Shift") == 0) *mod |= MOD_SHIFT;
+        else if (_wcsicmp(p, L"Alt") == 0) *mod |= MOD_ALT;
+        else if (_wcsicmp(p, L"Win") == 0) *mod |= MOD_WIN;
+        else *vk = parse_vk(p);
+        
         if (!token) break;
         p = token + 1;
     }
     return (*vk != 0);
 }
 
-// always null-terminating wide snprintf.
-// _snwprintf does NOT terminate when the output is truncated.
-
-static int wsnprintf_safe(wchar_t *buf, size_t count, const wchar_t *fmt, ...) {
-    if (!buf || count == 0) return -1;
-    va_list ap;
-    va_start(ap, fmt);
-    int r = _vsnwprintf(buf, count - 1, fmt, ap);
-    va_end(ap);
-    buf[count - 1] = L'\0';
-    // guaranteed terminator
-    return r;
-}
-
-static int write_utf16_crlf(FILE *f, const wchar_t *s) {
-    for (; *s; s++) {
-        if (*s == L'\n') {
-            const wchar_t cr = L'\r';
-            if (fwrite(&cr, sizeof cr, 1, f) != 1) return 0;
-        }
-        if (fwrite(s, sizeof *s, 1, f) != 1) return 0;
-    }
-    return 1;
-}
-
-// Write the full default template. 
-// This guarantees that any new keys or comments added in newer versions are present in the file.
-// Use binary write to explicitly control the encoding
-// Write UTF-16 LE Byte Order Mark (BOM)
-// Write the configuration in UTF-16 LE
 static void ensure_default_ini(void) {
     wchar_t ini_path[MAX_PATH];
-    wsnprintf_safe(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-
+    _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    
     BOOL file_exists = (GetFileAttributesW(ini_path) != INVALID_FILE_ATTRIBUTES);
-// 1. Read existing values if the file exists, using a marker to detect missing keys.
-// We check [Capture], [Settings], and [General] to support seamless migration from older versions.
-
+    
+    // 1. Read existing values if the file exists, using a marker to detect missing keys.
+    // We check [Capture], [Settings], and [General] to support seamless migration from older versions.
     const wchar_t *marker = L"__JXLSHOT_KEY_NOT_FOUND__";
     wchar_t buf[512];
-
+    
     wchar_t val_debug[64] = L"";
     wchar_t val_lossless[64] = L"";
     wchar_t val_distance[64] = L"";
@@ -224,10 +194,14 @@ static void ensure_default_ini(void) {
     wchar_t val_hotkey_full[128] = L"";
     wchar_t val_hotkey_region[128] = L"";
     wchar_t val_blank_check[64] = L"";
-
-    BOOL has_debug = FALSE, has_lossless = FALSE, has_distance = FALSE;
-    BOOL has_export_path = FALSE, has_hotkey_full = FALSE;
-    BOOL has_hotkey_region = FALSE, has_blank_check = FALSE;
+    
+    BOOL has_debug = FALSE;
+    BOOL has_lossless = FALSE;
+    BOOL has_distance = FALSE;
+    BOOL has_export_path = FALSE;
+    BOOL has_hotkey_full = FALSE;
+    BOOL has_hotkey_region = FALSE;
+    BOOL has_blank_check = FALSE;
 
     if (file_exists) {
         #define CHECK_KEY(key, val_buf, size, has_flag) \
@@ -248,82 +222,70 @@ static void ensure_default_ini(void) {
         CHECK_KEY(L"HotkeyFull", val_hotkey_full, 128, has_hotkey_full);
         CHECK_KEY(L"HotkeyRegion", val_hotkey_region, 128, has_hotkey_region);
         CHECK_KEY(L"BlankCheckMode", val_blank_check, 64, has_blank_check);
-
+        
         #undef CHECK_KEY
     }
-
-    // Rewrite only when keys are missing
-    BOOL need_rewrite = FALSE;
-    if (file_exists) {
-        if (!has_debug || !has_lossless || !has_distance || !has_export_path || 
-            !has_hotkey_full || !has_hotkey_region || !has_blank_check) {
-            need_rewrite = TRUE;
-        }
+    
+    // 2. Write the full default template. 
+    // This guarantees that any new keys or comments added in newer versions are present in the file.
+    FILE *f = _wfopen(ini_path, L"wb");
+    if (f) {
+        // Use binary write to explicitly control the encoding
+        
+        // 1. Write UTF-16 LE Byte Order Mark (BOM)
+        unsigned short bom = 0xFEFF;
+        fwrite(&bom, sizeof(bom), 1, f);
+        
+        // 2. Write the configuration in UTF-16 LE
+        const wchar_t *default_ini = 
+            L"; ==============================================================================\n"
+            L"; JXLShot Configuration File\n"
+            L"; ==============================================================================\n"
+            L";\n"
+            L"; [Quality & Compression Guide]\n"
+            L";   Distance       : Controls the quality vs. file size trade-off.\n"
+            L";                    0.0 = True lossless (exact pixel match, larger file).\n"
+            L";                    1.0 = Visually lossless (recommended for screenshots).\n"
+            L";                    2.0+ = Higher compression, slight quality reduction.\n"
+            L";   Lossless       : If set to 1, strictly forces true lossless (overrides Distance).\n"
+            L";                    If set to 0, the encoder uses the 'Distance' value above.\n"
+            L";\n"
+            L"; [General Settings]\n"
+            L";   Debug          : 1 = Enable debug logging; 0 = Disable.\n"
+            L";   ExportPath     : Custom directory for saving screenshots.\n"
+            L";                    Leave blank to use the default Windows Pictures folder.\n"
+            L";   HotkeyFull     : Keyboard shortcut to capture the entire screen.\n"
+            L";   HotkeyRegion   : Keyboard shortcut to capture a specific region.\n"
+            L";   BlankCheckMode : 0 = Disabled, 1 = Basic, 2 = Advanced, 3 = HARDCORE.\n"
+            L";\n"
+            L"; ==============================================================================\n"
+            L"\n"
+            L"[Capture]\n"
+            L"Debug=0\n"
+            L"Lossless=0\n"
+            L"Distance=1.0\n"
+            L"ExportPath=\n"
+            L"HotkeyFull=PrintScreen\n"
+            L"HotkeyRegion=Ctrl+PrintScreen\n"
+            L"BlankCheckMode=2\n";
+        
+        fputws(default_ini, f);
+        fclose(f);
     } else {
-        need_rewrite = TRUE;
+        return; // Failed to create file
     }
-
-    if (!need_rewrite) return;
-
-    const wchar_t *default_ini =
-        L"; ==============================================================================\n"
-        L"; JXLShot Configuration File\n"
-        L"; ==============================================================================\n"
-        L";\n"
-        L"; [Quality & Compression Guide]\n"
-        L";   Distance       : Controls the quality vs. file size trade-off.\n"
-        L";                    0.0 = True lossless (exact pixel match, larger file).\n"
-        L";                    1.0 = Visually lossless (recommended for screenshots).\n"
-        L";                    2.0+ = Higher compression, slight quality reduction.\n"
-        L";   Lossless       : If set to 1, strictly forces true lossless (overrides Distance).\n"
-        L";                    If set to 0, the encoder uses the 'Distance' value above.\n"
-        L";\n"
-        L"; [Settings]\n"
-        L";   Debug          : 1 = Enable debug logging; 0 = Disable.\n"
-        L";   ExportPath     : Custom directory for saving screenshots.\n"
-        L";                    Leave blank to use the default Windows Pictures folder.\n"
-        L";   HotkeyFull     : Keyboard shortcut to capture the entire screen.\n"
-        L";   HotkeyRegion   : Keyboard shortcut to capture a specific region.\n"
-        L";   BlankCheckMode : 0 = Disabled, 1 = Basic, 2 = Advanced, 3 = HARDCORE.\n"
-        L";\n"
-        L"; ==============================================================================\n"
-        L"\n"
-        L"[Capture]\n"
-        L"Debug=0\n"
-        L"Lossless=1\n"
-        L"Distance=1.0\n"
-        L"ExportPath=\n"
-        L"HotkeyFull=PrintScreen\n"
-        L"HotkeyRegion=Ctrl+PrintScreen\n"
-        L"BlankCheckMode=2\n"
-        L"\n";
-        L"To Avoid any buffer-overflow here make sure you know what are you doing\n";
-
-    wchar_t temp_path[MAX_PATH];
-    wsnprintf_safe(temp_path, MAX_PATH, L"%s\\jxlshot.ini.tmp", g_exe_dir);
-
-    FILE *f = _wfopen(temp_path, L"wb");
-    if (!f) return;  // Failed to create file
-
-    const unsigned short bom = 0xFEFF;            /* UTF-16 LE BOM */
-    int ok = (fwrite(&bom, sizeof bom, 1, f) == 1) &&
-             write_utf16_crlf(f, default_ini);
-    if (fclose(f) != 0) ok = 0;
-    if (!ok) return;
-
-// Restore the user's custom values (only if they existed previously).
-// WritePrivateProfileStringW will cleanly find and replace the default values with the user's custom ones.
+    
+    // 3. Restore the user's custom values (only if they existed previously).
+    // WritePrivateProfileStringW will cleanly find and replace the default values with the user's custom ones.
     if (file_exists) {
-        if (has_debug)         WritePrivateProfileStringW(L"Capture", L"Debug", val_debug, temp_path);
-        if (has_lossless)      WritePrivateProfileStringW(L"Capture", L"Lossless", val_lossless, temp_path);
-        if (has_distance)      WritePrivateProfileStringW(L"Capture", L"Distance", val_distance, temp_path);
-        if (has_export_path)   WritePrivateProfileStringW(L"Capture", L"ExportPath", val_export_path, temp_path);
-        if (has_hotkey_full)   WritePrivateProfileStringW(L"Capture", L"HotkeyFull", val_hotkey_full, temp_path);
-        if (has_hotkey_region) WritePrivateProfileStringW(L"Capture", L"HotkeyRegion", val_hotkey_region, temp_path);
-        if (has_blank_check)   WritePrivateProfileStringW(L"Capture", L"BlankCheckMode", val_blank_check, temp_path);
+        if (has_debug) WritePrivateProfileStringW(L"Capture", L"Debug", val_debug, ini_path);
+        if (has_lossless) WritePrivateProfileStringW(L"Capture", L"Lossless", val_lossless, ini_path);
+        if (has_distance) WritePrivateProfileStringW(L"Capture", L"Distance", val_distance, ini_path);
+        if (has_export_path) WritePrivateProfileStringW(L"Capture", L"ExportPath", val_export_path, ini_path);
+        if (has_hotkey_full) WritePrivateProfileStringW(L"Capture", L"HotkeyFull", val_hotkey_full, ini_path);
+        if (has_hotkey_region) WritePrivateProfileStringW(L"Capture", L"HotkeyRegion", val_hotkey_region, ini_path);
+        if (has_blank_check) WritePrivateProfileStringW(L"Capture", L"BlankCheckMode", val_blank_check, ini_path);
     }
-
-    MoveFileExW(temp_path, ini_path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED);
 }
 
 
@@ -345,13 +307,8 @@ static float get_cfg_float(LPCWSTR key, float default_val, LPCWSTR ini_path) {
     if (GetPrivateProfileStringW(L"Capture", key, L"", buf, 64, ini_path) > 0) {
         // Safely parse float using C locale to prevent comma/dot decimal issues in different regions
         _locale_t c_locale = _create_locale(LC_NUMERIC, "C");
-        float val = 0.0f;
-        if (c_locale) {
-            val = (float)_wcstod_l(buf, NULL, c_locale);
-            _free_locale(c_locale);
-        } else {
-            val = (float)_wtof(buf); // Fallback if locale creation fails
-        }
+        float val = (float)_wcstod_l(buf, NULL, c_locale);
+        _free_locale(c_locale);
         return val;
     }
     return default_val;
@@ -365,32 +322,25 @@ static void get_cfg_string(LPCWSTR key, LPCWSTR default_val, LPWSTR out_buf, DWO
     wcsncpy_s(out_buf, buf_size, default_val, _TRUNCATE);
 }
 
-static float clamp_distance(float d) {
-    if (!(d >= 0.0f)) d = 1.0f; // handles NaN and < 0
-    else if (d > 25.0f) d = 25.0f;
-    return d;
-}
-
 static void init_config(void) {
     wchar_t ini_path[MAX_PATH];
-    wsnprintf_safe(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
 
-// Flush Windows' cached copy of the INI file.
-// Flush Windows' cached copy so external edits are re-read.
-// Force Windows to drop its cached copy of this INI and re-read from disk.
-// Without this, GetPrivateProfileString* can keep serving a stale in-memory
-// snapshot after the file is edited externally, which is why "Reload
-// Configuration" will do nothing until the app was fully restarted.
+    // Force Windows to drop its cached copy of this INI and re-read from disk.
+    // Without this, GetPrivateProfileString* can keep serving a stale in-memory
+    // snapshot after the file is edited externally, which is why "Reload
+    // Configuration" will do nothing until the app was fully restarted.
     WritePrivateProfileStringW(NULL, NULL, NULL, ini_path);
-    
+
     // Set absolute defaults first
     g_cfg.debug_enabled = 1;
-    g_cfg.lossless = 1;
-    g_cfg.distance = 1.0f;
+    g_cfg.lossless = 1; 
+    g_cfg.distance = 1.0f; 
+    //g_cfg.show_cursor = 1;
     g_cfg.blank_check_mode = 2;
-    g_cfg.hk_full_mod = 0;
+    g_cfg.hk_full_mod = 0; 
     g_cfg.hk_full_vk = VK_SNAPSHOT;
-    g_cfg.hk_region_mod = MOD_CONTROL;
+    g_cfg.hk_region_mod = MOD_CONTROL; 
     g_cfg.hk_region_vk = VK_SNAPSHOT;
     
     // Use Known Folders API to correctly resolve localized folder names
@@ -399,23 +349,23 @@ static void init_config(void) {
         wcsncpy_s(g_cfg.export_path, MAX_PATH, pszPicturesPath, _TRUNCATE);
         CoTaskMemFree(pszPicturesPath); // Free the memory allocated by the API
     } else {
-// Intentionally DO NOT append "\Pictures" here to avoid creating mismatched language folders.
-// Absolute last-resort fallback: Just use the User Profile root directory.
-        DWORD ret = GetEnvironmentVariableW(L"USERPROFILE", g_cfg.export_path, MAX_PATH);
-        if (ret == 0 || ret >= MAX_PATH) {
-            wcscpy(g_cfg.export_path, L".");
-        }
+        // Absolute last-resort fallback: Just use the User Profile root directory.
+        // Intentionally DO NOT append "\Pictures" here to avoid creating mismatched language folders.
+        GetEnvironmentVariableW(L"USERPROFILE", g_cfg.export_path, MAX_PATH);
     }
-    
+
     // Use robust fallback getters instead of direct GetPrivateProfile* calls
     g_cfg.debug_enabled = get_cfg_int(L"Debug", 1, ini_path);
     g_cfg.lossless = get_cfg_int(L"Lossless", 1, ini_path);
+    //g_cfg.show_cursor = get_cfg_int(L"ShowCursor", 1, ini_path);
     g_cfg.blank_check_mode = get_cfg_int(L"BlankCheckMode", 2, ini_path);
-
+    
     if (g_cfg.blank_check_mode < 0) g_cfg.blank_check_mode = 0;
     if (g_cfg.blank_check_mode > 3) g_cfg.blank_check_mode = 3;
 
-    g_cfg.distance = clamp_distance(get_cfg_float(L"Distance", 1.0f, ini_path));
+    g_cfg.distance = get_cfg_float(L"Distance", 1.0f, ini_path);
+    if (g_cfg.distance < 0.0f) g_cfg.distance = 0.0f;
+    if (g_cfg.distance > 25.0f) g_cfg.distance = 25.0f;
 
     wchar_t path_buf[MAX_PATH];
     get_cfg_string(L"ExportPath", L"", path_buf, MAX_PATH, ini_path);
@@ -426,54 +376,25 @@ static void init_config(void) {
     wchar_t hk_full_str[128], hk_region_str[128];
     get_cfg_string(L"HotkeyFull", L"PrintScreen", hk_full_str, 128, ini_path);
     get_cfg_string(L"HotkeyRegion", L"Ctrl+PrintScreen", hk_region_str, 128, ini_path);
-
-    UINT tmp_mod, tmp_vk;
-    if (parse_hotkey(hk_full_str, &tmp_mod, &tmp_vk)) {
-        g_cfg.hk_full_mod = tmp_mod;
-        g_cfg.hk_full_vk = tmp_vk;
-    }
-    if (parse_hotkey(hk_region_str, &tmp_mod, &tmp_vk)) {
-        g_cfg.hk_region_mod = tmp_mod;
-        g_cfg.hk_region_vk = tmp_vk;
-    }
+    
+    parse_hotkey(hk_full_str, &g_cfg.hk_full_mod, &g_cfg.hk_full_vk);
+    parse_hotkey(hk_region_str, &g_cfg.hk_region_mod, &g_cfg.hk_region_vk);
 }
 
 
 // Unified Debug logging
 
-static void w_to_utf8(const wchar_t *wstr, char *buf, size_t buf_size) {
-    if (!wstr || !buf || buf_size == 0) {
-        if (buf && buf_size > 0) buf[0] = '\0';
-        return;
-    }
-    int len = WideCharToMultiByte(CP_UTF8, 0, wstr, -1, buf, (int)buf_size, NULL, NULL);
-    if (len <= 0) buf[0] = '\0';
-}
 
 static FILE *g_dbg = NULL;
 
 static void dbg_init(void) {
     if (!g_cfg.debug_enabled) { g_dbg = NULL; return; }
     wchar_t temp_dir[MAX_PATH], log_path[MAX_PATH];
-    DWORD n = GetTempPathW(MAX_PATH, temp_dir);
-    if (n == 0 || n >= MAX_PATH) { g_dbg = NULL; return; }
-    wsnprintf_safe(log_path, MAX_PATH, L"%sjxlshot_debug.log", temp_dir);
-    
-    // Simple rotation: if file > 1MB, truncate it
-    WIN32_FILE_ATTRIBUTE_DATA fad;
-    if (GetFileAttributesExW(log_path, GetFileExInfoStandard, &fad)) {
-        LARGE_INTEGER size;
-        size.HighPart = fad.nFileSizeHigh;
-        size.LowPart = fad.nFileSizeLow;
-        if (size.QuadPart > 1024 * 1024) {
-            FILE *ft = _wfopen(log_path, L"wb");
-            if (ft) fclose(ft);
-        }
-    }
-
+    GetTempPathW(MAX_PATH, temp_dir);
+    _snwprintf(log_path, MAX_PATH, L"%sjxlshot_debug.log", temp_dir);
     g_dbg = _wfopen(log_path, L"a");
     if (!g_dbg) return;
-
+    
     SYSTEMTIME st; GetLocalTime(&st);
     fprintf(g_dbg, "\n===== jxlshot run started %04d-%02d-%02d %02d:%02d:%02d =====\n",
             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
@@ -482,7 +403,7 @@ static void dbg_init(void) {
 
 static void dbg(const char *fmt, ...) {
     if (!g_cfg.debug_enabled || !g_dbg) return;
-    char buf[4096];
+    char buf[1024];
     va_list ap;
     va_start(ap, fmt);
     _vsnprintf(buf, sizeof buf - 1, fmt, ap);
@@ -502,9 +423,7 @@ static void set_dpi_aware(void) {
     typedef BOOL (WINAPI *Fn)(HANDLE);
     Fn f = (Fn)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
     if (f) {
-        if (!f((HANDLE)(LONG_PTR)-4)) { // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
-            SetProcessDPIAware();
-        }
+        f((HANDLE)(LONG_PTR)-4); // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
     } else {
         SetProcessDPIAware();
     }
@@ -520,10 +439,7 @@ static void build_out_path(wchar_t *path, int n, int is_hdr) {
     
     size_t len = wcslen(safe_dir);
     if (len > 0 && safe_dir[len - 1] != L'\\') {
-        if (len < MAX_PATH - 1) {
-            safe_dir[len] = L'\\';
-            safe_dir[len + 1] = L'\0';
-        }
+        wcsncat(safe_dir, L"\\", MAX_PATH - len - 1);
     }
     
     // Dynamically append _hdr if the capture is HDR
@@ -554,13 +470,12 @@ typedef struct {
 // Blank-frame detection
 
 
-//  THIS FUNTION MAY BE STUPID BUT ITS BETTER TO FIX THE STUPID BLANK SCREENSHOT
+/*  THIS FUNTION MAY BE STUPID BUT ITS BETTER TO FIX THE STUPID BLANK SCREENSHOT    */
 //  ON SOME STUPID HARDWARE
 /*
  * Checks if a frame is completely blank (all black).
  * 
  * sample_mode:
- *   0 = Disabled (assume valid).
  *   1 = 16 samples (4x4 grid) - Fastest, may miss tiny non-black artifacts.
  *   2 = 256 samples (16x16 grid) - Balanced, default behavior.
  *   3 = ALL pixels (exhaustive scan) - Slowest, absolute certainty.
@@ -619,8 +534,8 @@ static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int samp
 /*
  * Classic BitBlt screen capture. Always SDR/8-bit, but far more
  * broadly compatible than DXGI Desktop Duplication — it doesn't
- * care about weak/legacy GPU drivers, and works even when Desktop 
- * Duplication silently returns black frames.
+ * depend on DWM, doesn't care about weak/legacy GPU drivers, and
+ * works even when Desktop Duplication silently returns black frames.
  * Used as a fallback when the DXGI path fails or produces a blank
  * frame after retrying.
  */
@@ -666,7 +581,6 @@ static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
     /* CAPTUREBLT pulls in layered/UI-composited windows too, not just
      * the raw framebuffer, which matters on some setups. */
     BOOL blt_ok = BitBlt(hdcMem, 0, 0, w, h, hdcScreen, x, y, SRCCOPY | CAPTUREBLT);
-    GdiFlush(); // Ensure DIB bits are up-to-date
 
     SelectObject(hdcMem, hbmOld);
     ReleaseDC(NULL, hdcScreen);
@@ -737,13 +651,12 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
     for (UINT ai = 0; !adapter; ai++) {
         IDXGIAdapter1 *cand_adapter = NULL;
         HRESULT hr = factory->lpVtbl->EnumAdapters1(factory, ai, &cand_adapter);
-        if (FAILED(hr)) break;
+        if (hr == DXGI_ERROR_NOT_FOUND) break;
         if (!cand_adapter) continue;
 
         for (UINT oi = 0; ; oi++) {
             IDXGIOutput *cand_output = NULL;
-            hr = cand_adapter->lpVtbl->EnumOutputs(cand_adapter, oi, &cand_output);
-            if (FAILED(hr)) break;
+            if (cand_adapter->lpVtbl->EnumOutputs(cand_adapter, oi, &cand_output) == DXGI_ERROR_NOT_FOUND) break;
             if (!cand_output) continue;
 
             DXGI_OUTPUT_DESC out_desc;
@@ -775,11 +688,7 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
         };
         HRESULT hr = output5->lpVtbl->DuplicateOutput1(
             output5, (IUnknown *)device, 0, 2, supported_formats, &dupl);
-        if (FAILED(hr)) { 
-            dbg("dxgi: DuplicateOutput1 FAILED hr=0x%08lX, falling back to DuplicateOutput", hr); 
-            hr = output1->lpVtbl->DuplicateOutput(output1, (IUnknown *)device, &dupl);
-            if (FAILED(hr)) { dbg("dxgi: DuplicateOutput fallback FAILED hr=0x%08lX", hr); goto cleanup; }
-        }
+        if (FAILED(hr)) { dbg("dxgi: DuplicateOutput1 FAILED hr=0x%08lX", hr); goto cleanup; }
     } else {
         HRESULT hr = output1->lpVtbl->DuplicateOutput(output1, (IUnknown *)device, &dupl);
         if (FAILED(hr)) { dbg("dxgi: DuplicateOutput FAILED hr=0x%08lX", hr); goto cleanup; }
@@ -874,8 +783,8 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             }
 
             dbg("dxgi: attempt %d frame is blank, retrying", attempt);
-            SwitchToThread(); // Yields to other threads on the same processor
-            Sleep(7);         // Short sleep to allow DWM to advance the frame
+            SwitchToThread(); // Yields remainder of time slice to the game/DWM
+            Sleep(7);         // Fallback to a short sleep to guarantee frame pacing alignment
         }
 
         if (!ok) dbg("dxgi: all attempts produced blank frames, giving up on DXGI");
@@ -904,8 +813,7 @@ cleanup:
 
 
 static int grab_primary_monitor(Grab *g) {
-    POINT pt = {0, 0};
-    HMONITOR target_monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY);
+    HMONITOR target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
 
     if (grab_via_dxgi(g, target_monitor)) {
         return 1;
@@ -921,67 +829,32 @@ static void free_grab(Grab *g) {
 }
 
 
-
 // JPEG XL encoding (Identity SDR/HDR passthrough)
-
-
-//  - uses_original_profile set for lossless (required by libjxl)
-//  - return values of SetFrameLossless / SetFrameDistance checked
-
-//  - distance <= 0 is treated as lossless
-
-
-//  DXGI HDR desktop duplication uses scRGB:
-
-//    R/G/B = linear-light sRGB
-//    1.0    = SDR white reference (80 nits)
-//    values > 1.0 represent HDR highlights
-
-//  Leave the samples untouched. libjxl accepts floating-point
-//  samples outside 0..1 and encodes them as extended linear sRGB.
-
-// Samples are linear scRGB; passed through untouched.
-
-// The captured FP16 samples are linear scRGB.
-// Use libjxl's canonical linear-sRGB setup rather than
-// manually constructing the same fields.
-
-// scRGB is a relative-luminance color space whose 1.0 level
-// corresponds to the SDR reference white. Leave intensity_target
-// at its default (0) so libjxl chooses the appropriate target
-// for linear sRGB rather than falsely declaring a fixed HDR peak.
-
-
-
 
 static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, uint8_t **out_buf, size_t *out_size) {
     int ok = 0;
     uint8_t *buf = NULL;
     JxlEncoderStatus st;
-
-    if (distance <= 0.0f) lossless = 1;
     
-    // Create a parallel runner to use all available CPU cores
-    void *runner = JxlThreadParallelRunnerCreate(
-        NULL, JxlThreadParallelRunnerDefaultNumWorkerThreads());
-
+    // 1. Create a parallel runner to use all available CPU cores (0 = auto-detect)
+    void *runner = JxlThreadParallelRunnerCreate(NULL, 0);
+    
     JxlEncoder *enc = JxlEncoderCreate(NULL);
     if (!enc) {
         if (runner) JxlThreadParallelRunnerDestroy(runner);
         return 0;
     }
-    
-    // Attach the multithreading runner to the encoder
+
+    // 2. Attach the multithreading runner to the encoder
     if (runner) {
-        if (JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner) != JXL_ENC_SUCCESS) goto done;
+        JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner);
     }
 
     JxlBasicInfo info;
     JxlEncoderInitBasicInfo(&info);
     info.xsize = w;
     info.ysize = h;
-    info.uses_original_profile = lossless ? JXL_TRUE : JXL_FALSE;
-
+    
     JxlPixelFormat fmt;
     fmt.num_channels = 3;
     fmt.endianness = JXL_NATIVE_ENDIAN;
@@ -989,50 +862,70 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
 
     if (is_hdr) {
         info.bits_per_sample = 16;
-        info.exponent_bits_per_sample = 5;   /* float16 */
+        info.exponent_bits_per_sample = 5; // Indicates float16
         fmt.data_type = JXL_TYPE_FLOAT16;
+
+        /*
+         * DXGI HDR desktop duplication uses scRGB:
+         *
+         *   R/G/B = linear-light sRGB
+         *   1.0    = SDR white reference (80 nits)
+         *   values > 1.0 represent HDR highlights
+         *
+         * Leave the samples untouched. libjxl accepts floating-point
+         * samples outside 0..1 and encodes them as extended linear sRGB.
+         */
     } else {
         info.bits_per_sample = 8;
         info.exponent_bits_per_sample = 0;
         fmt.data_type = JXL_TYPE_UINT8;
     }
-
+    
     if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) goto done;
-
+    
     JxlColorEncoding ce;
-    if (is_hdr) JxlColorEncodingSetToLinearSRGB(&ce, JXL_FALSE);
-    else        JxlColorEncodingSetToSRGB(&ce, JXL_FALSE);
+    if (is_hdr) {
+        /*
+         * The captured FP16 samples are linear scRGB.
+         * Use libjxl's canonical linear-sRGB setup rather than
+         * manually constructing the same fields.
+         */
+        JxlColorEncodingSetToLinearSRGB(&ce, JXL_FALSE);
 
+        /*
+         * scRGB is a relative-luminance color space whose 1.0 level
+         * corresponds to the SDR reference white. Leave intensity_target
+         * at its default (0) so libjxl chooses the appropriate target
+         * for linear sRGB rather than falsely declaring a fixed HDR peak.
+         */
+    } else {
+        JxlColorEncodingSetToSRGB(&ce, JXL_FALSE);
+    }
+    
     if (JxlEncoderSetColorEncoding(enc, &ce) != JXL_ENC_SUCCESS) goto done;
 
     JxlEncoderFrameSettings *fs = JxlEncoderFrameSettingsCreate(enc, NULL);
     if (!fs) goto done;
 
     if (lossless) {
-        if (JxlEncoderSetFrameLossless(fs, JXL_TRUE) != JXL_ENC_SUCCESS) {
-            dbg("encode: SetFrameLossless FAILED");
-            goto done;
-        }
+        JxlEncoderSetFrameLossless(fs, JXL_TRUE);
     } else {
-        if (JxlEncoderSetFrameDistance(fs, distance) != JXL_ENC_SUCCESS) {
-            dbg("encode: SetFrameDistance FAILED");
-            goto done;
-        }
+        JxlEncoderSetFrameDistance(fs, distance);
     }
-    if (JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, 7) != JXL_ENC_SUCCESS) goto done;
+    JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, 7);
 
     size_t npix = (size_t)w * h;
     size_t bytes_per_pixel = is_hdr ? 6 : 3;
-
+    
     if (JxlEncoderAddImageFrame(fs, &fmt, rgb, npix * bytes_per_pixel) != JXL_ENC_SUCCESS) goto done;
-
+    
     JxlEncoderCloseInput(enc);
-
+    
     size_t cap = (size_t)w * h * (is_hdr ? 8 : 4);
     if (cap < (4 << 20)) cap = (4 << 20);
     buf = (uint8_t *)malloc(cap);
     if (!buf) goto done;
-
+    
     uint8_t *next = buf;
     size_t avail = cap;
     for (;;) {
@@ -1040,7 +933,6 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
         if (st == JXL_ENC_SUCCESS) break;
         if (st == JXL_ENC_NEED_MORE_OUTPUT) {
             size_t used = (size_t)(next - buf);
-            if (cap > SIZE_MAX / 2) { free(buf); buf = NULL; goto done; }
             cap *= 2;
             uint8_t *nb = (uint8_t *)realloc(buf, cap);
             if (!nb) { free(buf); buf = NULL; goto done; }
@@ -1059,153 +951,127 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
 done:
     free(buf);
     JxlEncoderDestroy(enc);
-// 3. Clean up the parallel runner
+    
+    // 3. Clean up the parallel runner
     if (runner) JxlThreadParallelRunnerDestroy(runner);
+    
     return ok;
 }
 
-// message buffers are large enough and always terminated
-// fallback_path terminated
 static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path) {
-    uint8_t *buf = NULL;
+    uint8_t *buf = NULL; 
     size_t size = 0;
-
+    
     if (!encode_jxl_identity(rgb, w, h, is_hdr, lossless, distance, &buf, &size)) {
         dbg("save_rgb_as_jxl: encode_jxl_identity failed");
         return 0;
     }
+    
+    // Safeguard: If the encoder somehow produced 0 bytes, treat it as a failure.
     if (size == 0) {
-// Safeguard: If the encoder somehow produced 0 bytes, treat it as a failure.
         dbg("save_rgb_as_jxl: Encoder produced 0 bytes. Aborting write.");
         free(buf);
         return 0;
     }
 
-    // Ensure the export directory exists
-    wchar_t dir_only[MAX_PATH];
-    wcsncpy(dir_only, path, MAX_PATH);
-    dir_only[MAX_PATH - 1] = L'\0';
-    wchar_t *last_slash = wcsrchr(dir_only, L'\\');
-    if (last_slash) {
-        *last_slash = L'\0';
-        CreateDirectoryW(dir_only, NULL);
-    }
-
-    int ok = 0;
+    int ok = 0; 
     FILE *f = _wfopen(path, L"wb");
     if (f) {
         size_t written = fwrite(buf, 1, size, f);
-        int io_err = 0;
         if (written != size) {
-            dbg("save_rgb_as_jxl: fwrite failed (written %Iu of %Iu). ferror: %d, GetLastError: %lu",
-                (unsigned long long)written, (unsigned long long)size, ferror(f), GetLastError());
-            io_err = 1;
+            dbg("save_rgb_as_jxl: fwrite failed (written %zu of %zu). ferror: %d, GetLastError: %lu", 
+                written, size, ferror(f), GetLastError());
+            ok = 0;
         } else if (fflush(f) != 0) {
             // Crucial: Catch disk-full or I/O errors that happen during buffer flush
             dbg("save_rgb_as_jxl: fflush failed (potential disk full or I/O error). ferror: %d, GetLastError: %lu", 
                 ferror(f), GetLastError());
-            io_err = 1;
-        }
-        
-        if (fclose(f) != 0) io_err = 1;
-        
-        if (io_err) {
-            DeleteFileW(path);
+            ok = 0;
         } else {
             ok = 1; // Write and flush succeeded
         }
+        fclose(f);
     } else {
         DWORD err = GetLastError();
         const wchar_t *err_desc = L"Unknown error";
         if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) err_desc = L"Path not found";
         else if (err == ERROR_ACCESS_DENIED) err_desc = L"Access denied";
         else if (err == ERROR_DISK_FULL) err_desc = L"Disk full";
-        
-        char path_utf8[MAX_PATH * 4];
-        char err_desc_utf8[128];
-        w_to_utf8(path, path_utf8, sizeof(path_utf8));
-        w_to_utf8(err_desc, err_desc_utf8, sizeof(err_desc_utf8));
-        dbg("save_rgb_as_jxl: _wfopen FAILED for path '%s'. Error code: %lu (%s)", path_utf8, err, err_desc_utf8);
+        dbg("save_rgb_as_jxl: _wfopen FAILED for path '%ls'. Error code: %lu (%ls)", path, err, err_desc);
     }
-
+    
     if (!ok) {
         // Fallback logic: try saving to the user's localized Pictures folder
         dbg("save_rgb_as_jxl: Primary save failed. Attempting fallback to User Pictures folder.");
-
+        
         wchar_t fallback_path[MAX_PATH];
         wchar_t fallback_dir[MAX_PATH];
-
+        
         // Use Known Folders API to guarantee the correct localized folder name
         PWSTR pszPicturesPath = NULL;
         if (SUCCEEDED(SHGetKnownFolderPath(&FOLDERID_Pictures, 0, NULL, &pszPicturesPath))) {
             wcsncpy_s(fallback_dir, MAX_PATH, pszPicturesPath, _TRUNCATE);
-            CoTaskMemFree(pszPicturesPath);// Free the memory allocated by the API
+            CoTaskMemFree(pszPicturesPath); // Free the memory allocated by the API
         } else {
             // Absolute last-resort fallback: Just use the User Profile root directory.
-            fallback_dir[0] = L'\0';
-            DWORD ret = GetEnvironmentVariableW(L"USERPROFILE", fallback_dir, MAX_PATH);
-            if (ret == 0 || ret >= MAX_PATH) wcscpy(fallback_dir, L".");
+            GetEnvironmentVariableW(L"USERPROFILE", fallback_dir, MAX_PATH);
         }
-
+        
         size_t len = wcslen(fallback_dir);
         if (len > 0 && fallback_dir[len - 1] != L'\\') {
             wcsncat_s(fallback_dir, MAX_PATH, L"\\", _TRUNCATE);
         }
-
+        
         const wchar_t *filename = wcsrchr(path, L'\\');
         filename = filename ? filename + 1 : path;
-
-        wsnprintf_safe(fallback_path, MAX_PATH, L"%s%s", fallback_dir, filename);
-
-        char fallback_utf8[MAX_PATH * 4];
-        w_to_utf8(fallback_path, fallback_utf8, sizeof(fallback_utf8));
-        dbg("save_rgb_as_jxl: Retrying save to fallback path: %s", fallback_utf8);
-
+        
+        _snwprintf(fallback_path, MAX_PATH, L"%s%s", fallback_dir, filename);
+        fallback_path[MAX_PATH - 1] = L'\0';
+        
+        dbg("save_rgb_as_jxl: Retrying save to fallback path: %ls", fallback_path);
+        
         FILE *f_fallback = _wfopen(fallback_path, L"wb");
         if (f_fallback) {
             size_t written_fb = fwrite(buf, 1, size, f_fallback);
-            int io_err_fb = 0;
             if (written_fb != size) {
                 dbg("save_rgb_as_jxl: fallback fwrite failed. ferror: %d", ferror(f_fallback));
-                io_err_fb = 1;
+                ok = 0;
             } else if (fflush(f_fallback) != 0) {
                 dbg("save_rgb_as_jxl: fallback fflush failed. ferror: %d", ferror(f_fallback));
-                io_err_fb = 1;
-            }
-            
-            if (fclose(f_fallback) != 0) io_err_fb = 1;
-            
-            if (io_err_fb) {
-                DeleteFileW(fallback_path);
+                ok = 0;
             } else {
                 ok = 1; // Fallback succeeded
             }
+            fclose(f_fallback);
         } else {
             dbg("save_rgb_as_jxl: fallback _wfopen FAILED. GetLastError: %lu", GetLastError());
         }
+        
         // User Notifications
-        wchar_t msg[1200];
         if (!ok) {
-            wsnprintf_safe(msg, 1200,
+            wchar_t err_msg[512];
+            _snwprintf(err_msg, 512, 
                 L"Failed to save screenshot to:\n%s\n\nFallback to Pictures folder:\n%s\nalso failed.\n\n"
-                L"Please check disk space and permissions.",
+                L"Please check disk space and permissions.", 
                 path, fallback_path);
-            MessageBoxW(NULL, msg, L"jxlshot Save Error", MB_ICONERROR | MB_OK | MB_SYSTEMMODAL);
+            MessageBoxW(NULL, err_msg, L"jxlshot Save Error", MB_ICONERROR | MB_OK | MB_SYSTEMMODAL);
         } else {
-            wsnprintf_safe(msg, 1200,
+            wchar_t success_msg[512];
+            _snwprintf(success_msg, 512, 
                 L"Failed to save to configured export path.\n\n"
-                L"Screenshot was successfully saved to fallback location:\n%s",
+                L"Screenshot was successfully saved to fallback location:\n%s", 
                 fallback_path);
-            MessageBoxW(NULL, msg, L"jxlshot Fallback Save", MB_ICONWARNING | MB_OK | MB_SYSTEMMODAL);
+            MessageBoxW(NULL, success_msg, L"jxlshot Fallback Save", MB_ICONWARNING | MB_OK | MB_SYSTEMMODAL);
         }
     }
-
-    free(buf);
+    
+    free(buf); 
     return ok;
 }
 
 
 // Asynchronous Encoding Worker
+
 
 typedef struct {
     uint8_t *bits;
@@ -1215,7 +1081,6 @@ typedef struct {
 } EncodeTask;
 
 static DWORD WINAPI EncodeWorker(LPVOID param) {
-    // Lower priority to reduce impact on foreground applications
     // Tell Windows this is a background task so it yields to the games/OS
     // This help to avoid hammering perfomance
     // and then user may experience some sort of lagging
@@ -1224,12 +1089,12 @@ static DWORD WINAPI EncodeWorker(LPVOID param) {
     EncodeTask *task = (EncodeTask *)param;
     
     // Perform the heavy encoding and file I/O in the background
-    int ok = save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path);
+    save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path);
     
     // Clean up memory allocated for this specific task
     free(task->bits);
     free(task);
-    return ok ? 0 : 1;
+    return 0;
 }
 
 
@@ -1241,33 +1106,18 @@ int main(int argc, char **argv);
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) { return main(__argc, __argv); }
 
 int main(int argc, char **argv) {
-    // Initialize COM for shell APIs (Known Folders)
     // Initialize COM for DXGI/D3D11 stability
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
 
-    DWORD wait_ms = 0; 
-    int cli_lossless = -1; 
-    float cli_distance = -1.0f; 
-    int cli_distance_set = 0;
-    
+    DWORD wait_ms = 0; int cli_lossless = -1; float cli_distance = -1.0f;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-q")) cli_lossless = 0;
-        else if (!strcmp(argv[i], "-d") && i + 1 < argc) { 
-            cli_distance = (float)strtod(argv[++i], NULL); 
-            cli_lossless = 0; 
-            cli_distance_set = 1;
-        }
-        else if (!strcmp(argv[i], "-w") && i + 1 < argc) { 
-            long w = strtol(argv[++i], NULL, 10);
-            if (w < 0) w = 0;
-            if (w > 3600000) w = 3600000; // Clamp to 1 hour max
-            wait_ms = (DWORD)w; 
-        }
+        else if (!strcmp(argv[i], "-d") && i + 1 < argc) { cli_distance = (float)strtod(argv[++i], NULL); cli_lossless = 0; }
+        else if (!strcmp(argv[i], "-w") && i + 1 < argc) { wait_ms = (DWORD)strtol(argv[++i], NULL, 10); }
     }
     set_dpi_aware(); init_paths(); ensure_default_ini(); init_config();
     if (cli_lossless != -1) g_cfg.lossless = cli_lossless;
-    if (cli_distance_set) g_cfg.distance = clamp_distance(cli_distance);
-    
+    if (cli_distance >= 0.0f) g_cfg.distance = cli_distance;
     dbg_init();
     if (wait_ms) Sleep(wait_ms);
 
@@ -1302,14 +1152,12 @@ int main(int argc, char **argv) {
         if (hThread) {
             g.bits = NULL; // Prevent free_grab from freeing the buffer (thread owns it now)
             dbg("main: encoding offloaded to background thread");
+            
             // CRITICAL: Wait for the thread to finish. 
             // Returning from main() calls ExitProcess()
             // which instantly 
             // kills all background threads, aborting the save.
             WaitForSingleObject(hThread, INFINITE);
-            DWORD exit_code = 0;
-            GetExitCodeThread(hThread, &exit_code);
-            rc = (int)exit_code;
             CloseHandle(hThread);
             dbg("main: background thread completed");
         } else {
