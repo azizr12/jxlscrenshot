@@ -55,7 +55,7 @@ static void ensure_default_ini(void);
 static void init_config(void);
 static void dbg_init(void);
 static void build_out_path(wchar_t *path, int n, int is_hdr);
-static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path);
+static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, int orientation, const wchar_t *path);
 
 
 // Configuration (INI)
