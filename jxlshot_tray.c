@@ -809,9 +809,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     wc.hInstance = hInst; 
     wc.lpszClassName = L"JxlShotTrayClass"; 
     RegisterClassExW(&wc);
-    
+
     g_hwndTray = CreateWindowExW(0, L"JxlShotTrayClass", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInst, NULL);
-    
+
     // Create a hidden popup window specifically to own the context menu
     g_hwndMenuOwner = CreateWindowExW(
         WS_EX_TOOLWINDOW,
@@ -823,14 +823,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     );
     ShowWindow(g_hwndMenuOwner, SW_HIDE);
     ApplyDarkMode(g_hwndMenuOwner);
-    
+
     ZeroMemory(&g_nid, sizeof(g_nid));
     g_nid.cbSize = sizeof(g_nid); 
     g_nid.hWnd = g_hwndTray; 
     g_nid.uID = ID_TRAY;
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; 
     g_nid.uCallbackMessage = WM_TRAYICON;
-    
+
     g_nid.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON)); 
     wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
     Shell_NotifyIconW(NIM_ADD, &g_nid);
@@ -842,9 +842,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
         TranslateMessage(&msg); 
         DispatchMessage(&msg); 
     }
-    
+
     uninstall_keyboard_hook();
-    
+
     // Clean up uxtheme before exiting
     if (g_hUxtheme) {
         FreeLibrary(g_hUxtheme);
@@ -853,6 +853,6 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
 
     // Clean up COM before exiting
     CoUninitialize();
-    
+
     return (int)msg.wParam;
 }
