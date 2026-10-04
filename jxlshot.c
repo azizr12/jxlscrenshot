@@ -259,22 +259,17 @@ static void init_config(void) {
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
 
     // Force Windows to drop its cached copy of this INI and re-read from disk.
-    // Without this, GetPrivateProfileString* can keep serving a stale in-memory
-    // snapshot after the file is edited externally, which is why "Reload
-    // Configuration" will do nothing until the app was fully restarted.
     WritePrivateProfileStringW(NULL, NULL, NULL, ini_path);
 
     // Set absolute defaults first
     g_cfg.debug_enabled = 1;
     g_cfg.lossless = 1; 
     g_cfg.distance = 1.0f; 
-    //g_cfg.show_cursor = 1;
     g_cfg.blank_check_mode = 2;
-
-    g_cfg.hk_full_vk = get_cfg_int(L"HotkeyFullVK", VK_SNAPSHOT, ini_path);
-    g_cfg.hk_full_mod = get_cfg_int(L"HotkeyFullMod", 0, ini_path);
-    g_cfg.hk_region_vk = get_cfg_int(L"HotkeyRegionVK", VK_SNAPSHOT, ini_path);
-    g_cfg.hk_region_mod = get_cfg_int(L"HotkeyRegionMod", MOD_CONTROL, ini_path);
+    g_cfg.hk_full_mod = 0; 
+    g_cfg.hk_full_vk = VK_SNAPSHOT;
+    g_cfg.hk_region_mod = MOD_CONTROL; 
+    g_cfg.hk_region_vk = VK_SNAPSHOT;
     
     // Use Known Folders API to correctly resolve localized folder names
     PWSTR pszPicturesPath = NULL;
@@ -283,14 +278,12 @@ static void init_config(void) {
         CoTaskMemFree(pszPicturesPath); // Free the memory allocated by the API
     } else {
         // Absolute last-resort fallback: Just use the User Profile root directory.
-        // Intentionally DO NOT append "\Pictures" here to avoid creating mismatched language folders.
         GetEnvironmentVariableW(L"USERPROFILE", g_cfg.export_path, MAX_PATH);
     }
 
     // Use robust fallback getters instead of direct GetPrivateProfile* calls
     g_cfg.debug_enabled = get_cfg_int(L"Debug", 1, ini_path);
     g_cfg.lossless = get_cfg_int(L"Lossless", 1, ini_path);
-    //g_cfg.show_cursor = get_cfg_int(L"ShowCursor", 1, ini_path);
     g_cfg.blank_check_mode = get_cfg_int(L"BlankCheckMode", 2, ini_path);
     
     if (g_cfg.blank_check_mode < 0) g_cfg.blank_check_mode = 0;
@@ -306,12 +299,11 @@ static void init_config(void) {
         wcsncpy_s(g_cfg.export_path, MAX_PATH, path_buf, _TRUNCATE);
     }
 
-    wchar_t hk_full_str[128], hk_region_str[128];
-    get_cfg_string(L"HotkeyFull", L"PrintScreen", hk_full_str, 128, ini_path);
-    get_cfg_string(L"HotkeyRegion", L"Ctrl+PrintScreen", hk_region_str, 128, ini_path);
-    
-    parse_hotkey(hk_full_str, &g_cfg.hk_full_mod, &g_cfg.hk_full_vk);
-    parse_hotkey(hk_region_str, &g_cfg.hk_region_mod, &g_cfg.hk_region_vk);
+    // Read integer-based hotkey config directly instead of parsing strings
+    g_cfg.hk_full_vk = get_cfg_int(L"HotkeyFullVK", VK_SNAPSHOT, ini_path);
+    g_cfg.hk_full_mod = get_cfg_int(L"HotkeyFullMod", 0, ini_path);
+    g_cfg.hk_region_vk = get_cfg_int(L"HotkeyRegionVK", VK_SNAPSHOT, ini_path);
+    g_cfg.hk_region_mod = get_cfg_int(L"HotkeyRegionMod", MOD_CONTROL, ini_path);
 }
 
 
