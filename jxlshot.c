@@ -101,7 +101,6 @@ static void ensure_default_ini(void) {
     BOOL file_exists = (GetFileAttributesW(ini_path) != INVALID_FILE_ATTRIBUTES);
     
     // 1. Read existing values if the file exists, using a marker to detect missing keys.
-    // We check [Capture], [Settings], and [General] to support seamless migration from older versions.
     const wchar_t *marker = L"__JXLSHOT_KEY_NOT_FOUND__";
     wchar_t buf[512];
     
@@ -109,17 +108,24 @@ static void ensure_default_ini(void) {
     wchar_t val_lossless[64] = L"";
     wchar_t val_distance[64] = L"";
     wchar_t val_export_path[MAX_PATH] = L"";
-    wchar_t val_hotkey_full[128] = L"";
-    wchar_t val_hotkey_region[128] = L"";
     wchar_t val_blank_check[64] = L"";
+    
+    // New integer-based hotkey variables
+    wchar_t val_hk_full_vk[64] = L"";
+    wchar_t val_hk_full_mod[64] = L"";
+    wchar_t val_hk_region_vk[64] = L"";
+    wchar_t val_hk_region_mod[64] = L"";
     
     BOOL has_debug = FALSE;
     BOOL has_lossless = FALSE;
     BOOL has_distance = FALSE;
     BOOL has_export_path = FALSE;
-    BOOL has_hotkey_full = FALSE;
-    BOOL has_hotkey_region = FALSE;
     BOOL has_blank_check = FALSE;
+    
+    BOOL has_hk_full_vk = FALSE;
+    BOOL has_hk_full_mod = FALSE;
+    BOOL has_hk_region_vk = FALSE;
+    BOOL has_hk_region_mod = FALSE;
 
     if (file_exists) {
         #define CHECK_KEY(key, val_buf, size, has_flag) \
@@ -137,24 +143,23 @@ static void ensure_default_ini(void) {
         CHECK_KEY(L"Lossless", val_lossless, 64, has_lossless);
         CHECK_KEY(L"Distance", val_distance, 64, has_distance);
         CHECK_KEY(L"ExportPath", val_export_path, MAX_PATH, has_export_path);
-        CHECK_KEY(L"HotkeyFull", val_hotkey_full, 128, has_hotkey_full);
-        CHECK_KEY(L"HotkeyRegion", val_hotkey_region, 128, has_hotkey_region);
         CHECK_KEY(L"BlankCheckMode", val_blank_check, 64, has_blank_check);
+        
+        // Read new integer-based hotkey values
+        CHECK_KEY(L"HotkeyFullVK", val_hk_full_vk, 64, has_hk_full_vk);
+        CHECK_KEY(L"HotkeyFullMod", val_hk_full_mod, 64, has_hk_full_mod);
+        CHECK_KEY(L"HotkeyRegionVK", val_hk_region_vk, 64, has_hk_region_vk);
+        CHECK_KEY(L"HotkeyRegionMod", val_hk_region_mod, 64, has_hk_region_mod);
         
         #undef CHECK_KEY
     }
     
     // 2. Write the full default template. 
-    // This guarantees that any new keys or comments added in newer versions are present in the file.
     FILE *f = _wfopen(ini_path, L"wb");
     if (f) {
-        // Use binary write to explicitly control the encoding
-        
-        // 1. Write UTF-16 LE Byte Order Mark (BOM)
         unsigned short bom = 0xFEFF;
         fwrite(&bom, sizeof(bom), 1, f);
         
-        // 2. Write the configuration in UTF-16 LE
         const wchar_t *default_ini = 
             L"; ==============================================================================\n"
             L"; JXLShot Configuration File\n"
@@ -172,9 +177,13 @@ static void ensure_default_ini(void) {
             L";   Debug          : 1 = Enable debug logging; 0 = Disable.\n"
             L";   ExportPath     : Custom directory for saving screenshots.\n"
             L";                    Leave blank to use the default Windows Pictures folder.\n"
-            L";   HotkeyFull     : Keyboard shortcut to capture the entire screen.\n"
-            L";   HotkeyRegion   : Keyboard shortcut to capture a specific region.\n"
             L";   BlankCheckMode : 0 = Disabled, 1 = Basic, 2 = Advanced, 3 = HARDCORE.\n"
+            L";\n"
+            L"; [Hotkey Settings] (Use the 'Hotkey Settings...' tray menu to configure these easily!)\n"
+            L";   HotkeyFullVK    : Virtual Key code for Full Screen capture (e.g., 44 = PrintScreen).\n"
+            L";   HotkeyFullMod   : Modifier flags for Full Screen (0=None, 1=Shift, 2=Ctrl, 4=Alt, 8=Win).\n"
+            L";   HotkeyRegionVK  : Virtual Key code for Region capture.\n"
+            L";   HotkeyRegionMod : Modifier flags for Region capture.\n"
             L";\n"
             L"; ==============================================================================\n"
             L"\n"
@@ -183,8 +192,10 @@ static void ensure_default_ini(void) {
             L"Lossless=0\n"
             L"Distance=1.0\n"
             L"ExportPath=\n"
-            L"HotkeyFull=PrintScreen\n"
-            L"HotkeyRegion=Ctrl+PrintScreen\n"
+            L"HotkeyFullVK=44\n"
+            L"HotkeyFullMod=0\n"
+            L"HotkeyRegionVK=44\n"
+            L"HotkeyRegionMod=2\n"
             L"BlankCheckMode=2\n";
         
         fputws(default_ini, f);
@@ -194,15 +205,18 @@ static void ensure_default_ini(void) {
     }
     
     // 3. Restore the user's custom values (only if they existed previously).
-    // WritePrivateProfileStringW will cleanly find and replace the default values with the user's custom ones.
     if (file_exists) {
         if (has_debug) WritePrivateProfileStringW(L"Capture", L"Debug", val_debug, ini_path);
         if (has_lossless) WritePrivateProfileStringW(L"Capture", L"Lossless", val_lossless, ini_path);
         if (has_distance) WritePrivateProfileStringW(L"Capture", L"Distance", val_distance, ini_path);
         if (has_export_path) WritePrivateProfileStringW(L"Capture", L"ExportPath", val_export_path, ini_path);
-        if (has_hotkey_full) WritePrivateProfileStringW(L"Capture", L"HotkeyFull", val_hotkey_full, ini_path);
-        if (has_hotkey_region) WritePrivateProfileStringW(L"Capture", L"HotkeyRegion", val_hotkey_region, ini_path);
         if (has_blank_check) WritePrivateProfileStringW(L"Capture", L"BlankCheckMode", val_blank_check, ini_path);
+        
+        // Restore new integer-based hotkey values
+        if (has_hk_full_vk) WritePrivateProfileStringW(L"Capture", L"HotkeyFullVK", val_hk_full_vk, ini_path);
+        if (has_hk_full_mod) WritePrivateProfileStringW(L"Capture", L"HotkeyFullMod", val_hk_full_mod, ini_path);
+        if (has_hk_region_vk) WritePrivateProfileStringW(L"Capture", L"HotkeyRegionVK", val_hk_region_vk, ini_path);
+        if (has_hk_region_mod) WritePrivateProfileStringW(L"Capture", L"HotkeyRegionMod", val_hk_region_mod, ini_path);
     }
 }
 
@@ -256,10 +270,11 @@ static void init_config(void) {
     g_cfg.distance = 1.0f; 
     //g_cfg.show_cursor = 1;
     g_cfg.blank_check_mode = 2;
-    g_cfg.hk_full_mod = 0; 
-    g_cfg.hk_full_vk = VK_SNAPSHOT;
-    g_cfg.hk_region_mod = MOD_CONTROL; 
-    g_cfg.hk_region_vk = VK_SNAPSHOT;
+
+    g_cfg.hk_full_vk = get_cfg_int(L"HotkeyFullVK", VK_SNAPSHOT, ini_path);
+    g_cfg.hk_full_mod = get_cfg_int(L"HotkeyFullMod", 0, ini_path);
+    g_cfg.hk_region_vk = get_cfg_int(L"HotkeyRegionVK", VK_SNAPSHOT, ini_path);
+    g_cfg.hk_region_mod = get_cfg_int(L"HotkeyRegionMod", MOD_CONTROL, ini_path);
     
     // Use Known Folders API to correctly resolve localized folder names
     PWSTR pszPicturesPath = NULL;

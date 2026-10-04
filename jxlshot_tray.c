@@ -116,6 +116,7 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDM_OPENCONFIG   107
 #define IDM_CHECK_UPDATE 108
 #define IDM_OPENEXPORT   109
+#define IDM_HOTKEYS      110
 
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
 #define IDI_APP_ICON  1001
@@ -137,6 +138,106 @@ static void reload_config(void) { init_config(); }
 
 // Tray Icon & Context Menu
 
+static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_size) {
+    if (vk == 0) { wcsncpy_s(out, out_size, L"None (Click to set)", _TRUNCATE); return; }
+    wchar_t buf[128] = L"";
+    if (mod & MOD_CONTROL) wcscat_s(buf, 128, L"Ctrl+");
+    if (mod & MOD_SHIFT) wcscat_s(buf, 128, L"Shift+");
+    if (mod & MOD_ALT) wcscat_s(buf, 128, L"Alt+");
+    if (mod & MOD_WIN) wcscat_s(buf, 128, L"Win+");
+    
+    if (vk == VK_SNAPSHOT) wcscat_s(buf, 128, L"PrintScreen");
+    else if (vk >= 'A' && vk <= 'Z') { wchar_t c[2] = {(wchar_t)vk, L'\0'}; wcscat_s(buf, 128, c); }
+    else if (vk >= VK_F1 && vk <= VK_F12) _snwprintf(buf + wcslen(buf), 128 - wcslen(buf), L"F%d", vk - VK_F1 + 1);
+    else wcscat_s(buf, 128, L"Key");
+    
+    wcsncpy_s(out, out_size, buf, _TRUNCATE);
+}
+
+static HWND g_hwnd_catcher = NULL;
+static int g_catcher_target = 0; // 1 = full, 2 = region
+
+static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_CREATE: {
+            CreateWindowExW(0, L"BUTTON", L"Full Screen: (click to set)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 10, 260, 30, hwnd, (HMENU)101, GetModuleHandle(NULL), NULL);
+            CreateWindowExW(0, L"BUTTON", L"Region: (click to set)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 50, 260, 30, hwnd, (HMENU)102, GetModuleHandle(NULL), NULL);
+            
+            wchar_t full_hk[128], region_hk[128];
+            format_hotkey_string(g_cfg.hk_full_vk, g_cfg.hk_full_mod, full_hk, 128);
+            format_hotkey_string(g_cfg.hk_region_vk, g_cfg.hk_region_mod, region_hk, 128);
+            SetWindowTextW(GetDlgItem(hwnd, 101), full_hk);
+            SetWindowTextW(GetDlgItem(hwnd, 102), region_hk);
+            return 0;
+        }
+        case WM_COMMAND: {
+            int id = LOWORD(wParam);
+            if (id == 101) { g_catcher_target = 1; SetWindowTextW(GetDlgItem(hwnd, 101), L"Press any key..."); SetFocus(GetDlgItem(hwnd, 101)); }
+            else if (id == 102) { g_catcher_target = 2; SetWindowTextW(GetDlgItem(hwnd, 102), L"Press any key..."); SetFocus(GetDlgItem(hwnd, 102)); }
+            return 0;
+        }
+        case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN: {
+            if (g_catcher_target != 0) {
+                UINT vk = (UINT)wParam;
+                UINT mod = 0;
+                if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mod |= MOD_CONTROL;
+                if (GetAsyncKeyState(VK_SHIFT) & 0x8000) mod |= MOD_SHIFT;
+                if (GetAsyncKeyState(VK_MENU) & 0x8000) mod |= MOD_ALT;
+                if (GetAsyncKeyState(VK_LWIN) & 0x8000 || GetAsyncKeyState(VK_RWIN) & 0x8000) mod |= MOD_WIN;
+
+                if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU || vk == VK_LWIN || vk == VK_RWIN) return 0;
+
+                LPCWSTR vk_key = (g_catcher_target == 1) ? L"HotkeyFullVK" : L"HotkeyRegionVK";
+                LPCWSTR mod_key = (g_catcher_target == 1) ? L"HotkeyFullMod" : L"HotkeyRegionMod";
+                int btn_id = (g_catcher_target == 1) ? 101 : 102;
+
+                if (g_catcher_target == 1) { g_cfg.hk_full_vk = vk; g_cfg.hk_full_mod = mod; }
+                else { g_cfg.hk_region_vk = vk; g_cfg.hk_region_mod = mod; }
+                
+                g_catcher_target = 0;
+
+                wchar_t ini_path[MAX_PATH];
+                _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+                wchar_t vk_str[32], mod_str[32];
+                _snwprintf(vk_str, 32, L"%u", vk);
+                _snwprintf(mod_str, 32, L"%u", mod);
+                
+                WritePrivateProfileStringW(L"Capture", vk_key, vk_str, ini_path);
+                WritePrivateProfileStringW(L"Capture", mod_key, mod_str, ini_path);
+
+                wchar_t display[128];
+                format_hotkey_string(vk, mod, display, 128);
+                SetWindowTextW(GetDlgItem(hwnd, btn_id), display);
+                return 0;
+            }
+            break;
+        }
+        case WM_CLOSE: DestroyWindow(hwnd); return 0;
+        case WM_DESTROY: g_hwnd_catcher = NULL; return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void execute_hotkey_settings(HWND hwnd) {
+    if (g_hwnd_catcher) { SetForegroundWindow(g_hwnd_catcher); return; }
+    
+    WNDCLASSEXW wc = {0};
+    wc.cbSize = sizeof(wc); wc.lpfnWndProc = CatcherWndProc; wc.hInstance = GetModuleHandle(NULL);
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.lpszClassName = L"JxlShotCatcherClass";
+    RegisterClassExW(&wc);
+    
+    g_hwnd_catcher = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"JxlShotCatcherClass", L"Hotkey Settings",
+        WS_POPUPWINDOW | WS_CAPTION | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 300, 110, hwnd, NULL, GetModuleHandle(NULL), NULL);
+    
+    if (g_hwnd_catcher) {
+        RECT rc; GetWindowRect(hwnd, &rc);
+        SetWindowPos(g_hwnd_catcher, NULL, rc.left + 50, rc.top + 50, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        ShowWindow(g_hwnd_catcher, SW_SHOW);
+    }
+}
+
 static void show_tray_menu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
     HMENU hMenu = CreatePopupMenu();
@@ -146,6 +247,7 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, L"Open Export Folder");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENCONFIG, L"Open Config File");
+    AppendMenuW(hMenu, MF_STRING, IDM_HOTKEYS, L"Hotkey Settings...");
     AppendMenuW(hMenu, MF_STRING, IDM_RELOAD, L"Reload Configuration");
     AppendMenuW(hMenu, MF_STRING, IDM_CHECK_UPDATE, L"Check for Updates...");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
@@ -770,6 +872,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 case IDM_SETPATH: execute_set_path(); break;
                 case IDM_OPENEXPORT: execute_open_export_folder(); break;
                 case IDM_OPENCONFIG: execute_open_config(hwnd); break;
+                case IDM_HOTKEYS: execute_hotkey_settings(hwnd); break;
                 case IDM_RELOAD: reload_config(); break;
                 case IDM_CHECK_UPDATE: execute_check_update(hwnd); break;
                 case IDM_ABOUT: execute_about(); break;
