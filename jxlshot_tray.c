@@ -142,99 +142,303 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
     if (vk == 0) { wcsncpy_s(out, out_size, L"None (Click to set)", _TRUNCATE); return; }
     wchar_t buf[128] = L"";
     if (mod & MOD_CONTROL) wcscat_s(buf, 128, L"Ctrl+");
-    if (mod & MOD_SHIFT) wcscat_s(buf, 128, L"Shift+");
-    if (mod & MOD_ALT) wcscat_s(buf, 128, L"Alt+");
-    if (mod & MOD_WIN) wcscat_s(buf, 128, L"Win+");
-    
+    if (mod & MOD_SHIFT)   wcscat_s(buf, 128, L"Shift+");
+    if (mod & MOD_ALT)     wcscat_s(buf, 128, L"Alt+");
+    if (mod & MOD_WIN)     wcscat_s(buf, 128, L"Win+");
+
     if (vk == VK_SNAPSHOT) wcscat_s(buf, 128, L"PrintScreen");
-    else if (vk >= 'A' && vk <= 'Z') { wchar_t c[2] = {(wchar_t)vk, L'\0'}; wcscat_s(buf, 128, c); }
-    else if (vk >= VK_F1 && vk <= VK_F12) _snwprintf(buf + wcslen(buf), 128 - wcslen(buf), L"F%d", vk - VK_F1 + 1);
-    else wcscat_s(buf, 128, L"Key");
-    
+    else if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
+        wchar_t c[2] = {(wchar_t)vk, L'\0'}; wcscat_s(buf, 128, c);
+    }
+    else if (vk >= VK_F1 && vk <= VK_F24) {
+        size_t l = wcslen(buf);
+        _snwprintf(buf + l, 128 - l, L"F%d", (int)(vk - VK_F1 + 1));
+    }
+    else {
+        UINT sc = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
+        LONG lparam = (LONG)(sc << 16);
+        if ((vk >= VK_PRIOR && vk <= VK_DOWN) || vk == VK_INSERT || vk == VK_DELETE || vk == VK_DIVIDE)
+            lparam |= (1 << 24); // extended key
+        wchar_t name[64] = L"";
+        if (GetKeyNameTextW(lparam, name, 64) > 0) wcscat_s(buf, 128, name);
+        else wcscat_s(buf, 128, L"Key");
+    }
     wcsncpy_s(out, out_size, buf, _TRUNCATE);
 }
 
-static HWND g_hwnd_catcher = NULL;
-static int g_catcher_target = 0; // 1 = full, 2 = region
+/* ---------------- Hotkey settings window (frameless, dark) ---------------- */
+
+#define WM_HOTKEY_CAPTURED (WM_USER + 20)
+#define IDC_HK_FULL    101
+#define IDC_HK_REGION  102
+#define IDC_HK_CLOSE   103
+
+#define HK_W 300
+#define HK_H 176
+#define HK_TITLE_H 36
+
+#define HK_BG        RGB(32, 32, 32)
+#define HK_BTN       RGB(51, 51, 51)
+#define HK_BTN_HOT   RGB(68, 68, 68)
+#define HK_BTN_DOWN  RGB(85, 85, 85)
+#define HK_BORDER    RGB(75, 75, 75)
+#define HK_ACCENT    RGB(0, 120, 215)
+#define HK_TEXT      RGB(240, 240, 240)
+#define HK_DIM       RGB(150, 150, 150)
+#define HK_CLOSE_HOT RGB(196, 43, 28)
+
+static HWND  g_hwnd_catcher = NULL;
+static int   g_catcher_target = 0;          // 0 = idle, 1 = full, 2 = region
+static volatile BOOL g_hotkeyCapturing = FALSE; // checked by the keyboard hook
+static DWORD g_swallowUpVk = 0;             // swallow key-up of the captured key
+static HFONT g_hkFont = NULL, g_hkFontSmall = NULL;
+static HWND  g_hkHoverBtn = NULL;
+
+static BOOL is_modifier_vk(DWORD vk) {
+    switch (vk) {
+        case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT:
+        case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL:
+        case VK_MENU: case VK_LMENU: case VK_RMENU:
+        case VK_LWIN: case VK_RWIN:
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static UINT current_mods(void) {
+    UINT mod = 0;
+    if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mod |= MOD_CONTROL;
+    if (GetAsyncKeyState(VK_SHIFT)   & 0x8000) mod |= MOD_SHIFT;
+    if (GetAsyncKeyState(VK_MENU)    & 0x8000) mod |= MOD_ALT;
+    if ((GetAsyncKeyState(VK_LWIN) & 0x8000) || (GetAsyncKeyState(VK_RWIN) & 0x8000)) mod |= MOD_WIN;
+    return mod;
+}
+
+static void hk_refresh_buttons(HWND hwnd) {
+    wchar_t hk[128], txt[192];
+    if (g_catcher_target == 1) wcscpy_s(txt, 192, L"Full Screen:  press a key...");
+    else {
+        format_hotkey_string(g_cfg.hk_full_vk, g_cfg.hk_full_mod, hk, 128);
+        _snwprintf(txt, 192, L"Full Screen:  %s", hk); txt[191] = 0;
+    }
+    SetWindowTextW(GetDlgItem(hwnd, IDC_HK_FULL), txt);
+
+    if (g_catcher_target == 2) wcscpy_s(txt, 192, L"Region:  press a key...");
+    else {
+        format_hotkey_string(g_cfg.hk_region_vk, g_cfg.hk_region_mod, hk, 128);
+        _snwprintf(txt, 192, L"Region:  %s", hk); txt[191] = 0;
+    }
+    SetWindowTextW(GetDlgItem(hwnd, IDC_HK_REGION), txt);
+
+    InvalidateRect(GetDlgItem(hwnd, IDC_HK_FULL), NULL, FALSE);
+    InvalidateRect(GetDlgItem(hwnd, IDC_HK_REGION), NULL, FALSE);
+    InvalidateRect(hwnd, NULL, FALSE);
+}
+
+static void hk_begin_capture(HWND hwnd, int target) {
+    g_catcher_target = target;
+    g_swallowUpVk = 0;
+    g_hotkeyCapturing = TRUE;   // hook now stops firing captures and routes keys here
+    hk_refresh_buttons(hwnd);
+    SetFocus(hwnd);             // so Space/Enter can't "click" the button
+}
+
+static void hk_end_capture(HWND hwnd) {
+    g_catcher_target = 0;
+    g_hotkeyCapturing = FALSE;
+    hk_refresh_buttons(hwnd);
+}
+
+static void hk_draw_button(LPDRAWITEMSTRUCT di) {
+    HDC dc = di->hDC;
+    RECT rc = di->rcItem;
+    int id = (int)di->CtlID;
+    BOOL hot = (g_hkHoverBtn == di->hwndItem);
+    BOOL down = (di->itemState & ODS_SELECTED) != 0;
+    BOOL active = (id == IDC_HK_FULL && g_catcher_target == 1) ||
+                  (id == IDC_HK_REGION && g_catcher_target == 2);
+
+    COLORREF bg;
+    if (id == IDC_HK_CLOSE) bg = hot ? HK_CLOSE_HOT : HK_BG;
+    else bg = down ? HK_BTN_DOWN : (hot ? HK_BTN_HOT : HK_BTN);
+
+    HBRUSH b = CreateSolidBrush(bg);
+    FillRect(dc, &rc, b);
+    DeleteObject(b);
+
+    if (id == IDC_HK_CLOSE) {
+        int cx = (rc.left + rc.right) / 2, cy = (rc.top + rc.bottom) / 2, s = 5;
+        HPEN pen = CreatePen(PS_SOLID, 1, HK_TEXT);
+        HPEN old = (HPEN)SelectObject(dc, pen);
+        MoveToEx(dc, cx - s, cy - s, NULL); LineTo(dc, cx + s + 1, cy + s + 1);
+        MoveToEx(dc, cx + s, cy - s, NULL); LineTo(dc, cx - s - 1, cy + s + 1);
+        SelectObject(dc, old); DeleteObject(pen);
+        return;
+    }
+
+    HBRUSH fb = CreateSolidBrush(active ? HK_ACCENT : HK_BORDER);
+    FrameRect(dc, &rc, fb);
+    if (active) { InflateRect(&rc, -1, -1); FrameRect(dc, &rc, fb); InflateRect(&rc, 1, 1); }
+    DeleteObject(fb);
+
+    wchar_t txt[192];
+    GetWindowTextW(di->hwndItem, txt, 192);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, active ? HK_ACCENT : HK_TEXT);
+    HFONT of = (HFONT)SelectObject(dc, g_hkFont);
+    DrawTextW(dc, txt, -1, &rc, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS);
+    SelectObject(dc, of);
+}
+
+static LRESULT CALLBACK HkBtnSubclass(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR id, DWORD_PTR ref) {
+    (void)ref;
+    switch (m) {
+        case WM_MOUSEMOVE:
+            if (g_hkHoverBtn != h) {
+                g_hkHoverBtn = h;
+                TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, h, 0 };
+                TrackMouseEvent(&t);
+                InvalidateRect(h, NULL, FALSE);
+            }
+            break;
+        case WM_MOUSELEAVE:
+            if (g_hkHoverBtn == h) g_hkHoverBtn = NULL;
+            InvalidateRect(h, NULL, FALSE);
+            break;
+        case WM_NCDESTROY:
+            RemoveWindowSubclass(h, HkBtnSubclass, id);
+            break;
+    }
+    return DefSubclassProc(h, m, w, l);
+}
+
+static void hk_save(int target, UINT vk, UINT mod) {
+    LPCWSTR vk_key  = (target == 1) ? L"HotkeyFullVK"  : L"HotkeyRegionVK";
+    LPCWSTR mod_key = (target == 1) ? L"HotkeyFullMod" : L"HotkeyRegionMod";
+    if (target == 1) { g_cfg.hk_full_vk = vk;   g_cfg.hk_full_mod = mod; }
+    else             { g_cfg.hk_region_vk = vk; g_cfg.hk_region_mod = mod; }
+
+    wchar_t ini_path[MAX_PATH], vk_str[32], mod_str[32];
+    _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    _snwprintf(vk_str, 32, L"%u", vk);
+    _snwprintf(mod_str, 32, L"%u", mod);
+    WritePrivateProfileStringW(L"Capture", vk_key, vk_str, ini_path);
+    WritePrivateProfileStringW(L"Capture", mod_key, mod_str, ini_path);
+}
 
 static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
-            CreateWindowExW(0, L"BUTTON", L"Full Screen: (click to set)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 10, 260, 30, hwnd, (HMENU)101, GetModuleHandle(NULL), NULL);
-            CreateWindowExW(0, L"BUTTON", L"Region: (click to set)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 10, 50, 260, 30, hwnd, (HMENU)102, GetModuleHandle(NULL), NULL);
-            
-            wchar_t full_hk[128], region_hk[128];
-            format_hotkey_string(g_cfg.hk_full_vk, g_cfg.hk_full_mod, full_hk, 128);
-            format_hotkey_string(g_cfg.hk_region_vk, g_cfg.hk_region_mod, region_hk, 128);
-            SetWindowTextW(GetDlgItem(hwnd, 101), full_hk);
-            SetWindowTextW(GetDlgItem(hwnd, 102), region_hk);
-            return 0;
-        }
-        case WM_COMMAND: {
-            int id = LOWORD(wParam);
-            if (id == 101) { g_catcher_target = 1; SetWindowTextW(GetDlgItem(hwnd, 101), L"Press any key..."); SetFocus(GetDlgItem(hwnd, 101)); }
-            else if (id == 102) { g_catcher_target = 2; SetWindowTextW(GetDlgItem(hwnd, 102), L"Press any key..."); SetFocus(GetDlgItem(hwnd, 102)); }
-            return 0;
-        }
-        case WM_GETDLGCODE: return DLGC_WANTALLKEYS;
-        case WM_KEYDOWN:
-        case WM_SYSKEYDOWN: {
-            if (g_catcher_target != 0) {
-                UINT vk = (UINT)wParam;
-                UINT mod = 0;
-                if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mod |= MOD_CONTROL;
-                if (GetAsyncKeyState(VK_SHIFT) & 0x8000) mod |= MOD_SHIFT;
-                if (GetAsyncKeyState(VK_MENU) & 0x8000) mod |= MOD_ALT;
-                if (GetAsyncKeyState(VK_LWIN) & 0x8000 || GetAsyncKeyState(VK_RWIN) & 0x8000) mod |= MOD_WIN;
-
-                if (vk == VK_CONTROL || vk == VK_SHIFT || vk == VK_MENU || vk == VK_LWIN || vk == VK_RWIN) return 0;
-
-                LPCWSTR vk_key = (g_catcher_target == 1) ? L"HotkeyFullVK" : L"HotkeyRegionVK";
-                LPCWSTR mod_key = (g_catcher_target == 1) ? L"HotkeyFullMod" : L"HotkeyRegionMod";
-                int btn_id = (g_catcher_target == 1) ? 101 : 102;
-
-                if (g_catcher_target == 1) { g_cfg.hk_full_vk = vk; g_cfg.hk_full_mod = mod; }
-                else { g_cfg.hk_region_vk = vk; g_cfg.hk_region_mod = mod; }
-                
-                g_catcher_target = 0;
-
-                wchar_t ini_path[MAX_PATH];
-                _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-                wchar_t vk_str[32], mod_str[32];
-                _snwprintf(vk_str, 32, L"%u", vk);
-                _snwprintf(mod_str, 32, L"%u", mod);
-                
-                WritePrivateProfileStringW(L"Capture", vk_key, vk_str, ini_path);
-                WritePrivateProfileStringW(L"Capture", mod_key, mod_str, ini_path);
-
-                wchar_t display[128];
-                format_hotkey_string(vk, mod, display, 128);
-                SetWindowTextW(GetDlgItem(hwnd, btn_id), display);
-                return 0;
+            g_hkFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
+                                   CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            g_hkFontSmall = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
+                                        CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            HINSTANCE hi = GetModuleHandle(NULL);
+            struct { int id; int x, y, w, h; } b[] = {
+                { IDC_HK_FULL,   16, 48,  HK_W - 32, 38 },
+                { IDC_HK_REGION, 16, 94,  HK_W - 32, 38 },
+                { IDC_HK_CLOSE,  HK_W - 40, 0, 40, HK_TITLE_H },
+            };
+            for (int i = 0; i < 3; i++) {
+                HWND hb = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                                          b[i].x, b[i].y, b[i].w, b[i].h, hwnd,
+                                          (HMENU)(INT_PTR)b[i].id, hi, NULL);
+                SetWindowSubclass(hb, HkBtnSubclass, (UINT_PTR)b[i].id, 0);
             }
-            break;
+            hk_refresh_buttons(hwnd);
+            return 0;
         }
+        case WM_ERASEBKGND: return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps);
+            RECT rc; GetClientRect(hwnd, &rc);
+            HBRUSH bg = CreateSolidBrush(HK_BG); FillRect(dc, &rc, bg); DeleteObject(bg);
+            HBRUSH bd = CreateSolidBrush(HK_BORDER); FrameRect(dc, &rc, bd); DeleteObject(bd);
+
+            SetBkMode(dc, TRANSPARENT);
+            HFONT of = (HFONT)SelectObject(dc, g_hkFont);
+            SetTextColor(dc, HK_TEXT);
+            RECT t = { 16, 0, HK_W - 48, HK_TITLE_H };
+            DrawTextW(dc, L"Hotkey Settings", -1, &t, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+
+            SelectObject(dc, g_hkFontSmall);
+            SetTextColor(dc, HK_DIM);
+            RECT h = { 16, 140, HK_W - 16, HK_H - 8 };
+            DrawTextW(dc, g_catcher_target
+                ? L"Press the new key combo. Esc cancels."
+                : L"Click a button, then press the new key combo.",
+                -1, &h, DT_WORDBREAK | DT_LEFT);
+            SelectObject(dc, of);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        case WM_NCHITTEST: {
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
+            if (pt.y >= 0 && pt.y < HK_TITLE_H && pt.x < HK_W - 40) return HTCAPTION; // drag area
+            return HTCLIENT;
+        }
+        case WM_DRAWITEM:
+            hk_draw_button((LPDRAWITEMSTRUCT)lParam);
+            return TRUE;
+        case WM_COMMAND:
+            switch (LOWORD(wParam)) {
+                case IDC_HK_FULL:   hk_begin_capture(hwnd, 1); break;
+                case IDC_HK_REGION: hk_begin_capture(hwnd, 2); break;
+                case IDC_HK_CLOSE:  DestroyWindow(hwnd); break;
+            }
+            return 0;
+        case WM_HOTKEY_CAPTURED: { // posted by the keyboard hook
+            if (!g_catcher_target) return 0;
+            UINT vk = (UINT)wParam, mod = (UINT)lParam;
+            if (vk == VK_ESCAPE && mod == 0) { hk_end_capture(hwnd); return 0; }
+            hk_save(g_catcher_target, vk, mod);
+            hk_end_capture(hwnd);
+            return 0;
+        }
+        case WM_ACTIVATE:
+            if (LOWORD(wParam) == WA_INACTIVE && g_hotkeyCapturing) hk_end_capture(hwnd);
+            return 0;
         case WM_CLOSE: DestroyWindow(hwnd); return 0;
-        case WM_DESTROY: g_hwnd_catcher = NULL; return 0;
+        case WM_DESTROY:
+            g_hotkeyCapturing = FALSE;
+            g_catcher_target = 0;
+            g_hkHoverBtn = NULL;
+            if (g_hkFont)      { DeleteObject(g_hkFont); g_hkFont = NULL; }
+            if (g_hkFontSmall) { DeleteObject(g_hkFontSmall); g_hkFontSmall = NULL; }
+            g_hwnd_catcher = NULL;
+            return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 static void execute_hotkey_settings(HWND hwnd) {
+    (void)hwnd; // message-only tray window can't be an owner
     if (g_hwnd_catcher) { SetForegroundWindow(g_hwnd_catcher); return; }
-    
-    WNDCLASSEXW wc = {0};
-    wc.cbSize = sizeof(wc); wc.lpfnWndProc = CatcherWndProc; wc.hInstance = GetModuleHandle(NULL);
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW); wc.lpszClassName = L"JxlShotCatcherClass";
-    RegisterClassExW(&wc);
-    
-    g_hwnd_catcher = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"JxlShotCatcherClass", L"Hotkey Settings",
-        WS_POPUPWINDOW | WS_CAPTION | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, 300, 110, hwnd, NULL, GetModuleHandle(NULL), NULL);
-    
+
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASSEXW wc = {0};
+        wc.cbSize = sizeof(wc);
+        wc.lpfnWndProc = CatcherWndProc;
+        wc.hInstance = GetModuleHandle(NULL);
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        wc.lpszClassName = L"JxlShotCatcherClass";
+        RegisterClassExW(&wc);
+        registered = TRUE;
+    }
+
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfoW(MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY), &mi);
+    int x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - HK_W) / 2;
+    int y = mi.rcWork.top  + ((mi.rcWork.bottom - mi.rcWork.top) - HK_H) / 2;
+
+    g_hwnd_catcher = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"JxlShotCatcherClass",
+        L"Hotkey Settings", WS_POPUP, x, y, HK_W, HK_H, NULL, NULL, GetModuleHandle(NULL), NULL);
+
     if (g_hwnd_catcher) {
-        RECT rc; GetWindowRect(hwnd, &rc);
-        SetWindowPos(g_hwnd_catcher, NULL, rc.left + 50, rc.top + 50, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
         ShowWindow(g_hwnd_catcher, SW_SHOW);
+        SetForegroundWindow(g_hwnd_catcher);
     }
 }
 
@@ -782,7 +986,29 @@ static BOOL check_modifiers(UINT required_mod) {
 static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
         KBDLLHOOKSTRUCT *pKB = (KBDLLHOOKSTRUCT *)lParam;
-        
+                BOOL k_down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+        BOOL k_up   = (wParam == WM_KEYUP   || wParam == WM_SYSKEYUP);
+
+        // Hotkey-settings capture mode: app hotkeys are halted, keys are routed to the dialog.
+        if (g_hotkeyCapturing) {
+            if (!is_modifier_vk(pKB->vkCode)) {
+                if (k_down) {
+                    if (g_hwnd_catcher) {
+                        g_swallowUpVk = pKB->vkCode;
+                        PostMessageW(g_hwnd_catcher, WM_HOTKEY_CAPTURED, pKB->vkCode, current_mods());
+                    }
+                    return 1; // block from OS / other apps
+                }
+                if (k_up) return 1;
+            }
+            return CallNextHookEx(g_hhkKeyboard, nCode, wParam, lParam); // let modifiers through
+        }
+
+        // Swallow the key-up of the key we just captured (e.g. PrintScreen)
+        if (k_up && g_swallowUpVk && pKB->vkCode == g_swallowUpVk) {
+            g_swallowUpVk = 0;
+            return 1;
+        }
         // FIX: Intercept Escape globally while region selection is active.
         // This guarantees Esc works even if Windows refuses to give the overlay keyboard focus,
         // and prevents the Esc key from accidentally exiting fullscreen games or closing underlying menus.
