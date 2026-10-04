@@ -337,7 +337,7 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             struct { int id; int x, y, w, h; } b[] = {
                 { IDC_HK_FULL,   16, 48,  HK_W - 32, 38 },
                 { IDC_HK_REGION, 16, 94,  HK_W - 32, 38 },
-                { IDC_HK_CLOSE,  HK_W - 40, 0, 40, HK_TITLE_H },
+                { IDC_HK_CLOSE,  HK_W - 41, 1, 38, HK_TITLE_H - 2 }, 
             };
             for (int i = 0; i < 3; i++) {
                 HWND hb = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -375,7 +375,7 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         case WM_NCHITTEST: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
-            if (pt.y >= 0 && pt.y < HK_TITLE_H && pt.x < HK_W - 40) return HTCAPTION; // drag area
+            if (pt.y >= 0 && pt.y < HK_TITLE_H && pt.x < HK_W - 41) return HTCAPTION; // drag area
             return HTCLIENT;
         }
         case WM_DRAWITEM:
