@@ -55,7 +55,7 @@ static void ensure_default_ini(void);
 static void init_config(void);
 static void dbg_init(void);
 static void build_out_path(wchar_t *path, int n, int is_hdr);
-static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path);
+static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, int orientation, const wchar_t *path);
 
 
 // Configuration (INI)
@@ -464,6 +464,7 @@ typedef struct {
     size_t size;
     int w, h;
     int is_hdr; // 1 if FP16 scRGB, 0 if 8-bit SDR
+    int orientation; /* JxlOrientation value; 0 = not set (treated as identity) */
 } Grab;
 
 
@@ -694,6 +695,18 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
         if (FAILED(hr)) { dbg("dxgi: DuplicateOutput FAILED hr=0x%08lX", hr); goto cleanup; }
     }
 
+    {
+        DXGI_OUTDUPL_DESC dd;
+        dupl->lpVtbl->GetDesc(dupl, &dd);
+        switch (dd.Rotation) {
+            case DXGI_MODE_ROTATION_ROTATE90:  g->orientation = JXL_ORIENT_ROTATE_90_CW;  break;
+            case DXGI_MODE_ROTATION_ROTATE180: g->orientation = JXL_ORIENT_ROTATE_180;    break;
+            case DXGI_MODE_ROTATION_ROTATE270: g->orientation = JXL_ORIENT_ROTATE_90_CCW; break;
+            default:                           g->orientation = JXL_ORIENT_IDENTITY;      break;
+        }
+        dbg("dxgi: output rotation = %d -> jxl orientation %d", (int)dd.Rotation, g->orientation);
+    }
+
     /*
      * Retry loop: acquire frames repeatedly, discarding blank/stale
      * ones, up to a fixed number of attempts. Weak/legacy drivers
@@ -831,7 +844,9 @@ static void free_grab(Grab *g) {
 
 // JPEG XL encoding (Identity SDR/HDR passthrough)
 
-static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, uint8_t **out_buf, size_t *out_size) {
+static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int lossless,
+                               float distance, int orientation,
+                               uint8_t **out_buf, size_t *out_size) {
     int ok = 0;
     uint8_t *buf = NULL;
     JxlEncoderStatus st;
@@ -854,6 +869,7 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     JxlEncoderInitBasicInfo(&info);
     info.xsize = w;
     info.ysize = h;
+    info.orientation = orientation ? (JxlOrientation)orientation : JXL_ORIENT_IDENTITY;
     
     JxlPixelFormat fmt;
     fmt.num_channels = 3;
@@ -958,11 +974,12 @@ done:
     return ok;
 }
 
-static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path) {
+static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless,
+                           float distance, int orientation, const wchar_t *path) {
     uint8_t *buf = NULL; 
     size_t size = 0;
     
-    if (!encode_jxl_identity(rgb, w, h, is_hdr, lossless, distance, &buf, &size)) {
+    if (!encode_jxl_identity(rgb, w, h, is_hdr, lossless, distance, orientation, &buf, &size)) {
         dbg("save_rgb_as_jxl: encode_jxl_identity failed");
         return 0;
     }
@@ -1075,7 +1092,7 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
 
 typedef struct {
     uint8_t *bits;
-    int w, h, is_hdr, lossless;
+    int w, h, is_hdr, lossless, orientation;
     float distance;
     wchar_t out_path[MAX_PATH];
 } EncodeTask;
@@ -1089,7 +1106,8 @@ static DWORD WINAPI EncodeWorker(LPVOID param) {
     EncodeTask *task = (EncodeTask *)param;
     
     // Perform the heavy encoding and file I/O in the background
-    save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path);
+    save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless,
+                    task->distance, task->orientation, task->out_path);
     
     // Clean up memory allocated for this specific task
     free(task->bits);
@@ -1163,7 +1181,8 @@ int main(int argc, char **argv) {
         } else {
             // Fallback to synchronous if thread creation fails
             dbg("main: CreateThread failed, falling back to synchronous save");
-            rc = save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path) ? 0 : 1;
+            rc = save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless,
+                                 task->distance, task->orientation, task->out_path) ? 0 : 1;
             free(task->bits);
             free(task);
             g.bits = NULL;
@@ -1171,7 +1190,8 @@ int main(int argc, char **argv) {
     } else {
         // Fallback if malloc fails
         dbg("main: malloc failed for EncodeTask, falling back to synchronous save");
-        rc = save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path) ? 0 : 1;
+        rc = save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless,
+                             g_cfg.distance, g.orientation, out_path) ? 0 : 1;
     }
     
     free_grab(&g); 

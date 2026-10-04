@@ -202,7 +202,7 @@ static void execute_full_capture(void) {
             dbg("execute_full_capture: encoding offloaded to background thread");
         } else {
             dbg("execute_full_capture: CreateThread failed, falling back to synchronous");
-            if (!save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path)) {
+            if (!save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->orientation, task->out_path)) {
                 MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
             }
             free(task->bits);
@@ -211,7 +211,7 @@ static void execute_full_capture(void) {
         }
     } else {
         dbg("execute_full_capture: malloc failed, falling back to synchronous");
-        if (!save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path)) {
+        if (!save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, g.orientation, out_path)) {
             MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
         }
     }
@@ -422,14 +422,14 @@ static void crop_and_encode_region(RECT *r) {
         } else {
             // Fallback to synchronous if thread creation fails
             dbg("crop_and_encode_region: CreateThread failed, falling back to synchronous");
-            save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path);
+            save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->orientation, task->out_path);
             free(task->bits); // Guaranteed heap cleanup on fallback
             free(task);
         }
     } else {
         // Fallback if malloc fails
         dbg("crop_and_encode_region: malloc failed for EncodeTask, falling back to synchronous");
-        save_rgb_as_jxl(crop_bits, rw, rh, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path);
+        save_rgb_as_jxl(crop_bits, rw, rh, g.is_hdr, g_cfg.lossless, g_cfg.distance, g.orientation, out_path);
         free(crop_bits); // Guaranteed heap cleanup on fallback
     }
 
