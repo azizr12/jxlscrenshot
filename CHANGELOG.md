@@ -1,6 +1,6 @@
-v2.2.5 - 3 October 2026
+v2.2.5 - 4 October 2026
 - removed jxlshot exe binary not needed any more because it simply used as PoC
-
+- added hotkey register window to tray menu instead of using ini
 
 
 v2.2.4 - 26 September 2026
