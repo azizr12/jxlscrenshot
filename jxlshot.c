@@ -651,8 +651,11 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             dupl->lpVtbl->GetDesc(dupl, &dupl_desc);
             DXGI_MODE_ROTATION rotation = dupl_desc.Rotation;
 
+            dbg("dxgi: DXGI reports rotation = %d (1=Identity, 2=90, 3=180, 4=270)", rotation);
+
             int w_phys = desc.Width;
             int h_phys = desc.Height;
+
             int w_logical = w_phys;
             int h_logical = h_phys;
 
