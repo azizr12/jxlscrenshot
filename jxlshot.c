@@ -714,16 +714,16 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                     // Map physical pixels to logical coordinates based on rotation
                     switch (rotation) {
                         case DXGI_MODE_ROTATION_ROTATE90:
-                            dx = py;
-                            dy = w_phys - 1 - px;
+                            dx = h_phys - 1 - py;
+                            dy = px;
                             break;
                         case DXGI_MODE_ROTATION_ROTATE180:
                             dx = w_phys - 1 - px;
                             dy = h_phys - 1 - py;
                             break;
                         case DXGI_MODE_ROTATION_ROTATE270:
-                            dx = h_phys - 1 - py;
-                            dy = px;
+                            dx = py;
+                            dy = w_phys - 1 - px;
                             break;
                         default: // IDENTITY or UNSPECIFIED
                             dx = px;
