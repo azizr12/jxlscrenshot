@@ -642,10 +642,28 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                 dbg("dxgi: QI ID3D11Texture2D FAILED"); dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
             }
 
+
             D3D11_TEXTURE2D_DESC desc;
             tex->lpVtbl->GetDesc(tex, &desc);
-            g->w = desc.Width;
-            g->h = desc.Height;
+            
+            // --- GET ROTATION FROM DXGI ---
+            DXGI_OUTDUPL_DESC dupl_desc;
+            dupl->lpVtbl->GetDesc(dupl, &dupl_desc);
+            DXGI_MODE_ROTATION rotation = dupl_desc.Rotation;
+
+            int w_phys = desc.Width;
+            int h_phys = desc.Height;
+            int w_logical = w_phys;
+            int h_logical = h_phys;
+
+            // Swap dimensions if the monitor is rotated 90 or 270 degrees
+            if (rotation == DXGI_MODE_ROTATION_ROTATE90 || rotation == DXGI_MODE_ROTATION_ROTATE270) {
+                w_logical = h_phys;
+                h_logical = w_phys;
+            }
+
+            g->w = w_logical;
+            g->h = h_logical;
             g->is_hdr = (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 1 : 0;
 
             D3D11_TEXTURE2D_DESC staging_desc = desc;
@@ -668,7 +686,11 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             }
 
             size_t rgb_bpp = g->is_hdr ? 6 : 3;
+            size_t src_bpp = g->is_hdr ? 8 : 4; // DXGI source is 8 bytes (HDR) or 4 bytes (SDR)
+            
             if (g->bits) { free(g->bits); g->bits = NULL; }
+            
+            // Allocate using LOGICAL dimensions to prevent out-of-bounds cropping
             g->size = (size_t)g->w * g->h * rgb_bpp;
             g->bits = (uint8_t *)malloc(g->size);
             if (!g->bits) {
@@ -677,21 +699,47 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                 dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
             }
 
-            uint8_t *dst = g->bits;
             uint8_t *src_row = (uint8_t *)mapped.pData;
             size_t src_pitch = mapped.RowPitch;
 
-            for (int py = 0; py < g->h; py++) {
+            // Copy, convert format, and rotate in a single pass
+            for (int py = 0; py < h_phys; py++) {
                 uint8_t *src = src_row;
-                for (int px = 0; px < g->w; px++) {
-                    if (g->is_hdr) {
-                        dst[0]=src[0]; dst[1]=src[1]; dst[2]=src[2];
-                        dst[3]=src[3]; dst[4]=src[4]; dst[5]=src[5];
-                        dst += 6; src += 8;
-                    } else {
-                        dst[0]=src[2]; dst[1]=src[1]; dst[2]=src[0];
-                        dst += 3; src += 4;
+                for (int px = 0; px < w_phys; px++) {
+                    int dx, dy;
+                    
+                    // Map physical pixels to logical coordinates based on rotation
+                    switch (rotation) {
+                        case DXGI_MODE_ROTATION_ROTATE90:
+                            dx = py;
+                            dy = w_phys - 1 - px;
+                            break;
+                        case DXGI_MODE_ROTATION_ROTATE180:
+                            dx = w_phys - 1 - px;
+                            dy = h_phys - 1 - py;
+                            break;
+                        case DXGI_MODE_ROTATION_ROTATE270:
+                            dx = h_phys - 1 - py;
+                            dy = px;
+                            break;
+                        default: // IDENTITY or UNSPECIFIED
+                            dx = px;
+                            dy = py;
+                            break;
                     }
+
+                    // Calculate destination pointer in the logical buffer
+                    uint8_t *dst_px = g->bits + ((size_t)dy * w_logical + dx) * rgb_bpp;
+
+                    if (g->is_hdr) {
+                        // Convert R16G16B16A16_FLOAT (8 bytes) -> RGB48 (6 bytes)
+                        dst_px[0]=src[0]; dst_px[1]=src[1]; dst_px[2]=src[2];
+                        dst_px[3]=src[3]; dst_px[4]=src[4]; dst_px[5]=src[5];
+                    } else {
+                        // Convert B8G8R8A8 (4 bytes) -> RGB24 (3 bytes)
+                        dst_px[0]=src[2]; dst_px[1]=src[1]; dst_px[2]=src[0];
+                    }
+                    src += src_bpp;
                 }
                 src_row += src_pitch;
             }
