@@ -65,7 +65,6 @@ typedef struct {
     int     debug_enabled;
     int     lossless;
     float   distance;
-    //int     show_cursor;
     int blank_check_mode; /* 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels */
     wchar_t export_path[MAX_PATH];
     UINT    hk_full_mod;
@@ -712,7 +711,17 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             Sleep(7);         // Fallback to a short sleep to guarantee frame pacing alignment
         }
 
-        if (!ok) dbg("dxgi: all attempts produced blank frames, giving up on DXGI");
+        if (!ok) {
+            dbg("dxgi: all %d attempts deemed blank by mode %d. Running one last full-pixel (mode 3) check on the final frame.", MAX_ATTEMPTS, g_cfg.blank_check_mode);
+            
+            // Re-evaluate the 8th frame using Mode 3 (ALL pixels)
+            if (g->bits && !is_frame_blank(g->bits, g->w, g->h, g->is_hdr, 3)) {
+                dbg("dxgi: full-pixel check found non-black pixels! Accepting frame.");
+                ok = 1;
+            } else {
+                dbg("dxgi: full-pixel check confirmed frame is truly blank. Giving up on DXGI.");
+            }
+        }
     }
 
 cleanup:
