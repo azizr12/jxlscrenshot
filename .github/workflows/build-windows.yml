@@ -37,7 +37,7 @@ jobs:
 
           # Compile Tray version using the compiled resource object
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
-              -mwindows -static-libgcc -static-libstdc++ -o jxlshot_tray.exe jxlshot.c jxlshot_tray.c resource.o \
+              -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.o \
               -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lurlmon
 
           # Prepare distribution directory
