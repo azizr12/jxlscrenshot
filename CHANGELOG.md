@@ -1,7 +1,7 @@
 v2.2.5 - 4 October 2026
 - removed jxlshot exe binary not needed any more because it simply used as PoC
 - added hotkey register window to tray menu instead of using ini
-
+- add last attemp check for if screenshot is fully black before deciding it is null
 
 v2.2.4 - 26 September 2026
 - fix thread may **terminated** if write didnt finish or app exit
