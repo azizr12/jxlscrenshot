@@ -816,42 +816,135 @@ static void free_grab(Grab *g) {
 
 // JPEG XL encoding (Identity SDR/HDR passthrough)
 
-static float half_to_float(uint16_t h) {
-    uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1F, m = h & 0x3FF;
-    float v;
-    if (e == 0)       v = ldexpf((float)m, -24);
-    else if (e == 31) v = (m ? 0.0f : 65504.0f);      /* clamp inf/NaN */
-    else              v = ldexpf((float)(m | 0x400), (int)e - 25);
-    return s ? -v : v;
-}
+#define PQ_LUT_BASE_EXP  87u      /* biased float exponent of 2^-40 */
+#define PQ_LUT_N         10242    /* 40 octaves * 256 steps + guard entries */
+#define PQ_ROWS_PER_TASK 16
 
-static uint16_t pq_encode(float nits_norm) {          /* input: nits / 10000 */
-    const float m1 = 0.1593017578125f, m2 = 78.84375f;
-    const float c1 = 0.8359375f, c2 = 18.8515625f, c3 = 18.6875f;
-    if (nits_norm < 0) nits_norm = 0;
-    if (nits_norm > 1) nits_norm = 1;
-    float p = powf(nits_norm, m1);
-    float e = powf((c1 + c2 * p) / (1.0f + c3 * p), m2);
-    if (e > 1) e = 1;
-    return (uint16_t)(e * 65535.0f + 0.5f);
-}
+typedef struct {
+    const uint16_t *src;      /* FP16 RGB, tightly packed */
+    uint16_t       *dst;      /* PQ Rec.2020 UINT16 RGB */
+    int             w, h;
+    const float    *half_lut; /* half bits -> linear, already scaled by 80/10000 */
+    const float    *pq_lut;   /* log-spaced PQ code values */
+} PqJob;
 
-/* scRGB FP16 (6 bytes/px) -> PQ Rec.2020 UINT16 (6 bytes/px) */
-static uint16_t *scrgb_to_pq2020(const uint8_t *src, size_t npix) {
-    uint16_t *out = (uint16_t *)malloc(npix * 6);
-    if (!out) return NULL;
-    const uint16_t *h = (const uint16_t *)src;
-    for (size_t i = 0; i < npix; i++) {
-        float r = half_to_float(h[i*3+0]) * 80.0f / 10000.0f;
-        float g = half_to_float(h[i*3+1]) * 80.0f / 10000.0f;
-        float b = half_to_float(h[i*3+2]) * 80.0f / 10000.0f;
-        float R = 0.627404f*r + 0.329283f*g + 0.043313f*b;
-        float G = 0.069097f*r + 0.919540f*g + 0.011362f*b;
-        float B = 0.016391f*r + 0.088013f*g + 0.895595f*b;
-        out[i*3+0] = pq_encode(R);
-        out[i*3+1] = pq_encode(G);
-        out[i*3+2] = pq_encode(B);
+static void build_half_lut(float *lut) {
+    const float scale = 80.0f / 10000.0f;
+    for (uint32_t i = 0; i < 65536; i++) {
+        uint32_t s = (i >> 15) & 1, e = (i >> 10) & 0x1F, m = i & 0x3FF;
+        float v;
+        if (e == 0)       v = ldexpf((float)m, -24);
+        else if (e == 31) v = (m ? 0.0f : 65504.0f);   /* clamp inf, NaN -> 0 */
+        else              v = ldexpf((float)(m | 0x400), (int)e - 25);
+        lut[i] = (s ? -v : v) * scale;
     }
+}
+
+static void build_pq_lut(float *lut) {
+    const double m1 = 0.1593017578125, m2 = 78.84375;
+    const double c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+    for (uint32_t i = 0; i < PQ_LUT_N; i++) {
+        union { float f; uint32_t u; } v;
+        v.u = (PQ_LUT_BASE_EXP << 23) + (i << 15);
+        double x = v.f > 1.0f ? 1.0 : (double)v.f;
+        double p = pow(x, m1);
+        double e = pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
+        lut[i] = (float)(e * 65535.0);
+    }
+}
+
+static inline uint16_t pq_lookup(const float *lut, float x) {
+    if (!(x > 9.0949470e-13f)) return 0;     /* <= 2^-40, negative, or NaN */
+    if (x >= 1.0f) return 65535;
+    union { float f; uint32_t u; } v;
+    v.f = x;
+    uint32_t off  = v.u - (PQ_LUT_BASE_EXP << 23);
+    uint32_t idx  = off >> 15;
+    float    frac = (float)(off & 0x7FFF) * (1.0f / 32768.0f);
+    float    a    = lut[idx];
+    return (uint16_t)(a + (lut[idx + 1] - a) * frac + 0.5f);
+}
+
+static int pq_job_init(void *opaque, size_t num_threads) {
+    (void)opaque; (void)num_threads;
+    return 0;
+}
+
+static void pq_job_run(void *opaque, uint32_t task, size_t thread_id) {
+    const PqJob *j = (const PqJob *)opaque;
+    (void)thread_id;
+
+    int y0 = (int)task * PQ_ROWS_PER_TASK;
+    int y1 = y0 + PQ_ROWS_PER_TASK;
+    if (y1 > j->h) y1 = j->h;
+
+    for (int y = y0; y < y1; y++) {
+        const uint16_t *s = j->src + (size_t)y * j->w * 3;
+        uint16_t       *d = j->dst + (size_t)y * j->w * 3;
+        uint16_t pr = 0, pg = 0, pb = 0;           /* previous input pixel  */
+        uint16_t oR = 0, oG = 0, oB = 0;           /* previous output pixel */
+        int have_prev = 0;
+
+        for (int x = 0; x < j->w; x++, s += 3, d += 3) {
+            /* Flat regions (very common on desktops): reuse last result */
+            if (have_prev && s[0] == pr && s[1] == pg && s[2] == pb) {
+                d[0] = oR; d[1] = oG; d[2] = oB;
+                continue;
+            }
+            float r = j->half_lut[s[0]];
+            float g = j->half_lut[s[1]];
+            float b = j->half_lut[s[2]];
+
+            /* Rec.709 -> Rec.2020 primaries */
+            float R = 0.627404f*r + 0.329283f*g + 0.043313f*b;
+            float G = 0.069097f*r + 0.919540f*g + 0.011362f*b;
+            float B = 0.016391f*r + 0.088013f*g + 0.895595f*b;
+
+            oR = pq_lookup(j->pq_lut, R);
+            oG = pq_lookup(j->pq_lut, G);
+            oB = pq_lookup(j->pq_lut, B);
+            d[0] = oR; d[1] = oG; d[2] = oB;
+
+            pr = s[0]; pg = s[1]; pb = s[2];
+            have_prev = 1;
+        }
+    }
+}
+
+/* scRGB FP16 (6 bytes/px) -> PQ Rec.2020 UINT16 (6 bytes/px).
+ * runner may be NULL (serial fallback). */
+static uint16_t *scrgb_to_pq2020(const uint8_t *src, int w, int h, void *runner) {
+    size_t npix = (size_t)w * h;
+    uint16_t *out   = (uint16_t *)malloc(npix * 6);
+    float *half_lut = (float *)malloc(65536 * sizeof(float));
+    float *pq_lut   = (float *)malloc(PQ_LUT_N * sizeof(float));
+    if (!out || !half_lut || !pq_lut) {
+        free(out); free(half_lut); free(pq_lut);
+        return NULL;
+    }
+
+    build_half_lut(half_lut);
+    build_pq_lut(pq_lut);
+
+    PqJob job;
+    job.src = (const uint16_t *)src;
+    job.dst = out;
+    job.w = w; job.h = h;
+    job.half_lut = half_lut;
+    job.pq_lut = pq_lut;
+
+    uint32_t n_tasks = (uint32_t)((h + PQ_ROWS_PER_TASK - 1) / PQ_ROWS_PER_TASK);
+    int done_parallel = 0;
+    if (runner) {
+        done_parallel = (JxlThreadParallelRunner(runner, &job, pq_job_init,
+                                                 pq_job_run, 0, n_tasks) == 0);
+    }
+    if (!done_parallel) {
+        for (uint32_t t = 0; t < n_tasks; t++) pq_job_run(&job, t, 0);
+    }
+
+    free(half_lut);
+    free(pq_lut);
     return out;
 }
 
@@ -893,7 +986,8 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     if (is_hdr) {
         // HDR is now converted from scRGB FP16 to 16-bit integer
         // PQ / Rec.2100 (Rec.2020 primaries) before encoding.
-        pq_buf = scrgb_to_pq2020(rgb, (size_t)w * h);
+        // Uses LUTs and the same thread runner as the encoder for speed.
+        pq_buf = scrgb_to_pq2020(rgb, w, h, runner);   // was: (rgb, (size_t)w * h)
         if (!pq_buf) goto done;
         rgb = (const uint8_t *)pq_buf;
 
@@ -972,7 +1066,8 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
             goto done;
         }
     }
-    JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, 7);
+        // SDR keeps effort 7; HDR (16-bit PQ) uses effort 5 for much faster encoding
+    JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, is_hdr ? 5 : 7);
 
     size_t npix = (size_t)w * h;
     size_t bytes_per_pixel = is_hdr ? 6 : 3;
