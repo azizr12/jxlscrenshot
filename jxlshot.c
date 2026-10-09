@@ -43,7 +43,7 @@
 #include <objbase.h>
 #include <jxl/thread_parallel_runner.h>
 #include <knownfolders.h> // Required for FOLDERID_Pictures
-#include <math.h>
+#include <dxgi1_6.h>   // IDXGIOutput6 / DXGI_OUTPUT_DESC1
 
 
 // Forward Declarations
@@ -383,11 +383,45 @@ static void build_out_path(wchar_t *path, int n, int is_hdr) {
 // Screen capture (DXGI Desktop Duplication for native SDR/HDR)
 
 
+typedef enum {
+    CAPTURE_SDR_SRGB,
+    CAPTURE_SCRGB,
+    CAPTURE_HDR10,
+    CAPTURE_UNSUPPORTED
+} CaptureType;
+
+static CaptureType classify_capture(DXGI_FORMAT format, DXGI_COLOR_SPACE_TYPE color_space)
+{
+    if (format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
+        color_space == DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709)
+        return CAPTURE_SCRGB;
+
+    if (format == DXGI_FORMAT_R10G10B10A2_UNORM &&
+        color_space == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020)
+        return CAPTURE_HDR10;
+
+    if (format == DXGI_FORMAT_B8G8R8A8_UNORM &&
+        color_space == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709)
+        return CAPTURE_SDR_SRGB;
+
+    return CAPTURE_UNSUPPORTED;
+}
+
+static const char *capture_type_name(CaptureType t) {
+    switch (t) {
+        case CAPTURE_SDR_SRGB: return "SDR_SRGB";
+        case CAPTURE_SCRGB:    return "SCRGB (FP16 linear)";
+        case CAPTURE_HDR10:    return "HDR10 (R10G10B10A2, PQ, Rec.2020)";
+        default:               return "UNSUPPORTED";
+    }
+}
+
 typedef struct {
     uint8_t *bits;
     size_t size;
     int w, h;
-    int is_hdr; // 1 if FP16 scRGB, 0 if 8-bit SDR
+    int is_hdr;          // 1 if HDR10 (10-bit samples stored in uint16), 0 if 8-bit SDR
+    CaptureType type;
 } Grab;
 
 
@@ -517,7 +551,7 @@ static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
 
     /* Convert BGRA (DIB) -> tightly packed RGB, matching the SDR
      * layout the rest of the pipeline (encode_jxl_identity) expects. */
-    g->w = w; g->h = h; g->is_hdr = 0;
+    g->w = w; g->h = h; g->is_hdr = 0; g->type = CAPTURE_SDR_SRGB;
     g->size = (size_t)w * h * 3;
     g->bits = (uint8_t *)malloc(g->size);
     if (!g->bits) {
@@ -560,10 +594,12 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
     IDXGIOutput *output = NULL;
     IDXGIOutput1 *output1 = NULL;
     IDXGIOutput5 *output5 = NULL;
+    IDXGIOutput6 *output6 = NULL;
     IDXGIOutputDuplication *dupl = NULL;
     IDXGIResource *resource = NULL;
     ID3D11Texture2D *tex = NULL;
     ID3D11Texture2D *staging = NULL;
+    DXGI_COLOR_SPACE_TYPE out_cs = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709; // assume SDR if unknown
     int ok = 0;
 
     dbg("dxgi: start");
@@ -600,6 +636,20 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
         dbg("dxgi: QI IDXGIOutput1 FAILED"); goto cleanup;
     }
 
+    if (SUCCEEDED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput6, (void**)&output6))) {
+        DXGI_OUTPUT_DESC1 d1;
+        if (SUCCEEDED(output6->lpVtbl->GetDesc1(output6, &d1))) {
+            out_cs = d1.ColorSpace;
+            dbg("dxgi: output color space = %d, BitsPerColor=%u, MaxLum=%.1f, MinLum=%.4f, MaxFullFrameLum=%.1f",
+                (int)d1.ColorSpace, d1.BitsPerColor,
+                d1.MaxLuminance, d1.MinLuminance, d1.MaxFullFrameLuminance);
+        } else {
+            dbg("dxgi: IDXGIOutput6::GetDesc1 FAILED, assuming SDR sRGB colorspace");
+        }
+    } else {
+        dbg("dxgi: IDXGIOutput6 not available, assuming SDR sRGB colorspace");
+    }
+
     if (FAILED(D3D11CreateDevice(
         (IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0,
         D3D11_SDK_VERSION, &device, NULL, &ctx))) {
@@ -608,7 +658,7 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
 
     if (SUCCEEDED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput5, (void**)&output5))) {
         const DXGI_FORMAT supported_formats[] = {
-            DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM
+            DXGI_FORMAT_R10G10B10A2_UNORM, DXGI_FORMAT_B8G8R8A8_UNORM
         };
         HRESULT hr = output5->lpVtbl->DuplicateOutput1(
             output5, (IUnknown *)device, 0, 2, supported_formats, &dupl);
@@ -619,11 +669,9 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
     }
 
     /*
-     * Retry loop: acquire frames repeatedly, discarding blank/stale
-     * ones, up to a fixed number of attempts. Weak/legacy drivers
-     * (older Kepler-class NVIDIA cards among them) are known to
-     * occasionally hand back black frames for several calls in a row
-     * right after the duplication interface is (re)created.
+     * Retry loop: weak/legacy drivers (older Kepler-class NVIDIA cards among
+     * them) can return black frames for several calls in a row right after
+     * the duplication interface is created.
      */
     {
         const int MAX_ATTEMPTS = 8;
@@ -642,24 +690,33 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                 dbg("dxgi: QI ID3D11Texture2D FAILED"); dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
             }
 
+            // GET ROTATION FROM DXGI
 
             D3D11_TEXTURE2D_DESC desc;
             tex->lpVtbl->GetDesc(tex, &desc);
-            
-            // --- GET ROTATION FROM DXGI ---
+
             DXGI_OUTDUPL_DESC dupl_desc;
             dupl->lpVtbl->GetDesc(dupl, &dupl_desc);
             DXGI_MODE_ROTATION rotation = dupl_desc.Rotation;
-
             dbg("dxgi: DXGI reports rotation = %d (1=Identity, 2=90, 3=180, 4=270)", rotation);
+
+            CaptureType ctype = classify_capture(desc.Format, out_cs);
+            dbg("dxgi: frame format=%d, colorspace=%d -> %s",
+                (int)desc.Format, (int)out_cs, capture_type_name(ctype));
+
+            if (ctype != CAPTURE_SDR_SRGB && ctype != CAPTURE_HDR10) {
+                dbg("dxgi: unsupported capture type, aborting DXGI path (will fall back to GDI)");
+                dupl->lpVtbl->ReleaseFrame(dupl);
+                goto cleanup;
+            }
 
             int w_phys = desc.Width;
             int h_phys = desc.Height;
-
             int w_logical = w_phys;
             int h_logical = h_phys;
 
             // Swap dimensions if the monitor is rotated 90 or 270 degrees
+
             if (rotation == DXGI_MODE_ROTATION_ROTATE90 || rotation == DXGI_MODE_ROTATION_ROTATE270) {
                 w_logical = h_phys;
                 h_logical = w_phys;
@@ -667,7 +724,8 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
 
             g->w = w_logical;
             g->h = h_logical;
-            g->is_hdr = (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 1 : 0;
+            g->type = ctype;
+            g->is_hdr = (ctype == CAPTURE_HDR10) ? 1 : 0;
 
             D3D11_TEXTURE2D_DESC staging_desc = desc;
             staging_desc.Usage = D3D11_USAGE_STAGING;
@@ -688,12 +746,12 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                 dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
             }
 
-            size_t rgb_bpp = g->is_hdr ? 6 : 3;
-            size_t src_bpp = g->is_hdr ? 8 : 4; // DXGI source is 8 bytes (HDR) or 4 bytes (SDR)
-            
+            size_t rgb_bpp = g->is_hdr ? 6 : 3; // HDR10: 3 x uint16, SDR: 3 x uint8
+            size_t src_bpp = 4;                 // R10G10B10A2 and B8G8R8A8 are both 32-bit
+
             if (g->bits) { free(g->bits); g->bits = NULL; }
-            
-            // Allocate using LOGICAL dimensions to prevent out-of-bounds cropping
+
+            // Allocate using LOGICAL dimensions to prevent out-of-bounds writes
             g->size = (size_t)g->w * g->h * rgb_bpp;
             g->bits = (uint8_t *)malloc(g->size);
             if (!g->bits) {
@@ -710,8 +768,10 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                 uint8_t *src = src_row;
                 for (int px = 0; px < w_phys; px++) {
                     int dx, dy;
-                    
+
                     // Map physical pixels to logical coordinates based on rotation
+                    // Calculate destination pointer in the logical buffer
+
                     switch (rotation) {
                         case DXGI_MODE_ROTATION_ROTATE90:
                             dx = h_phys - 1 - py;
@@ -725,47 +785,54 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                             dx = py;
                             dy = w_phys - 1 - px;
                             break;
-                        default: // IDENTITY or UNSPECIFIED
+                        default:
                             dx = px;
                             dy = py;
                             break;
                     }
 
-                    // Calculate destination pointer in the logical buffer
                     uint8_t *dst_px = g->bits + ((size_t)dy * w_logical + dx) * rgb_bpp;
 
                     if (g->is_hdr) {
-                        // Convert R16G16B16A16_FLOAT (8 bytes) -> RGB48 (6 bytes)
-                        dst_px[0]=src[0]; dst_px[1]=src[1]; dst_px[2]=src[2];
-                        dst_px[3]=src[3]; dst_px[4]=src[4]; dst_px[5]=src[5];
+                        // R10G10B10A2_UNORM: R=bits0-9, G=bits10-19, B=bits20-29, A=bits30-31
+                        uint32_t p;
+                        memcpy(&p, src, 4);
+                        uint16_t *d = (uint16_t *)dst_px;
+                        d[0] = (uint16_t)( p        & 0x3FF);
+                        d[1] = (uint16_t)((p >> 10) & 0x3FF);
+                        d[2] = (uint16_t)((p >> 20) & 0x3FF);
                     } else {
-                        // Convert B8G8R8A8 (4 bytes) -> RGB24 (3 bytes)
-                        dst_px[0]=src[2]; dst_px[1]=src[1]; dst_px[2]=src[0];
+                        // B8G8R8A8 -> RGB24
+                        dst_px[0] = src[2]; dst_px[1] = src[1]; dst_px[2] = src[0];
                     }
                     src += src_bpp;
                 }
                 src_row += src_pitch;
             }
 
+
             ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
             dupl->lpVtbl->ReleaseFrame(dupl);
 
-            /* Pass the configured blank check mode to the detection function */
+            // Pass the configured blank check mode to the detection function
+
             if (!is_frame_blank(g->bits, g->w, g->h, g->is_hdr, g_cfg.blank_check_mode)) {
-                dbg("dxgi: attempt %d produced non-blank frame, accepting", attempt);
+                dbg("dxgi: attempt %d produced non-blank frame (%s, %dx%d), accepting",
+                    attempt, capture_type_name(g->type), g->w, g->h);
                 ok = 1;
                 break;
             }
 
             dbg("dxgi: attempt %d frame is blank, retrying", attempt);
-            SwitchToThread(); // Yields remainder of time slice to the game/DWM
-            Sleep(7);         // Fallback to a short sleep to guarantee frame pacing alignment
+            SwitchToThread();
+            Sleep(7);
         }
+
+        // Re-evaluate the 8th frame using Mode 3 (ALL pixels)
 
         if (!ok) {
             dbg("dxgi: all %d attempts deemed blank by mode %d. Running one last full-pixel (mode 3) check on the final frame.", MAX_ATTEMPTS, g_cfg.blank_check_mode);
-            
-            // Re-evaluate the 8th frame using Mode 3 (ALL pixels)
+
             if (g->bits && !is_frame_blank(g->bits, g->w, g->h, g->is_hdr, 3)) {
                 dbg("dxgi: full-pixel check found non-black pixels! Accepting frame.");
                 ok = 1;
@@ -782,6 +849,7 @@ cleanup:
     if (dupl) dupl->lpVtbl->Release(dupl);
     if (ctx) ctx->lpVtbl->Release(ctx);
     if (device) device->lpVtbl->Release(device);
+    if (output6) output6->lpVtbl->Release(output6);
     if (output5) output5->lpVtbl->Release(output5);
     if (output1) output1->lpVtbl->Release(output1);
     if (output) output->lpVtbl->Release(output);
@@ -816,156 +884,20 @@ static void free_grab(Grab *g) {
 
 // JPEG XL encoding (Identity SDR/HDR passthrough)
 
-#define PQ_LUT_BASE_EXP  87u      /* biased float exponent of 2^-40 */
-#define PQ_LUT_N         10242    /* 40 octaves * 256 steps + guard entries */
-#define PQ_ROWS_PER_TASK 16
-
-typedef struct {
-    const uint16_t *src;      /* FP16 RGB, tightly packed */
-    uint16_t       *dst;      /* PQ Rec.2020 UINT16 RGB */
-    int             w, h;
-    const float    *half_lut; /* half bits -> linear, already scaled by 80/10000 */
-    const float    *pq_lut;   /* log-spaced PQ code values */
-} PqJob;
-
-static void build_half_lut(float *lut) {
-    const float scale = 80.0f / 10000.0f;
-    for (uint32_t i = 0; i < 65536; i++) {
-        uint32_t s = (i >> 15) & 1, e = (i >> 10) & 0x1F, m = i & 0x3FF;
-        float v;
-        if (e == 0)       v = ldexpf((float)m, -24);
-        else if (e == 31) v = (m ? 0.0f : 65504.0f);   /* clamp inf, NaN -> 0 */
-        else              v = ldexpf((float)(m | 0x400), (int)e - 25);
-        lut[i] = (s ? -v : v) * scale;
-    }
-}
-
-static void build_pq_lut(float *lut) {
-    const double m1 = 0.1593017578125, m2 = 78.84375;
-    const double c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
-    for (uint32_t i = 0; i < PQ_LUT_N; i++) {
-        union { float f; uint32_t u; } v;
-        v.u = (PQ_LUT_BASE_EXP << 23) + (i << 15);
-        double x = v.f > 1.0f ? 1.0 : (double)v.f;
-        double p = pow(x, m1);
-        double e = pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
-        lut[i] = (float)(e * 65535.0);
-    }
-}
-
-static inline uint16_t pq_lookup(const float *lut, float x) {
-    if (!(x > 9.0949470e-13f)) return 0;     /* <= 2^-40, negative, or NaN */
-    if (x >= 1.0f) return 65535;
-    union { float f; uint32_t u; } v;
-    v.f = x;
-    uint32_t off  = v.u - (PQ_LUT_BASE_EXP << 23);
-    uint32_t idx  = off >> 15;
-    float    frac = (float)(off & 0x7FFF) * (1.0f / 32768.0f);
-    float    a    = lut[idx];
-    return (uint16_t)(a + (lut[idx + 1] - a) * frac + 0.5f);
-}
-
-static int pq_job_init(void *opaque, size_t num_threads) {
-    (void)opaque; (void)num_threads;
-    return 0;
-}
-
-static void pq_job_run(void *opaque, uint32_t task, size_t thread_id) {
-    const PqJob *j = (const PqJob *)opaque;
-    (void)thread_id;
-
-    int y0 = (int)task * PQ_ROWS_PER_TASK;
-    int y1 = y0 + PQ_ROWS_PER_TASK;
-    if (y1 > j->h) y1 = j->h;
-
-    for (int y = y0; y < y1; y++) {
-        const uint16_t *s = j->src + (size_t)y * j->w * 3;
-        uint16_t       *d = j->dst + (size_t)y * j->w * 3;
-        uint16_t pr = 0, pg = 0, pb = 0;           /* previous input pixel  */
-        uint16_t oR = 0, oG = 0, oB = 0;           /* previous output pixel */
-        int have_prev = 0;
-
-        for (int x = 0; x < j->w; x++, s += 3, d += 3) {
-            /* Flat regions (very common on desktops): reuse last result */
-            if (have_prev && s[0] == pr && s[1] == pg && s[2] == pb) {
-                d[0] = oR; d[1] = oG; d[2] = oB;
-                continue;
-            }
-            float r = j->half_lut[s[0]];
-            float g = j->half_lut[s[1]];
-            float b = j->half_lut[s[2]];
-
-            /* Rec.709 -> Rec.2020 primaries */
-            float R = 0.627404f*r + 0.329283f*g + 0.043313f*b;
-            float G = 0.069097f*r + 0.919540f*g + 0.011362f*b;
-            float B = 0.016391f*r + 0.088013f*g + 0.895595f*b;
-
-            oR = pq_lookup(j->pq_lut, R);
-            oG = pq_lookup(j->pq_lut, G);
-            oB = pq_lookup(j->pq_lut, B);
-            d[0] = oR; d[1] = oG; d[2] = oB;
-
-            pr = s[0]; pg = s[1]; pb = s[2];
-            have_prev = 1;
-        }
-    }
-}
-
-/* scRGB FP16 (6 bytes/px) -> PQ Rec.2020 UINT16 (6 bytes/px).
- * runner may be NULL (serial fallback). */
-static uint16_t *scrgb_to_pq2020(const uint8_t *src, int w, int h, void *runner) {
-    size_t npix = (size_t)w * h;
-    uint16_t *out   = (uint16_t *)malloc(npix * 6);
-    float *half_lut = (float *)malloc(65536 * sizeof(float));
-    float *pq_lut   = (float *)malloc(PQ_LUT_N * sizeof(float));
-    if (!out || !half_lut || !pq_lut) {
-        free(out); free(half_lut); free(pq_lut);
-        return NULL;
-    }
-
-    build_half_lut(half_lut);
-    build_pq_lut(pq_lut);
-
-    PqJob job;
-    job.src = (const uint16_t *)src;
-    job.dst = out;
-    job.w = w; job.h = h;
-    job.half_lut = half_lut;
-    job.pq_lut = pq_lut;
-
-    uint32_t n_tasks = (uint32_t)((h + PQ_ROWS_PER_TASK - 1) / PQ_ROWS_PER_TASK);
-    int done_parallel = 0;
-    if (runner) {
-        done_parallel = (JxlThreadParallelRunner(runner, &job, pq_job_init,
-                                                 pq_job_run, 0, n_tasks) == 0);
-    }
-    if (!done_parallel) {
-        for (uint32_t t = 0; t < n_tasks; t++) pq_job_run(&job, t, 0);
-    }
-
-    free(half_lut);
-    free(pq_lut);
-    return out;
-}
-
-// JPEG XL encoding (Identity SDR/HDR passthrough)
-
 static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, uint8_t **out_buf, size_t *out_size) {
     int ok = 0;
     uint8_t *buf = NULL;
-    uint16_t *pq_buf = NULL; // holds the PQ/Rec.2100 converted copy for HDR
     JxlEncoderStatus st;
-    
-    // 1. Create a parallel runner to use all available CPU cores (0 = auto-detect)
+
+    // 0 = auto-detect thread count
     void *runner = JxlThreadParallelRunnerCreate(NULL, 0);
-    
+
     JxlEncoder *enc = JxlEncoderCreate(NULL);
     if (!enc) {
         if (runner) JxlThreadParallelRunnerDestroy(runner);
         return 0;
     }
-
-    // 2. Attach the multithreading runner to the encoder
+    // Attach the multithreading runner to the encoder
     if (runner) {
         JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner);
     }
@@ -974,113 +906,63 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     JxlEncoderInitBasicInfo(&info);
     info.xsize = w;
     info.ysize = h;
-    // libjxl only allows true lossless when the original profile is kept.
-    // Without this, JxlEncoderSetFrameLossless() fails and was silently ignored.
-    info.uses_original_profile = lossless ? JXL_TRUE : JXL_FALSE;
-    
+    info.uses_original_profile = lossless ? JXL_TRUE : JXL_FALSE; // lossless requires the original profile
+
     JxlPixelFormat fmt;
     fmt.num_channels = 3;
     fmt.endianness = JXL_NATIVE_ENDIAN;
     fmt.align = 0;
 
     if (is_hdr) {
-        // HDR is now converted from scRGB FP16 to 16-bit integer
-        // PQ / Rec.2100 (Rec.2020 primaries) before encoding.
-        // Uses LUTs and the same thread runner as the encoder for speed.
-        pq_buf = scrgb_to_pq2020(rgb, w, h, runner);   // was: (rgb, (size_t)w * h)
-        if (!pq_buf) goto done;
-        rgb = (const uint8_t *)pq_buf;
-
-        info.bits_per_sample = 16;
-        info.exponent_bits_per_sample = 0; // integer samples now (was 5 = float16)
-        info.intensity_target = 10000.0f;  // PQ peak
-        fmt.data_type = JXL_TYPE_UINT16;   // was JXL_TYPE_FLOAT16
-
-        /*
-         * the comment below described the old
-         * passthrough approach. The data is now converted to PQ above,
-         * because tagging scRGB as plain linear sRGB lost the 80-nit
-         * scale and previewers rendered the colors incorrectly.
-         */
-
-        /*
-         * DXGI HDR desktop duplication uses scRGB:
-         *
-         *   R/G/B = linear-light sRGB
-         *   1.0    = SDR white reference (80 nits)
-         *   values > 1.0 represent HDR highlights
-         *
-         * Leave the samples untouched. libjxl accepts floating-point
-         * samples outside 0..1 and encodes them as extended linear sRGB.
-         */
+        // HDR10: raw 10-bit values (0..1023) stored in uint16
+        info.bits_per_sample = 10;
+        info.exponent_bits_per_sample = 0;
+        info.intensity_target = 10000.0f; // PQ nominal peak
+        fmt.data_type = JXL_TYPE_UINT16;
     } else {
         info.bits_per_sample = 8;
         info.exponent_bits_per_sample = 0;
         fmt.data_type = JXL_TYPE_UINT8;
     }
-    
+
     if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) goto done;
-    
+
     JxlColorEncoding ce;
     if (is_hdr) {
-        // describe the data as PQ with Rec.2100 primaries, D65.
         memset(&ce, 0, sizeof ce);
         ce.color_space       = JXL_COLOR_SPACE_RGB;
         ce.white_point       = JXL_WHITE_POINT_D65;
-        ce.primaries         = JXL_PRIMARIES_2100;
-        ce.transfer_function = JXL_TRANSFER_FUNCTION_PQ;
+        ce.primaries         = JXL_PRIMARIES_2100;        // Rec.2020
+        ce.transfer_function = JXL_TRANSFER_FUNCTION_PQ;  // ST 2084
         ce.rendering_intent  = JXL_RENDERING_INTENT_RELATIVE;
-
-        /*
-         * The captured FP16 samples are linear scRGB.
-         * Use libjxl's canonical linear-sRGB setup rather than
-         * manually constructing the same fields.
-         */
-        // JxlColorEncodingSetToLinearSRGB is no longer used for HDR
-
-        /*
-         * scRGB is a relative-luminance color space whose 1.0 level
-         * corresponds to the SDR reference white. Leave intensity_target
-         * at its default (0) so libjxl chooses the appropriate target
-         * for linear sRGB rather than falsely declaring a fixed HDR peak.
-         */
-        // intensity_target is now explicitly 10000 for PQ
     } else {
         JxlColorEncodingSetToSRGB(&ce, JXL_FALSE);
     }
-    
+
     if (JxlEncoderSetColorEncoding(enc, &ce) != JXL_ENC_SUCCESS) goto done;
 
     JxlEncoderFrameSettings *fs = JxlEncoderFrameSettingsCreate(enc, NULL);
     if (!fs) goto done;
 
-    // return values are now checked instead of ignored
     if (lossless) {
-        if (JxlEncoderSetFrameLossless(fs, JXL_TRUE) != JXL_ENC_SUCCESS) {
-            dbg("jxl: SetFrameLossless failed");
-            goto done;
-        }
+        JxlEncoderSetFrameLossless(fs, JXL_TRUE);
     } else {
-        if (JxlEncoderSetFrameDistance(fs, distance) != JXL_ENC_SUCCESS) {
-            dbg("jxl: SetFrameDistance failed");
-            goto done;
-        }
+        JxlEncoderSetFrameDistance(fs, distance);
     }
-        // SDR keeps effort 7; HDR (16-bit PQ) uses effort 5 for much faster encoding
-    JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, is_hdr ? 5 : 7);
+    JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, 7);
 
     size_t npix = (size_t)w * h;
     size_t bytes_per_pixel = is_hdr ? 6 : 3;
-    
+
     if (JxlEncoderAddImageFrame(fs, &fmt, rgb, npix * bytes_per_pixel) != JXL_ENC_SUCCESS) goto done;
-    
+
     JxlEncoderCloseInput(enc);
-    
+
     size_t cap = (size_t)w * h * (is_hdr ? 8 : 4);
     if (cap < (4 << 20)) cap = (4 << 20);
     buf = (uint8_t *)malloc(cap);
     if (!buf) goto done;
-    
+
     uint8_t *next = buf;
     size_t avail = cap;
     for (;;) {
@@ -1105,12 +987,9 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
 
 done:
     free(buf);
-    free(pq_buf); // free the PQ conversion buffer (safe if NULL)
     JxlEncoderDestroy(enc);
-    
     // Clean up the parallel runner
     if (runner) JxlThreadParallelRunnerDestroy(runner);
-    
     return ok;
 }
 
