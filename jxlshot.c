@@ -43,7 +43,7 @@
 #include <objbase.h>
 #include <jxl/thread_parallel_runner.h>
 #include <knownfolders.h> // Required for FOLDERID_Pictures
-
+#include <math.h>
 
 
 // Forward Declarations
@@ -816,9 +816,51 @@ static void free_grab(Grab *g) {
 
 // JPEG XL encoding (Identity SDR/HDR passthrough)
 
+static float half_to_float(uint16_t h) {
+    uint32_t s = (h >> 15) & 1, e = (h >> 10) & 0x1F, m = h & 0x3FF;
+    float v;
+    if (e == 0)       v = ldexpf((float)m, -24);
+    else if (e == 31) v = (m ? 0.0f : 65504.0f);      /* clamp inf/NaN */
+    else              v = ldexpf((float)(m | 0x400), (int)e - 25);
+    return s ? -v : v;
+}
+
+static uint16_t pq_encode(float nits_norm) {          /* input: nits / 10000 */
+    const float m1 = 0.1593017578125f, m2 = 78.84375f;
+    const float c1 = 0.8359375f, c2 = 18.8515625f, c3 = 18.6875f;
+    if (nits_norm < 0) nits_norm = 0;
+    if (nits_norm > 1) nits_norm = 1;
+    float p = powf(nits_norm, m1);
+    float e = powf((c1 + c2 * p) / (1.0f + c3 * p), m2);
+    if (e > 1) e = 1;
+    return (uint16_t)(e * 65535.0f + 0.5f);
+}
+
+/* scRGB FP16 (6 bytes/px) -> PQ Rec.2020 UINT16 (6 bytes/px) */
+static uint16_t *scrgb_to_pq2020(const uint8_t *src, size_t npix) {
+    uint16_t *out = (uint16_t *)malloc(npix * 6);
+    if (!out) return NULL;
+    const uint16_t *h = (const uint16_t *)src;
+    for (size_t i = 0; i < npix; i++) {
+        float r = half_to_float(h[i*3+0]) * 80.0f / 10000.0f;
+        float g = half_to_float(h[i*3+1]) * 80.0f / 10000.0f;
+        float b = half_to_float(h[i*3+2]) * 80.0f / 10000.0f;
+        float R = 0.627404f*r + 0.329283f*g + 0.043313f*b;
+        float G = 0.069097f*r + 0.919540f*g + 0.011362f*b;
+        float B = 0.016391f*r + 0.088013f*g + 0.895595f*b;
+        out[i*3+0] = pq_encode(R);
+        out[i*3+1] = pq_encode(G);
+        out[i*3+2] = pq_encode(B);
+    }
+    return out;
+}
+
+// JPEG XL encoding (Identity SDR/HDR passthrough)
+
 static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, uint8_t **out_buf, size_t *out_size) {
     int ok = 0;
     uint8_t *buf = NULL;
+    uint16_t *pq_buf = NULL; // holds the PQ/Rec.2100 converted copy for HDR
     JxlEncoderStatus st;
     
     // 1. Create a parallel runner to use all available CPU cores (0 = auto-detect)
@@ -839,6 +881,9 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     JxlEncoderInitBasicInfo(&info);
     info.xsize = w;
     info.ysize = h;
+    // libjxl only allows true lossless when the original profile is kept.
+    // Without this, JxlEncoderSetFrameLossless() fails and was silently ignored.
+    info.uses_original_profile = lossless ? JXL_TRUE : JXL_FALSE;
     
     JxlPixelFormat fmt;
     fmt.num_channels = 3;
@@ -846,9 +891,23 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     fmt.align = 0;
 
     if (is_hdr) {
+        // HDR is now converted from scRGB FP16 to 16-bit integer
+        // PQ / Rec.2100 (Rec.2020 primaries) before encoding.
+        pq_buf = scrgb_to_pq2020(rgb, (size_t)w * h);
+        if (!pq_buf) goto done;
+        rgb = (const uint8_t *)pq_buf;
+
         info.bits_per_sample = 16;
-        info.exponent_bits_per_sample = 5; // Indicates float16
-        fmt.data_type = JXL_TYPE_FLOAT16;
+        info.exponent_bits_per_sample = 0; // integer samples now (was 5 = float16)
+        info.intensity_target = 10000.0f;  // PQ peak
+        fmt.data_type = JXL_TYPE_UINT16;   // was JXL_TYPE_FLOAT16
+
+        /*
+         * the comment below described the old
+         * passthrough approach. The data is now converted to PQ above,
+         * because tagging scRGB as plain linear sRGB lost the 80-nit
+         * scale and previewers rendered the colors incorrectly.
+         */
 
         /*
          * DXGI HDR desktop duplication uses scRGB:
@@ -870,12 +929,20 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     
     JxlColorEncoding ce;
     if (is_hdr) {
+        // describe the data as PQ with Rec.2100 primaries, D65.
+        memset(&ce, 0, sizeof ce);
+        ce.color_space       = JXL_COLOR_SPACE_RGB;
+        ce.white_point       = JXL_WHITE_POINT_D65;
+        ce.primaries         = JXL_PRIMARIES_2100;
+        ce.transfer_function = JXL_TRANSFER_FUNCTION_PQ;
+        ce.rendering_intent  = JXL_RENDERING_INTENT_RELATIVE;
+
         /*
          * The captured FP16 samples are linear scRGB.
          * Use libjxl's canonical linear-sRGB setup rather than
          * manually constructing the same fields.
          */
-        JxlColorEncodingSetToLinearSRGB(&ce, JXL_FALSE);
+        // JxlColorEncodingSetToLinearSRGB is no longer used for HDR
 
         /*
          * scRGB is a relative-luminance color space whose 1.0 level
@@ -883,6 +950,7 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
          * at its default (0) so libjxl chooses the appropriate target
          * for linear sRGB rather than falsely declaring a fixed HDR peak.
          */
+        // intensity_target is now explicitly 10000 for PQ
     } else {
         JxlColorEncodingSetToSRGB(&ce, JXL_FALSE);
     }
@@ -892,10 +960,17 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     JxlEncoderFrameSettings *fs = JxlEncoderFrameSettingsCreate(enc, NULL);
     if (!fs) goto done;
 
+    // return values are now checked instead of ignored
     if (lossless) {
-        JxlEncoderSetFrameLossless(fs, JXL_TRUE);
+        if (JxlEncoderSetFrameLossless(fs, JXL_TRUE) != JXL_ENC_SUCCESS) {
+            dbg("jxl: SetFrameLossless failed");
+            goto done;
+        }
     } else {
-        JxlEncoderSetFrameDistance(fs, distance);
+        if (JxlEncoderSetFrameDistance(fs, distance) != JXL_ENC_SUCCESS) {
+            dbg("jxl: SetFrameDistance failed");
+            goto done;
+        }
     }
     JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, 7);
 
@@ -935,9 +1010,10 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
 
 done:
     free(buf);
+    free(pq_buf); // free the PQ conversion buffer (safe if NULL)
     JxlEncoderDestroy(enc);
     
-    // 3. Clean up the parallel runner
+    // Clean up the parallel runner
     if (runner) JxlThreadParallelRunnerDestroy(runner);
     
     return ok;
