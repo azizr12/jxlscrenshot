@@ -46,15 +46,13 @@ jobs:
           # Safely catches all transitive dependencies without executing the .exe (using ldd)
           ldd jxlshot_tray.exe | grep "/mingw64/bin" | awk '{print $3}' | sort -u | xargs -I {} cp {} dist/
 
-      - name: Create portable ZIP archive
-        run: |
-          zip -r jxlshot-windows-x64.zip dist/
+      # Removed the UPX compression step. 
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: jxlshot-windows-x64
-          path: jxlshot-windows-x64.zip
+          path: dist/
 
       - name: Publish release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
