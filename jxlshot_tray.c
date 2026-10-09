@@ -497,6 +497,7 @@ static void execute_full_capture(void) {
         task->w = g.w;
         task->h = g.h;
         task->is_hdr = g.is_hdr;
+        task->is_hdr10 = g.is_hdr10;
         task->lossless = g_cfg.lossless;
         task->distance = g_cfg.distance;
         wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
@@ -508,7 +509,7 @@ static void execute_full_capture(void) {
             dbg("execute_full_capture: encoding offloaded to background thread");
         } else {
             dbg("execute_full_capture: CreateThread failed, falling back to synchronous");
-            if (!save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path)) {
+            if (!save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->is_hdr10, task->lossless, task->distance, task->out_path)) {
                 MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
             }
             free(task->bits);
@@ -517,7 +518,7 @@ static void execute_full_capture(void) {
         }
     } else {
         dbg("execute_full_capture: malloc failed, falling back to synchronous");
-        if (!save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path)) {
+        if (!save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g.is_hdr10, g_cfg.lossless, g_cfg.distance, out_path)) {
             MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
         }
     }

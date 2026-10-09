@@ -43,7 +43,7 @@
 #include <objbase.h>
 #include <jxl/thread_parallel_runner.h>
 #include <knownfolders.h> // Required for FOLDERID_Pictures
-
+#include <dxgi1_6.h>
 
 
 // Forward Declarations
@@ -55,7 +55,7 @@ static void ensure_default_ini(void);
 static void init_config(void);
 static void dbg_init(void);
 static void build_out_path(wchar_t *path, int n, int is_hdr);
-static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path);
+static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int is_hdr10, int lossless, float distance, const wchar_t *path);
 
 
 // Configuration (INI)
@@ -387,7 +387,8 @@ typedef struct {
     uint8_t *bits;
     size_t size;
     int w, h;
-    int is_hdr; // 1 if FP16 scRGB, 0 if 8-bit SDR
+    int is_hdr;    // 1 = any HDR capture, 0 if 8-bit SDR
+    int is_hdr10;  // 1 = PQ Rec.2020 (10-bit unpacked to 16-bit)
 } Grab;
 
 
@@ -564,6 +565,7 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
     IDXGIResource *resource = NULL;
     ID3D11Texture2D *tex = NULL;
     ID3D11Texture2D *staging = NULL;
+    DXGI_COLOR_SPACE_TYPE color_space = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
     int ok = 0;
 
     dbg("dxgi: start");
@@ -600,6 +602,20 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
         dbg("dxgi: QI IDXGIOutput1 FAILED"); goto cleanup;
     }
 
+    // Report the output's color space
+    {
+        IDXGIOutput6 *output6 = NULL;
+        if (SUCCEEDED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput6, (void**)&output6))) {
+            DXGI_OUTPUT_DESC1 d1;
+            if (SUCCEEDED(output6->lpVtbl->GetDesc1(output6, &d1))) {
+                color_space = d1.ColorSpace;
+                dbg("dxgi: colorspace=%d bpc=%u maxLum=%.0f", (int)d1.ColorSpace, d1.BitsPerColor, d1.MaxLuminance);
+            }
+            output6->lpVtbl->Release(output6);
+        }
+    }
+
+
     if (FAILED(D3D11CreateDevice(
         (IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0,
         D3D11_SDK_VERSION, &device, NULL, &ctx))) {
@@ -608,10 +624,11 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
 
     if (SUCCEEDED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput5, (void**)&output5))) {
         const DXGI_FORMAT supported_formats[] = {
-            DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM
+            DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_FORMAT_R10G10B10A2_UNORM
         };
         HRESULT hr = output5->lpVtbl->DuplicateOutput1(
-            output5, (IUnknown *)device, 0, 2, supported_formats, &dupl);
+            output5, (IUnknown *)device, 0, 3, supported_formats, &dupl);
         if (FAILED(hr)) { dbg("dxgi: DuplicateOutput1 FAILED hr=0x%08lX", hr); goto cleanup; }
     } else {
         HRESULT hr = output1->lpVtbl->DuplicateOutput(output1, (IUnknown *)device, &dupl);
@@ -646,6 +663,8 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             D3D11_TEXTURE2D_DESC desc;
             tex->lpVtbl->GetDesc(tex, &desc);
             
+            dbg("dxgi: texture format=%d", (int)desc.Format);
+
             // --- GET ROTATION FROM DXGI ---
             DXGI_OUTDUPL_DESC dupl_desc;
             dupl->lpVtbl->GetDesc(dupl, &dupl_desc);
@@ -667,7 +686,22 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
 
             g->w = w_logical;
             g->h = h_logical;
-            g->is_hdr = (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 1 : 0;
+            {
+                int fp16  = (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+                int rgb10 = (desc.Format == DXGI_FORMAT_R10G10B10A2_UNORM);
+
+                g->is_hdr10 = rgb10 && color_space == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+                g->is_hdr   = fp16 || g->is_hdr10;
+
+                dbg("dxgi: format=%d colorspace=%d -> is_hdr=%d is_hdr10=%d",
+                    (int)desc.Format, (int)color_space, g->is_hdr, g->is_hdr10);
+
+                if (rgb10 && !g->is_hdr10) {
+                    dbg("dxgi: R10G10B10A2 without PQ/2020 colorspace, unsupported");
+                    dupl->lpVtbl->ReleaseFrame(dupl);
+                    goto cleanup;
+                }
+            }
 
             D3D11_TEXTURE2D_DESC staging_desc = desc;
             staging_desc.Usage = D3D11_USAGE_STAGING;
@@ -689,7 +723,7 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             }
 
             size_t rgb_bpp = g->is_hdr ? 6 : 3;
-            size_t src_bpp = g->is_hdr ? 8 : 4; // DXGI source is 8 bytes (HDR) or 4 bytes (SDR)
+            size_t src_bpp = (desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) ? 8 : 4; // DXGI source is 8 bytes (HDR) or 4 bytes (SDR)
             
             if (g->bits) { free(g->bits); g->bits = NULL; }
             
@@ -734,7 +768,14 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                     // Calculate destination pointer in the logical buffer
                     uint8_t *dst_px = g->bits + ((size_t)dy * w_logical + dx) * rgb_bpp;
 
-                    if (g->is_hdr) {
+                    if (g->is_hdr10) {
+                        uint32_t v; memcpy(&v, src, 4);
+                        uint32_t r = v & 1023, gg = (v >> 10) & 1023, b = (v >> 20) & 1023;
+                        uint16_t *d = (uint16_t *)dst_px;
+                        d[0] = (uint16_t)((r  << 6) | (r  >> 4));
+                        d[1] = (uint16_t)((gg << 6) | (gg >> 4));
+                        d[2] = (uint16_t)((b  << 6) | (b  >> 4));
+                    } else if (g->is_hdr) {
                         // Convert R16G16B16A16_FLOAT (8 bytes) -> RGB48 (6 bytes)
                         dst_px[0]=src[0]; dst_px[1]=src[1]; dst_px[2]=src[2];
                         dst_px[3]=src[3]; dst_px[4]=src[4]; dst_px[5]=src[5];
@@ -816,7 +857,7 @@ static void free_grab(Grab *g) {
 
 // JPEG XL encoding (Identity SDR/HDR passthrough)
 
-static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, uint8_t **out_buf, size_t *out_size) {
+static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int is_hdr10, int lossless, float distance, uint8_t **out_buf, size_t *out_size) {
     int ok = 0;
     uint8_t *buf = NULL;
     JxlEncoderStatus st;
@@ -845,7 +886,12 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     fmt.endianness = JXL_NATIVE_ENDIAN;
     fmt.align = 0;
 
-    if (is_hdr) {
+    if (is_hdr10) {
+        info.bits_per_sample = 16;
+        info.exponent_bits_per_sample = 0;
+        info.intensity_target = 10000.0f; // PQ peak
+        fmt.data_type = JXL_TYPE_UINT16;
+    } else if (is_hdr) {
         info.bits_per_sample = 16;
         info.exponent_bits_per_sample = 5; // Indicates float16
         fmt.data_type = JXL_TYPE_FLOAT16;
@@ -869,7 +915,15 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) goto done;
     
     JxlColorEncoding ce;
-    if (is_hdr) {
+    if (is_hdr10) {
+        // Already PQ-encoded Rec.2020 samples: tag them, don't convert them.
+        memset(&ce, 0, sizeof ce);
+        ce.color_space       = JXL_COLOR_SPACE_RGB;
+        ce.white_point       = JXL_WHITE_POINT_D65;
+        ce.primaries         = JXL_PRIMARIES_2100;
+        ce.transfer_function = JXL_TRANSFER_FUNCTION_PQ;
+        ce.rendering_intent  = JXL_RENDERING_INTENT_RELATIVE;
+    } else if (is_hdr) {
         /*
          * The captured FP16 samples are linear scRGB.
          * Use libjxl's canonical linear-sRGB setup rather than
@@ -943,11 +997,11 @@ done:
     return ok;
 }
 
-static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path) {
+static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int is_hdr10, int lossless, float distance, const wchar_t *path) {
     uint8_t *buf = NULL; 
     size_t size = 0;
     
-    if (!encode_jxl_identity(rgb, w, h, is_hdr, lossless, distance, &buf, &size)) {
+    if (!encode_jxl_identity(rgb, w, h, is_hdr, is_hdr10, lossless, distance, &buf, &size)) {
         dbg("save_rgb_as_jxl: encode_jxl_identity failed");
         return 0;
     }
@@ -1060,7 +1114,7 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
 
 typedef struct {
     uint8_t *bits;
-    int w, h, is_hdr, lossless;
+    int w, h, is_hdr, is_hdr10, lossless;
     float distance;
     wchar_t out_path[MAX_PATH];
 } EncodeTask;
@@ -1074,7 +1128,7 @@ static DWORD WINAPI EncodeWorker(LPVOID param) {
     EncodeTask *task = (EncodeTask *)param;
     
     // Perform the heavy encoding and file I/O in the background
-    save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path);
+    save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->is_hdr10, task->lossless, task->distance, task->out_path);
     
     // Clean up memory allocated for this specific task
     free(task->bits);
@@ -1128,6 +1182,7 @@ int main(int argc, char **argv) {
         task->w = g.w;
         task->h = g.h;
         task->is_hdr = g.is_hdr;
+        task->is_hdr10 = g.is_hdr10;
         task->lossless = g_cfg.lossless;
         task->distance = g_cfg.distance;
         wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
@@ -1148,7 +1203,7 @@ int main(int argc, char **argv) {
         } else {
             // Fallback to synchronous if thread creation fails
             dbg("main: CreateThread failed, falling back to synchronous save");
-            rc = save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path) ? 0 : 1;
+            rc = save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->is_hdr10, task->lossless, task->distance, task->out_path) ? 0 : 1;
             free(task->bits);
             free(task);
             g.bits = NULL;
@@ -1156,7 +1211,7 @@ int main(int argc, char **argv) {
     } else {
         // Fallback if malloc fails
         dbg("main: malloc failed for EncodeTask, falling back to synchronous save");
-        rc = save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path) ? 0 : 1;
+        rc = save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g.is_hdr10, g_cfg.lossless, g_cfg.distance, out_path) ? 0 : 1;
     }
     
     free_grab(&g); 
