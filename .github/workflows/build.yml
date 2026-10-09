@@ -1,6 +1,11 @@
 name: build-portable
 on:
   push:
+    branches:
+      - main
+      - master
+    tags:
+      - '*'
   workflow_dispatch:
 
 jobs:
