@@ -1,5 +1,5 @@
 #define MyAppName "jxlshot"
-#define MyAppVersion "2.2.8"
+#define MyAppVersion "2.2.9"
 #define MyAppPublisher "azizr12"
 #define MyAppURL "https://github.com/azizr12/jxlshot"
 #define MyAppExeName "jxlshot_tray.exe"
@@ -37,7 +37,6 @@ Name: "startup"; Description: "Launch on Windows Startup"; GroupDescription: "Ad
 [Files]
 Source: "dist\jxlshot_tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\*.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName} Tray"; Filename: "{app}\{#MyAppExeName}"
