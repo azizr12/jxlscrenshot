@@ -950,7 +950,7 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
             goto done;
         }
     }
-    JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, 7);
+    JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, 4);
 
     size_t npix = (size_t)w * h;
     size_t bytes_per_pixel = is_hdr ? 6 : 3;
