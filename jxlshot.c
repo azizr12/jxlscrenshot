@@ -35,6 +35,7 @@
 #include <ctype.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <math.h>      // DIAG: pow/fabs/ldexpf for pixel statistics
 #include <jxl/encode.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
@@ -74,6 +75,7 @@ typedef struct {
 } AppConfig;
 
 static AppConfig g_cfg;
+static float g_peak_nits = 1000.0f; // Stores the display's actual peak luminance
 static wchar_t   g_exe_dir[MAX_PATH];
 
 static void init_paths(void) {
@@ -187,7 +189,7 @@ static void ensure_default_ini(void) {
             L"; ==============================================================================\n"
             L"\n"
             L"[Capture]\n"
-            L"Debug=0\n"
+            L"Debug=1\n"
             L"Lossless=1\n"
             L"Distance=1.0\n"
             L"ExportPath=\n"
@@ -486,6 +488,538 @@ static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int samp
 }
 
 
+// ============================================================================
+// DIAGNOSTICS (log only -- none of this changes what is captured or saved)
+//
+// Goal: assume NOTHING about HDR. Log what Windows, the display, the GPU
+// driver, the captured pixels and the JXL encoder REALLY say.
+// Needs Debug=1 in jxlshot.ini.  Log: %TMP%\jxlshot_debug.log
+// ============================================================================
+
+#define DG_M1 0.1593017578125
+#define DG_M2 78.84375
+#define DG_C1 0.8359375
+#define DG_C2 18.8515625
+#define DG_C3 18.6875
+
+/* PQ code (0..1) -> absolute nits */
+static double pq_to_nits(double e) {
+    if (e <= 0.0) return 0.0;
+    if (e > 1.0) e = 1.0;
+    double p = pow(e, 1.0 / DG_M2);
+    double num = p - DG_C1; if (num < 0.0) num = 0.0;
+    double den = DG_C2 - DG_C3 * p;
+    return 10000.0 * pow(num / den, 1.0 / DG_M1);
+}
+
+/* absolute nits -> PQ code (0..1) */
+static double nits_to_pq(double nits) {
+    if (nits <= 0.0) return 0.0;
+    double y = nits / 10000.0; if (y > 1.0) y = 1.0;
+    double p = pow(y, DG_M1);
+    return pow((DG_C1 + DG_C2 * p) / (1.0 + DG_C3 * p), DG_M2);
+}
+
+static float half_to_float(uint16_t h) {
+    uint32_t s = (h >> 15) & 1u, e = (h >> 10) & 0x1Fu, m = h & 0x3FFu;
+    float v;
+    if (e == 0)       v = ldexpf((float)m, -24);
+    else if (e == 31) v = m ? (float)NAN : (float)INFINITY;
+    else              v = ldexpf((float)(m | 0x400u), (int)e - 25);
+    return s ? -v : v;
+}
+
+static const char *dg_cs_name(int cs) {
+    switch (cs) {
+        case 0:  return "RGB_FULL_G22_NONE_P709   (sRGB / SDR)";
+        case 1:  return "RGB_FULL_G10_NONE_P709   (scRGB linear)";
+        case 2:  return "RGB_STUDIO_G22_NONE_P709";
+        case 3:  return "RGB_STUDIO_G22_NONE_P2020";
+        case 12: return "RGB_FULL_G2084_NONE_P2020 (HDR10 / PQ / Rec.2020)";
+        case 14: return "RGB_STUDIO_G2084_NONE_P2020";
+        case 17: return "RGB_FULL_G22_NONE_P2020";
+        default: return "other/unknown";
+    }
+}
+
+static const char *dg_fmt_name(int f) {
+    switch (f) {
+        case 2:  return "R32G32B32A32_FLOAT";
+        case 10: return "R16G16B16A16_FLOAT (scRGB)";
+        case 24: return "R10G10B10A2_UNORM";
+        case 28: return "R8G8B8A8_UNORM";
+        case 87: return "B8G8R8A8_UNORM";
+        case 88: return "B8G8R8X8_UNORM";
+        default: return "other";
+    }
+}
+
+/* Windows display configuration: Advanced Color + SDR white level.
+ * Own struct definitions so older SDK headers still compile. */
+
+typedef struct {
+    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    UINT32 value;               /* bit0 supported, bit1 enabled, bit2 wideColorEnforced, bit3 forceDisabled */
+    UINT32 colorEncoding;       /* 0 RGB, 1 YCbCr444, 2 YCbCr422, 3 YCbCr420, 4 Intensity */
+    UINT32 bitsPerColorChannel;
+} DG_ADVCOLOR;
+
+typedef struct {
+    DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+    ULONG SDRWhiteLevel;        /* 1000 = 80 nits */
+} DG_SDRWHITE;
+
+static void diag_log_display_config(const wchar_t *gdi_name) {
+    UINT32 np = 0, nm = 0;
+    LONG r = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &np, &nm);
+    if (r != ERROR_SUCCESS) { dbg("cfg: GetDisplayConfigBufferSizes failed %ld", r); return; }
+
+    DISPLAYCONFIG_PATH_INFO *paths = (DISPLAYCONFIG_PATH_INFO *)calloc(np ? np : 1, sizeof *paths);
+    DISPLAYCONFIG_MODE_INFO *modes = (DISPLAYCONFIG_MODE_INFO *)calloc(nm ? nm : 1, sizeof *modes);
+    if (!paths || !modes) { free(paths); free(modes); return; }
+
+    r = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &np, paths, &nm, modes, NULL);
+    if (r != ERROR_SUCCESS) { dbg("cfg: QueryDisplayConfig failed %ld", r); free(paths); free(modes); return; }
+
+    dbg("cfg: %u active display path(s)", (unsigned)np);
+    for (UINT32 i = 0; i < np; i++) {
+        DISPLAYCONFIG_SOURCE_DEVICE_NAME sn;
+        ZeroMemory(&sn, sizeof sn);
+        sn.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
+        sn.header.size = sizeof sn;
+        sn.header.adapterId = paths[i].sourceInfo.adapterId;
+        sn.header.id = paths[i].sourceInfo.id;
+        int have_sn = (DisplayConfigGetDeviceInfo(&sn.header) == ERROR_SUCCESS);
+        int match = have_sn && gdi_name && wcscmp(sn.viewGdiDeviceName, gdi_name) == 0;
+
+        DISPLAYCONFIG_TARGET_DEVICE_NAME tn;
+        ZeroMemory(&tn, sizeof tn);
+        tn.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+        tn.header.size = sizeof tn;
+        tn.header.adapterId = paths[i].targetInfo.adapterId;
+        tn.header.id = paths[i].targetInfo.id;
+        int have_tn = (DisplayConfigGetDeviceInfo(&tn.header) == ERROR_SUCCESS);
+
+        DG_ADVCOLOR ac;
+        ZeroMemory(&ac, sizeof ac);
+        ac.header.type = (DISPLAYCONFIG_DEVICE_INFO_TYPE)9;   /* GET_ADVANCED_COLOR_INFO */
+        ac.header.size = sizeof ac;
+        ac.header.adapterId = paths[i].targetInfo.adapterId;
+        ac.header.id = paths[i].targetInfo.id;
+        LONG rac = DisplayConfigGetDeviceInfo(&ac.header);
+
+        DG_SDRWHITE sw;
+        ZeroMemory(&sw, sizeof sw);
+        sw.header.type = (DISPLAYCONFIG_DEVICE_INFO_TYPE)11;  /* GET_SDR_WHITE_LEVEL */
+        sw.header.size = sizeof sw;
+        sw.header.adapterId = paths[i].targetInfo.adapterId;
+        sw.header.id = paths[i].targetInfo.id;
+        LONG rsw = DisplayConfigGetDeviceInfo(&sw.header);
+
+        dbg("cfg: path %u %s source='%ls' monitor='%ls'", (unsigned)i,
+            match ? "<== CAPTURED MONITOR" : "",
+            have_sn ? sn.viewGdiDeviceName : L"?",
+            have_tn ? tn.monitorFriendlyDeviceName : L"?");
+
+        if (rac == ERROR_SUCCESS) {
+            dbg("cfg:   AdvancedColor supported=%u enabled=%u wideColorEnforced=%u forceDisabled=%u encoding=%u bitsPerChannel=%u",
+                ac.value & 1u, (ac.value >> 1) & 1u, (ac.value >> 2) & 1u, (ac.value >> 3) & 1u,
+                ac.colorEncoding, ac.bitsPerColorChannel);
+        } else {
+            dbg("cfg:   AdvancedColor query FAILED err=%ld", rac);
+        }
+        if (rsw == ERROR_SUCCESS) {
+            dbg("cfg:   SDR white level raw=%lu  => %.1f nits (1000 = 80 nits)",
+                sw.SDRWhiteLevel, sw.SDRWhiteLevel / 1000.0 * 80.0);
+        } else {
+            dbg("cfg:   SDR white level query FAILED err=%ld", rsw);
+        }
+    }
+    free(paths); free(modes);
+}
+
+/* Adapter / output / Desc1: everything the OS reports about this display */
+static void diag_log_output(IDXGIAdapter1 *adapter, IDXGIOutput *output, IDXGIOutput6 *output6) {
+    if (!g_cfg.debug_enabled || !g_dbg) return;
+
+    DXGI_ADAPTER_DESC1 ad;
+    if (adapter && SUCCEEDED(adapter->lpVtbl->GetDesc1(adapter, &ad))) {
+        dbg("diag: adapter '%ls' vendor=0x%04X device=0x%04X rev=%u flags=0x%X vram=%llu MB",
+            ad.Description, ad.VendorId, ad.DeviceId, ad.Revision, ad.Flags,
+            (unsigned long long)(ad.DedicatedVideoMemory / (1024 * 1024)));
+    }
+
+    DXGI_OUTPUT_DESC od;
+    ZeroMemory(&od, sizeof od);
+    if (output && SUCCEEDED(output->lpVtbl->GetDesc(output, &od))) {
+        dbg("diag: output '%ls' desktop=(%ld,%ld)-(%ld,%ld) rotation=%d attached=%d",
+            od.DeviceName, od.DesktopCoordinates.left, od.DesktopCoordinates.top,
+            od.DesktopCoordinates.right, od.DesktopCoordinates.bottom,
+            (int)od.Rotation, (int)od.AttachedToDesktop);
+    }
+
+    if (output6) {
+        DXGI_OUTPUT_DESC1 d1;
+        if (SUCCEEDED(output6->lpVtbl->GetDesc1(output6, &d1))) {
+            dbg("diag: Desc1 ColorSpace=%d  [%s]", (int)d1.ColorSpace, dg_cs_name((int)d1.ColorSpace));
+            dbg("diag: Desc1 BitsPerColor=%u", d1.BitsPerColor);
+            dbg("diag: Desc1 MaxLuminance=%.1f MinLuminance=%.4f MaxFullFrameLuminance=%.1f",
+                d1.MaxLuminance, d1.MinLuminance, d1.MaxFullFrameLuminance);
+            dbg("diag: Desc1 Red   primary = %.4f, %.4f", d1.RedPrimary[0],   d1.RedPrimary[1]);
+            dbg("diag: Desc1 Green primary = %.4f, %.4f", d1.GreenPrimary[0], d1.GreenPrimary[1]);
+            dbg("diag: Desc1 Blue  primary = %.4f, %.4f", d1.BluePrimary[0],  d1.BluePrimary[1]);
+            dbg("diag: Desc1 White point   = %.4f, %.4f", d1.WhitePoint[0],   d1.WhitePoint[1]);
+            dbg("diag:   ref Rec.709 : R .640,.330  G .300,.600  B .150,.060  W .3127,.3290");
+            dbg("diag:   ref Rec.2020: R .708,.292  G .170,.797  B .131,.046  W .3127,.3290");
+            dbg("diag:   ref DCI-P3  : R .680,.320  G .265,.690  B .150,.060  W .3127,.3290");
+        } else {
+            dbg("diag: GetDesc1 FAILED");
+        }
+    } else {
+        dbg("diag: IDXGIOutput6 not available (no Desc1 info)");
+    }
+
+    diag_log_display_config(od.DeviceName);
+}
+
+static void diag_log_dupl(IDXGIOutputDuplication *dupl, int used_dup1) {
+    if (!g_cfg.debug_enabled || !g_dbg || !dupl) return;
+    DXGI_OUTDUPL_DESC dd;
+    dupl->lpVtbl->GetDesc(dupl, &dd);
+    dbg("diag: dupl used DuplicateOutput1=%d (1 = requested format list {R10G10B10A2, B8G8R8A8})", used_dup1);
+    dbg("diag: dupl ModeDesc %ux%u format=%d [%s] rotation=%d inSysMem=%d refresh=%u/%u",
+        dd.ModeDesc.Width, dd.ModeDesc.Height, (int)dd.ModeDesc.Format, dg_fmt_name((int)dd.ModeDesc.Format),
+        (int)dd.Rotation, (int)dd.DesktopImageInSystemMemory,
+        dd.ModeDesc.RefreshRate.Numerator, dd.ModeDesc.RefreshRate.Denominator);
+}
+
+/* Called right after Map() succeeds, inside the retry loop */
+static void diag_log_frame(const DXGI_OUTDUPL_FRAME_INFO *fi, const D3D11_TEXTURE2D_DESC *d, const void *mapped_first) {
+    if (!g_cfg.debug_enabled || !g_dbg) return;
+    dbg("diag: frame accumulated=%u lastPresent=%lld lastMouse=%lld meta=%u protectedMasked=%d",
+        fi->AccumulatedFrames, (long long)fi->LastPresentTime.QuadPart,
+        (long long)fi->LastMouseUpdateTime.QuadPart, fi->TotalMetadataBufferSize,
+        (int)fi->ProtectedContentMaskedOut);
+    dbg("diag: texture %ux%u format=%d [%s] mips=%u array=%u usage=%d bind=0x%X misc=0x%X samples=%u",
+        d->Width, d->Height, (int)d->Format, dg_fmt_name((int)d->Format),
+        d->MipLevels, d->ArraySize, (int)d->Usage, d->BindFlags, d->MiscFlags, d->SampleDesc.Count);
+    if (mapped_first && d->Format == DXGI_FORMAT_R10G10B10A2_UNORM) {
+        uint32_t p; memcpy(&p, mapped_first, 4);
+        dbg("diag: first raw dword=0x%08X -> R=%u G=%u B=%u A=%u (10/10/10/2 bits)",
+            p, p & 0x3FF, (p >> 10) & 0x3FF, (p >> 20) & 0x3FF, (p >> 30) & 3u);
+    }
+}
+
+/* Statistics of the buffer that is actually written to the file */
+static void diag_log_pixel_stats(const Grab *g, const char *tag) {
+    if (!g_cfg.debug_enabled || !g_dbg || !g->bits) return;
+
+    int W = g->w, H = g->h;
+    dbg("stats[%s]: %dx%d is_hdr=%d type=%s bytes=%zu", tag, W, H, g->is_hdr,
+        capture_type_name(g->type), g->size);
+
+    size_t total = (size_t)W * H;
+    size_t step = total > 2000000 ? total / 2000000 : 1;
+    double maxv = g->is_hdr ? 1023.0 : 255.0;
+
+    unsigned mn[3] = {~0u, ~0u, ~0u}, mx[3] = {0, 0, 0};
+    double sum[3] = {0, 0, 0}, sat_sum = 0.0;
+    size_t n = 0, black = 0, clipped = 0, oog709 = 0, over203 = 0, over_hi = 0;
+    double max_nits = 0.0, nits_sum = 0.0;
+    size_t hist[8] = {0};     /* max-channel code histogram */
+    size_t nb[8] = {0};       /* luminance buckets in nits */
+    const double edges[7] = {1, 10, 50, 100, 203, 400, 1000};
+
+    for (size_t i = 0; i < total; i += step) {
+        unsigned c[3];
+        if (g->is_hdr) {
+            const uint16_t *p = (const uint16_t *)g->bits + i * 3;
+            c[0] = p[0]; c[1] = p[1]; c[2] = p[2];
+        } else {
+            const uint8_t *p = g->bits + i * 3;
+            c[0] = p[0]; c[1] = p[1]; c[2] = p[2];
+        }
+        unsigned hi = c[0], lo = c[0];
+        for (int k = 0; k < 3; k++) {
+            if (c[k] < mn[k]) mn[k] = c[k];
+            if (c[k] > mx[k]) mx[k] = c[k];
+            sum[k] += c[k];
+            if (c[k] > hi) hi = c[k];
+            if (c[k] < lo) lo = c[k];
+        }
+        n++;
+        if (!hi) black++;
+        if (hi >= (unsigned)maxv) clipped++;
+        if (hi) sat_sum += (double)(hi - lo) / (double)hi;
+        int b = (int)((hi / maxv) * 7.999); if (b < 0) b = 0; if (b > 7) b = 7;
+        hist[b]++;
+
+        if (g->is_hdr) {
+            double r = pq_to_nits(c[0] / maxv), gg = pq_to_nits(c[1] / maxv), bb = pq_to_nits(c[2] / maxv);
+            double Y = 0.2627 * r + 0.6780 * gg + 0.0593 * bb;
+            if (Y > max_nits) max_nits = Y;
+            nits_sum += Y;
+            if (Y > 203.0) over203++;
+            if (Y > 400.0) over_hi++;
+            int k = 0; while (k < 7 && Y >= edges[k]) k++;
+            nb[k]++;
+            double r7 =  1.6605 * r - 0.5876 * gg - 0.0728 * bb;
+            double g7 = -0.1246 * r + 1.1329 * gg - 0.0083 * bb;
+            double b7 = -0.0182 * r - 0.1006 * gg + 1.1187 * bb;
+            double m = r; if (gg > m) m = gg; if (bb > m) m = bb;
+            double tol = -0.02 * m;
+            if (m > 1.0 && (r7 < tol || g7 < tol || b7 < tol)) oog709++;
+        }
+    }
+    if (!n) return;
+
+    dbg("stats[%s]: sampled=%zu step=%zu", tag, n, step);
+    dbg("stats[%s]: R min/max/mean = %u / %u / %.1f", tag, mn[0], mx[0], sum[0] / n);
+    dbg("stats[%s]: G min/max/mean = %u / %u / %.1f", tag, mn[1], mx[1], sum[1] / n);
+    dbg("stats[%s]: B min/max/mean = %u / %u / %.1f", tag, mn[2], mx[2], sum[2] / n);
+    dbg("stats[%s]: black=%.2f%% clipped(max code)=%.2f%%", tag, 100.0 * black / n, 100.0 * clipped / n);
+    dbg("stats[%s]: MEAN SATURATION (code domain, (max-min)/max) = %.4f", tag, sat_sum / n);
+    dbg("stats[%s]: max-channel histogram dark->bright: %zu %zu %zu %zu %zu %zu %zu %zu", tag,
+        hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], hist[6], hist[7]);
+
+    if (g->is_hdr) {
+        dbg("stats[%s]: PQ luminance max=%.1f nits mean=%.1f nits  >203nits=%.2f%%  >400nits=%.2f%%",
+            tag, max_nits, nits_sum / n, 100.0 * over203 / n, 100.0 * over_hi / n);
+        dbg("stats[%s]: luminance buckets nits <1 | 1-10 | 10-50 | 50-100 | 100-203 | 203-400 | 400-1000 | >1000 : "
+            "%zu %zu %zu %zu %zu %zu %zu %zu", tag, nb[0], nb[1], nb[2], nb[3], nb[4], nb[5], nb[6], nb[7]);
+        dbg("stats[%s]: pixels outside Rec.709 gamut (if read as Rec.2020) = %.3f%%", tag, 100.0 * oog709 / n);
+    }
+
+    int pts[5][2] = { {0,0}, {W-1,0}, {0,H-1}, {W-1,H-1}, {W/2,H/2} };
+    for (int k = 0; k < 5; k++) {
+        size_t idx = (size_t)pts[k][1] * W + pts[k][0];
+        if (g->is_hdr) {
+            const uint16_t *p = (const uint16_t *)g->bits + idx * 3;
+            dbg("stats[%s]: px(%d,%d) code=%u,%u,%u  nits=%.1f,%.1f,%.1f", tag, pts[k][0], pts[k][1],
+                p[0], p[1], p[2],
+                pq_to_nits(p[0] / 1023.0), pq_to_nits(p[1] / 1023.0), pq_to_nits(p[2] / 1023.0));
+        } else {
+            const uint8_t *p = g->bits + idx * 3;
+            dbg("stats[%s]: px(%d,%d) = %u,%u,%u", tag, pts[k][0], pts[k][1], p[0], p[1], p[2]);
+        }
+    }
+}
+
+/*
+ * FP16 / scRGB REFERENCE capture, compared against the 10-bit capture.
+ *
+ * The FP16 desktop image is Windows' own un-quantised linear scRGB
+ * (1.0 = 80 nits, Rec.709 primaries, negatives = wider than 709).
+ * We convert it to HDR10 (Rec.2020 + PQ) ourselves and compare it
+ * pixel-by-pixel with what the R10G10B10A2 path gave us.
+ *   If they agree  -> the capture is truthful, look at tagging/viewer.
+ *   If they differ -> the R10G10B10A2 surface is already altered.
+ * The output file is NOT affected.
+ */
+static void diag_probe_fp16(const Grab *ref, HMONITOR mon) {
+    if (!g_cfg.debug_enabled || !g_dbg) return;
+    dbg("probe: ===== FP16/scRGB reference capture (diagnostic only) =====");
+
+    IDXGIFactory1 *factory = NULL;
+    IDXGIAdapter1 *adapter = NULL;
+    IDXGIOutput *output = NULL;
+    IDXGIOutput5 *output5 = NULL;
+    ID3D11Device *device = NULL;
+    ID3D11DeviceContext *ctx = NULL;
+    IDXGIOutputDuplication *dupl = NULL;
+    IDXGIResource *res = NULL;
+    ID3D11Texture2D *tex = NULL, *staging = NULL;
+    int frame_held = 0, mapped_ok = 0;
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    ZeroMemory(&mapped, sizeof mapped);
+
+    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&factory))) { dbg("probe: CreateDXGIFactory1 FAILED"); goto done; }
+
+    for (UINT ai = 0; !adapter; ai++) {
+        IDXGIAdapter1 *ca = NULL;
+        HRESULT hr = factory->lpVtbl->EnumAdapters1(factory, ai, &ca);
+        if (hr == DXGI_ERROR_NOT_FOUND) break;
+        if (!ca) continue;
+        for (UINT oi = 0; ; oi++) {
+            IDXGIOutput *co = NULL;
+            if (ca->lpVtbl->EnumOutputs(ca, oi, &co) == DXGI_ERROR_NOT_FOUND) break;
+            if (!co) continue;
+            DXGI_OUTPUT_DESC od;
+            if (SUCCEEDED(co->lpVtbl->GetDesc(co, &od)) && od.Monitor == mon) { adapter = ca; output = co; break; }
+            co->lpVtbl->Release(co);
+        }
+        if (!adapter) ca->lpVtbl->Release(ca);
+    }
+    if (!adapter || !output) { dbg("probe: no matching adapter/output"); goto done; }
+
+    if (FAILED(output->lpVtbl->QueryInterface(output, &IID_IDXGIOutput5, (void **)&output5))) {
+        dbg("probe: IDXGIOutput5 unavailable -> cannot request FP16 duplication"); goto done;
+    }
+    if (FAILED(D3D11CreateDevice((IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0,
+                                 D3D11_SDK_VERSION, &device, NULL, &ctx))) {
+        dbg("probe: D3D11CreateDevice FAILED"); goto done;
+    }
+
+    {
+        const DXGI_FORMAT fp16_only[] = { DXGI_FORMAT_R16G16B16A16_FLOAT };
+        HRESULT hr = output5->lpVtbl->DuplicateOutput1(output5, (IUnknown *)device, 0, 1, fp16_only, &dupl);
+        dbg("probe: DuplicateOutput1({R16G16B16A16_FLOAT}) hr=0x%08lX", (unsigned long)hr);
+        if (FAILED(hr)) goto done;
+    }
+
+    {
+        int got = 0;
+        for (int a = 1; a <= 4; a++) {
+            DXGI_OUTDUPL_FRAME_INFO fi;
+            if (res) { res->lpVtbl->Release(res); res = NULL; }
+            HRESULT hr = dupl->lpVtbl->AcquireNextFrame(dupl, 500, &fi, &res);
+            if (FAILED(hr)) { dbg("probe: AcquireNextFrame %d FAILED hr=0x%08lX", a, (unsigned long)hr); goto done; }
+            frame_held = 1;
+            if (fi.LastPresentTime.QuadPart == 0 && a < 4) { dupl->lpVtbl->ReleaseFrame(dupl); frame_held = 0; continue; }
+            got = 1; break;
+        }
+        if (!got) goto done;
+    }
+
+    if (FAILED(res->lpVtbl->QueryInterface(res, &IID_ID3D11Texture2D, (void **)&tex))) { dbg("probe: QI texture FAILED"); goto done; }
+
+    D3D11_TEXTURE2D_DESC desc;
+    tex->lpVtbl->GetDesc(tex, &desc);
+    dbg("probe: frame texture %ux%u format=%d [%s]", desc.Width, desc.Height, (int)desc.Format, dg_fmt_name((int)desc.Format));
+    if (desc.Format != DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        dbg("probe: driver did NOT give FP16 (got another format) -> no reference available");
+        goto done;
+    }
+
+    DXGI_OUTDUPL_DESC dd;
+    dupl->lpVtbl->GetDesc(dupl, &dd);
+
+    D3D11_TEXTURE2D_DESC sd = desc;
+    sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ; sd.BindFlags = 0; sd.MiscFlags = 0;
+    if (FAILED(device->lpVtbl->CreateTexture2D(device, &sd, NULL, &staging))) { dbg("probe: staging create FAILED"); goto done; }
+    ctx->lpVtbl->CopyResource(ctx, (ID3D11Resource *)staging, (ID3D11Resource *)tex);
+    if (FAILED(ctx->lpVtbl->Map(ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped))) { dbg("probe: Map FAILED"); goto done; }
+    mapped_ok = 1;
+
+    int W = (int)desc.Width, H = (int)desc.Height;
+    int rot = (int)dd.Rotation;
+    int comparable = ref && ref->bits && ref->is_hdr && ref->w == W && ref->h == H && (rot == 0 || rot == 1);
+    dbg("probe: rotation=%d comparable_with_10bit_capture=%d", rot, comparable);
+
+    int sx = W / 1000; if (sx < 1) sx = 1;
+    int sy = H / 1000; if (sy < 1) sy = 1;
+
+    double maxY = 0, sumY = 0, satFp = 0, satCap = 0, sumYcap = 0;
+    double adiff[3] = {0,0,0}, mfp[3] = {0,0,0}, mcap[3] = {0,0,0};
+    size_t n = 0, neg = 0, nonfinite = 0;
+
+    for (int y = 0; y < H; y += sy) {
+        const uint8_t *row = (const uint8_t *)mapped.pData + (size_t)y * mapped.RowPitch;
+        for (int x = 0; x < W; x += sx) {
+            const uint16_t *h = (const uint16_t *)(row + (size_t)x * 8);
+            double r  = half_to_float(h[0]) * 80.0;
+            double gg = half_to_float(h[1]) * 80.0;
+            double b  = half_to_float(h[2]) * 80.0;
+            if (!isfinite(r) || !isfinite(gg) || !isfinite(b)) { nonfinite++; continue; }
+
+            double Y = 0.2126 * r + 0.7152 * gg + 0.0722 * b;
+            if (Y > maxY) maxY = Y;
+            sumY += Y;
+            if (r < -0.5 || gg < -0.5 || b < -0.5) neg++;
+
+            /* Rec.709 linear -> Rec.2020 linear -> PQ 10-bit code */
+            double r2 = 0.6274 * r + 0.3293 * gg + 0.0433 * b;
+            double g2 = 0.0691 * r + 0.9195 * gg + 0.0114 * b;
+            double b2 = 0.0164 * r + 0.0880 * gg + 0.8956 * b;
+            double fc[3] = { nits_to_pq(r2) * 1023.0, nits_to_pq(g2) * 1023.0, nits_to_pq(b2) * 1023.0 };
+            double hi = fc[0], lo = fc[0];
+            for (int k = 1; k < 3; k++) { if (fc[k] > hi) hi = fc[k]; if (fc[k] < lo) lo = fc[k]; }
+            if (hi > 0) satFp += (hi - lo) / hi;
+            for (int k = 0; k < 3; k++) mfp[k] += fc[k];
+
+            if (comparable) {
+                const uint16_t *c = (const uint16_t *)ref->bits + ((size_t)y * W + x) * 3;
+                double cc[3] = { c[0], c[1], c[2] };
+                double chi = cc[0], clo = cc[0];
+                for (int k = 1; k < 3; k++) { if (cc[k] > chi) chi = cc[k]; if (cc[k] < clo) clo = cc[k]; }
+                if (chi > 0) satCap += (chi - clo) / chi;
+                for (int k = 0; k < 3; k++) { adiff[k] += fabs(cc[k] - fc[k]); mcap[k] += cc[k]; }
+                sumYcap += 0.2627 * pq_to_nits(cc[0] / 1023.0) + 0.6780 * pq_to_nits(cc[1] / 1023.0) + 0.0593 * pq_to_nits(cc[2] / 1023.0);
+            }
+            n++;
+        }
+    }
+
+    if (n) {
+        dbg("probe: FP16 sampled=%zu nonfinite=%zu  scRGB-negative(outside 709)=%.3f%%", n, nonfinite, 100.0 * neg / n);
+        dbg("probe: FP16 luminance max=%.1f nits mean=%.1f nits", maxY, sumY / n);
+        dbg("probe: FP16->HDR10 (2020+PQ) mean code R/G/B = %.1f / %.1f / %.1f", mfp[0] / n, mfp[1] / n, mfp[2] / n);
+        dbg("probe: FP16->HDR10 MEAN SATURATION = %.4f", satFp / n);
+        if (comparable) {
+            dbg("probe: 10-bit CAPTURE mean code R/G/B = %.1f / %.1f / %.1f", mcap[0] / n, mcap[1] / n, mcap[2] / n);
+            dbg("probe: 10-bit CAPTURE MEAN SATURATION = %.4f", satCap / n);
+            dbg("probe: 10-bit CAPTURE mean luminance = %.1f nits", sumYcap / n);
+            dbg("probe: mean |capture - fp16derived| code diff R/G/B = %.2f / %.2f / %.2f  (0 = identical, 1023 = full scale)",
+                adiff[0] / n, adiff[1] / n, adiff[2] / n);
+            dbg("probe: >> similar saturation + tiny diff = 10-bit capture is truthful. Much lower capture saturation = surface is altered.");
+            dbg("probe: >> (desktop must be static between the two captures for exact agreement)");
+        }
+    }
+
+    if (comparable) {
+        for (int gy = 1; gy <= 3; gy++) for (int gx = 1; gx <= 3; gx++) {
+            int x = W * gx / 4, y = H * gy / 4;
+            const uint16_t *h = (const uint16_t *)((const uint8_t *)mapped.pData + (size_t)y * mapped.RowPitch + (size_t)x * 8);
+            double r = half_to_float(h[0]) * 80.0, gg = half_to_float(h[1]) * 80.0, b = half_to_float(h[2]) * 80.0;
+            double r2 = 0.6274 * r + 0.3293 * gg + 0.0433 * b;
+            double g2 = 0.0691 * r + 0.9195 * gg + 0.0114 * b;
+            double b2 = 0.0164 * r + 0.0880 * gg + 0.8956 * b;
+            const uint16_t *c = (const uint16_t *)ref->bits + ((size_t)y * W + x) * 3;
+            dbg("probe: px(%d,%d) scRGBnits=%.1f,%.1f,%.1f | fp16->PQ2020 code=%.0f,%.0f,%.0f | 10bit capture code=%u,%u,%u",
+                x, y, r, gg, b,
+                nits_to_pq(r2) * 1023.0, nits_to_pq(g2) * 1023.0, nits_to_pq(b2) * 1023.0,
+                c[0], c[1], c[2]);
+        }
+    }
+
+done:
+    if (mapped_ok && ctx && staging) ctx->lpVtbl->Unmap(ctx, (ID3D11Resource *)staging, 0);
+    if (frame_held && dupl) dupl->lpVtbl->ReleaseFrame(dupl);
+    if (staging) staging->lpVtbl->Release(staging);
+    if (tex) tex->lpVtbl->Release(tex);
+    if (res) res->lpVtbl->Release(res);
+    if (dupl) dupl->lpVtbl->Release(dupl);
+    if (ctx) ctx->lpVtbl->Release(ctx);
+    if (device) device->lpVtbl->Release(device);
+    if (output5) output5->lpVtbl->Release(output5);
+    if (output) output->lpVtbl->Release(output);
+    if (adapter) adapter->lpVtbl->Release(adapter);
+    if (factory) factory->lpVtbl->Release(factory);
+    dbg("probe: ===== end =====");
+}
+
+/* Encoder: exactly what is written into the .jxl */
+static void diag_log_enc_info(int w, int h, int is_hdr, int lossless, float distance, const JxlBasicInfo *info) {
+    if (!g_cfg.debug_enabled || !g_dbg) return;
+    uint32_t v = JxlEncoderVersion();
+    dbg("enc: libjxl version %u.%u.%u", v / 1000000, (v / 1000) % 1000, v % 1000);
+    dbg("enc: %dx%d hdr=%d lossless=%d distance=%.2f", w, h, is_hdr, lossless, distance);
+    dbg("enc: basic_info bits=%u exp_bits=%u intensity_target=%.1f min_nits=%.4f uses_original_profile=%d alpha_bits=%u",
+        info->bits_per_sample, info->exponent_bits_per_sample, info->intensity_target,
+        info->min_nits, (int)info->uses_original_profile, info->alpha_bits);
+}
+
+static void diag_log_enc_color(const JxlColorEncoding *ce) {
+    if (!g_cfg.debug_enabled || !g_dbg) return;
+    dbg("enc: color_encoding space=%d (0=RGB) white=%d (1=D65) primaries=%d (1=sRGB 2=custom 9=Rec2100/2020) "
+        "transfer=%d (8=linear 13=sRGB 16=PQ 18=HLG) intent=%d (0=perceptual 1=relative)",
+        (int)ce->color_space, (int)ce->white_point, (int)ce->primaries,
+        (int)ce->transfer_function, (int)ce->rendering_intent);
+}
+
+// ============================ end of DIAGNOSTICS ============================
+
+
 // GDI BitBlt fallback capture (works without DXGI Desktop Duplication)
 
 
@@ -640,6 +1174,7 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
         DXGI_OUTPUT_DESC1 d1;
         if (SUCCEEDED(output6->lpVtbl->GetDesc1(output6, &d1))) {
             out_cs = d1.ColorSpace;
+            if (d1.MaxLuminance > 0.0f) g_peak_nits = d1.MaxLuminance;  // Added: Store actual display peak
             dbg("dxgi: output color space = %d, BitsPerColor=%u, MaxLum=%.1f, MinLum=%.4f, MaxFullFrameLum=%.1f",
                 (int)d1.ColorSpace, d1.BitsPerColor,
                 d1.MaxLuminance, d1.MinLuminance, d1.MaxFullFrameLuminance);
@@ -649,6 +1184,9 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
     } else {
         dbg("dxgi: IDXGIOutput6 not available, assuming SDR sRGB colorspace");
     }
+
+    // DIAG: full dump of adapter / output / Desc1 / Windows Advanced Color + SDR white level
+    diag_log_output(adapter, output, output6);
 
     if (FAILED(D3D11CreateDevice(
         (IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL, 0, NULL, 0,
@@ -667,6 +1205,9 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
         HRESULT hr = output1->lpVtbl->DuplicateOutput(output1, (IUnknown *)device, &dupl);
         if (FAILED(hr)) { dbg("dxgi: DuplicateOutput FAILED hr=0x%08lX", hr); goto cleanup; }
     }
+
+    // DIAG: what the duplication object really reports
+    diag_log_dupl(dupl, output5 != NULL);
 
     /*
      * Retry loop: weak/legacy drivers (older Kepler-class NVIDIA cards among
@@ -745,6 +1286,9 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                 dbg("dxgi: Map FAILED");
                 dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
             }
+
+            // DIAG: frame info, full texture description, first raw 32-bit pixel
+            diag_log_frame(&frame_info, &desc, mapped.pData);
 
             size_t rgb_bpp = g->is_hdr ? 6 : 3; // HDR10: 3 x uint16, SDR: 3 x uint8
             size_t src_bpp = 4;                 // R10G10B10A2 and B8G8R8A8 are both 32-bit
@@ -869,11 +1413,17 @@ static int grab_primary_monitor(Grab *g) {
     HMONITOR target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
 
     if (grab_via_dxgi(g, target_monitor)) {
+        // DIAG: statistics of the exact buffer that will be saved, then an
+        // independent FP16/scRGB capture to compare against it (log only)
+        diag_log_pixel_stats(g, "dxgi-final");
+        diag_probe_fp16(g, target_monitor);
         return 1;
     }
 
     dbg("grab: DXGI path failed or stayed blank, falling back to GDI BitBlt");
-    return grab_via_gdi(g, target_monitor);
+    int gdi_ok = grab_via_gdi(g, target_monitor);
+    if (gdi_ok) diag_log_pixel_stats(g, "gdi-final");   // DIAG
+    return gdi_ok;
 }
 
 static void free_grab(Grab *g) {
@@ -917,13 +1467,16 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
         // HDR10: raw 10-bit values (0..1023) stored in uint16
         info.bits_per_sample = 10;
         info.exponent_bits_per_sample = 0;
-        info.intensity_target = 10000.0f; // PQ nominal peak
+        info.intensity_target = g_peak_nits; // Modified: Use actual display peak instead of 10000.0f
         fmt.data_type = JXL_TYPE_UINT16;
     } else {
         info.bits_per_sample = 8;
         info.exponent_bits_per_sample = 0;
         fmt.data_type = JXL_TYPE_UINT8;
     }
+
+    // DIAG: exactly what the encoder is told
+    diag_log_enc_info(w, h, is_hdr, lossless, distance, &info);
 
     if (JxlEncoderSetBasicInfo(enc, &info) != JXL_ENC_SUCCESS) goto done;
 
@@ -938,6 +1491,9 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     } else {
         JxlColorEncodingSetToSRGB(&ce, JXL_FALSE);
     }
+
+    // DIAG: exactly which color tag is written into the file
+    diag_log_enc_color(&ce);
 
     if (JxlEncoderSetColorEncoding(enc, &ce) != JXL_ENC_SUCCESS) goto done;
 
@@ -980,6 +1536,7 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
         }
         free(buf); buf = NULL; goto done;
     }
+    dbg("enc: encoded OK, %zu bytes", cap - avail);   // DIAG
     *out_buf = buf;
     *out_size = cap - avail;
     buf = NULL;
