@@ -1,3 +1,8 @@
+v2.2.7 - 13 October 2026
+- add debugging for hdr
+- made the app use hdr10 only
+
+
 v2.2.6 - 5 October 2026
 - removed jxlshot exe binary not needed any more because it simply used as PoC
 - added hotkey register window to tray menu instead of using ini to avoid many user errors at inputing which will cause silent fail
