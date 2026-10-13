@@ -1,4 +1,4 @@
-v2.2.7 - 13 October 2026
+v2.2.8 - 13 October 2026
 - add debugging for hdr
 - made the app use hdr10 only
 

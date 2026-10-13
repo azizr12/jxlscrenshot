@@ -1174,7 +1174,7 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
         DXGI_OUTPUT_DESC1 d1;
         if (SUCCEEDED(output6->lpVtbl->GetDesc1(output6, &d1))) {
             out_cs = d1.ColorSpace;
-            if (d1.MaxLuminance > 0.0f) g_peak_nits = d1.MaxLuminance;  // Added: Store actual display peak
+            if (d1.MaxLuminance > 0.0f) g_peak_nits = d1.MaxLuminance;  // Store actual display peak
             dbg("dxgi: output color space = %d, BitsPerColor=%u, MaxLum=%.1f, MinLum=%.4f, MaxFullFrameLum=%.1f",
                 (int)d1.ColorSpace, d1.BitsPerColor,
                 d1.MaxLuminance, d1.MinLuminance, d1.MaxFullFrameLuminance);
