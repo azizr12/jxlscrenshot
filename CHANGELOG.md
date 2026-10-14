@@ -1,5 +1,5 @@
 v2.2.9 - 13 October 2026
-- made the app use linear FP16 scRGB to PQ Rec.2020 for a correct HDR image
+- made the app use linear FP16 scRGB to PQ Rec.2020 for a correct HDR image #5
 
 
 v2.2.6 - 5 October 2026
