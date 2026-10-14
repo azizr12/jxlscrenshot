@@ -63,7 +63,7 @@ in case of any issue with the software you are free to open discussion in "issue
 
 v2 - 30 August 2026
 
-- Hdr notone by @azizr12 in #4
+- Hdr notone by @azizr12 in [#4](https://github.com/azizr12/jxlscrenshot/pull/4)
 - added HDR support (still experimental)
 and need test consider opening issue if it doesnt work if you care about hdr, in case hdr work your screenshot end with _hdr.jxl
 - made some layer with compatibility and making screenshot always work because :
@@ -85,4 +85,4 @@ v1.1 - 22 August 2026
 - tested for fuzz
 
 v1 - 18 August 2026
-- first realease
+- first release
