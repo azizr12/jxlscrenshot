@@ -1,6 +1,6 @@
 v2.3.0 - 15 October 2026
-- add debug for how much aquiring frame take + encoding +writing
-- add more UI button in setting for changing lossless/lossy + distance
+- add debug for how much aquiring frame take + encoding + writing
+- add more UI button in setting for changing lossless/lossy + distance + JXL efffort
 
 
 v2.2.9 - 13 October 2026
