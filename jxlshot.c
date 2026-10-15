@@ -191,7 +191,7 @@ static void ensure_default_ini(void) {
             L"Debug=0\n"
             L"Lossless=1\n"
             L"Distance=1.0\n"
-            L"Effort=4\n"
+            L"Effort=7\n"
             L"ExportPath=\n"
             L"HotkeyFullVK=44\n"
             L"HotkeyFullMod=0\n"
