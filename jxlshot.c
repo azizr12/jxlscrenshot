@@ -17,7 +17,6 @@
 *
 */
 
-
 #define INITGUID
 #define UNICODE
 #define _UNICODE
@@ -48,7 +47,6 @@
 
 // Forward Declarations
 
-
 static void set_dpi_aware(void);
 static void init_paths(void);
 static void ensure_default_ini(void);
@@ -60,12 +58,14 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
 
 // Configuration (INI)
 
-
 typedef struct {
     int     debug_enabled;
     int     lossless;
     float   distance;
-    int blank_check_mode; /* 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels */
+    int     effort;
+// JXL encoder effort 1..10 (higher = smaller file, slower)
+    int     blank_check_mode; 
+// 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels
     wchar_t export_path[MAX_PATH];
     UINT    hk_full_mod;
     UINT    hk_full_vk;
@@ -93,7 +93,8 @@ static void init_paths(void) {
 static void ensure_default_ini(void) {
     wchar_t ini_path[MAX_PATH];
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-    
+    wchar_t val_effort[64] = L"";
+    BOOL has_effort = FALSE;
     BOOL file_exists = (GetFileAttributesW(ini_path) != INVALID_FILE_ATTRIBUTES);
     
     // 1. Read existing values if the file exists, using a marker to detect missing keys.
@@ -140,7 +141,7 @@ static void ensure_default_ini(void) {
         CHECK_KEY(L"Distance", val_distance, 64, has_distance);
         CHECK_KEY(L"ExportPath", val_export_path, MAX_PATH, has_export_path);
         CHECK_KEY(L"BlankCheckMode", val_blank_check, 64, has_blank_check);
-        
+        CHECK_KEY(L"Effort", val_effort, 64, has_effort);
         // Read new integer-based hotkey values
         CHECK_KEY(L"HotkeyFullVK", val_hk_full_vk, 64, has_hk_full_vk);
         CHECK_KEY(L"HotkeyFullMod", val_hk_full_mod, 64, has_hk_full_mod);
@@ -168,6 +169,8 @@ static void ensure_default_ini(void) {
             L";                    2.0+ = Higher compression, slight quality reduction.\n"
             L";   Lossless       : If set to 1, strictly forces true lossless (overrides Distance).\n"
             L";                    If set to 0, the encoder uses the 'Distance' value above.\n"
+            L";   Effort         : Encoder effort 1-10 (default 4). Lower = faster capture/save,\n"
+            L";                    higher = smaller file but much slower encoding.\n"
             L";\n"
             L"; [General Settings]\n"
             L";   Debug          : 1 = Enable debug logging; 0 = Disable.\n"
@@ -187,6 +190,7 @@ static void ensure_default_ini(void) {
             L"Debug=0\n"
             L"Lossless=1\n"
             L"Distance=1.0\n"
+            L"Effort=4\n"
             L"ExportPath=\n"
             L"HotkeyFullVK=44\n"
             L"HotkeyFullMod=0\n"
@@ -207,7 +211,7 @@ static void ensure_default_ini(void) {
         if (has_distance) WritePrivateProfileStringW(L"Capture", L"Distance", val_distance, ini_path);
         if (has_export_path) WritePrivateProfileStringW(L"Capture", L"ExportPath", val_export_path, ini_path);
         if (has_blank_check) WritePrivateProfileStringW(L"Capture", L"BlankCheckMode", val_blank_check, ini_path);
-        
+        if (has_effort) WritePrivateProfileStringW(L"Capture", L"Effort", val_effort, ini_path);
         // Restore new integer-based hotkey values
         if (has_hk_full_vk) WritePrivateProfileStringW(L"Capture", L"HotkeyFullVK", val_hk_full_vk, ini_path);
         if (has_hk_full_mod) WritePrivateProfileStringW(L"Capture", L"HotkeyFullMod", val_hk_full_mod, ini_path);
@@ -259,6 +263,7 @@ static void init_config(void) {
     g_cfg.lossless = 1; 
     g_cfg.distance = 1.0f; 
     g_cfg.blank_check_mode = 2;
+    g_cfg.effort = 4;
     g_cfg.hk_full_mod = 0; 
     g_cfg.hk_full_vk = VK_SNAPSHOT;
     g_cfg.hk_region_mod = MOD_CONTROL; 
@@ -278,7 +283,9 @@ static void init_config(void) {
     g_cfg.debug_enabled = get_cfg_int(L"Debug", 1, ini_path);
     g_cfg.lossless = get_cfg_int(L"Lossless", 1, ini_path);
     g_cfg.blank_check_mode = get_cfg_int(L"BlankCheckMode", 2, ini_path);
-    
+    g_cfg.effort = get_cfg_int(L"Effort", 4, ini_path);
+    if (g_cfg.effort < 1)  g_cfg.effort = 1;
+    if (g_cfg.effort > 10) g_cfg.effort = 10;
     if (g_cfg.blank_check_mode < 0) g_cfg.blank_check_mode = 0;
     if (g_cfg.blank_check_mode > 3) g_cfg.blank_check_mode = 3;
 
@@ -314,6 +321,8 @@ static void dbg_init(void) {
     SYSTEMTIME st; GetLocalTime(&st);
     fprintf(g_dbg, "\n===== jxlshot run started %04d-%02d-%02d %02d:%02d:%02d =====\n",
             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+    fprintf(g_dbg, "[config] effort=%d lossless=%d distance=%.2f blank_check=%d\n",
+            g_cfg.effort, g_cfg.lossless, g_cfg.distance, g_cfg.blank_check_mode);
     fflush(g_dbg);
 }
 
@@ -329,6 +338,15 @@ static void dbg(const char *fmt, ...) {
     SYSTEMTIME st; GetLocalTime(&st);
     fprintf(g_dbg, "[%02d:%02d:%02d.%03d] %s\n", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, buf);
     fflush(g_dbg);
+}
+
+// High-resolution timer for benchmark logging
+static double now_ms(void) {
+    static LARGE_INTEGER freq = {0};
+    LARGE_INTEGER c;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
 }
 
 // Output Paths & DPI awareness
@@ -449,6 +467,7 @@ static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int samp
  */
 static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
     ZeroMemory(g, sizeof *g);
+    double t_start = now_ms();
 
     MONITORINFO mi = { sizeof(mi) };
     if (!GetMonitorInfoW(target_monitor, &mi)) {
@@ -488,7 +507,9 @@ static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
 
     /* CAPTUREBLT pulls in layered/UI-composited windows too, not just
      * the raw framebuffer, which matters on some setups. */
+    double t_blt = now_ms();
     BOOL blt_ok = BitBlt(hdcMem, 0, 0, w, h, hdcScreen, x, y, SRCCOPY | CAPTUREBLT);
+    dbg("bench gdi: BitBlt = %.2f ms", now_ms() - t_blt);
 
     SelectObject(hdcMem, hbmOld);
     ReleaseDC(NULL, hdcScreen);
@@ -527,6 +548,7 @@ static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
     DeleteDC(hdcMem);
 
     dbg("gdi: capture ok w=%d h=%d", w, h);
+    dbg("bench gdi: TOTAL (incl. BGRA->RGB convert) = %.2f ms", now_ms() - t_start);
     return 1;
 }
 
@@ -547,6 +569,8 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
     ID3D11Texture2D *tex = NULL;
     ID3D11Texture2D *staging = NULL;
     int ok = 0;
+
+    double t_start = now_ms(), t_a, t_b;
 
     dbg("dxgi: start");
 
@@ -600,6 +624,8 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
         if (FAILED(hr)) { dbg("dxgi: DuplicateOutput FAILED hr=0x%08lX", hr); goto cleanup; }
     }
 
+    dbg("bench dxgi: setup (factory/adapter/device/duplication) = %.2f ms", now_ms() - t_start);
+
     /*
      * Retry loop: acquire frames repeatedly, discarding blank/stale
      * ones, up to a fixed number of attempts. Weak/legacy drivers
@@ -613,12 +639,15 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             if (resource) { resource->lpVtbl->Release(resource); resource = NULL; }
             if (tex) { tex->lpVtbl->Release(tex); tex = NULL; }
 
+            t_a = now_ms();
             DXGI_OUTDUPL_FRAME_INFO frame_info;
             HRESULT hr = dupl->lpVtbl->AcquireNextFrame(dupl, 500, &frame_info, &resource);
             if (FAILED(hr)) {
                 dbg("dxgi: AcquireNextFrame attempt %d FAILED hr=0x%08lX", attempt, hr);
                 goto cleanup;
             }
+            dbg("bench dxgi: attempt %d AcquireNextFrame = %.2f ms", attempt, now_ms() - t_a);
+            t_b = now_ms();
 
             if (FAILED(resource->lpVtbl->QueryInterface(resource, &IID_ID3D11Texture2D, (void**)&tex))) {
                 dbg("dxgi: QI ID3D11Texture2D FAILED"); dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
@@ -731,6 +760,9 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
             dupl->lpVtbl->ReleaseFrame(dupl);
 
+            dbg("bench dxgi: attempt %d copy+map+convert+rotate = %.2f ms (%dx%d %s)",
+                attempt, now_ms() - t_b, g->w, g->h, g->is_hdr ? "HDR" : "SDR");
+
             /* Pass the configured blank check mode to the detection function */
             if (!is_frame_blank(g->bits, g->w, g->h, g->is_hdr, g_cfg.blank_check_mode)) {
                 dbg("dxgi: attempt %d produced non-blank frame, accepting", attempt);
@@ -770,6 +802,7 @@ cleanup:
     if (factory) factory->lpVtbl->Release(factory);
 
     if (!ok && g->bits) { free(g->bits); g->bits = NULL; }
+    dbg("bench dxgi: TOTAL = %.2f ms (ok=%d)", now_ms() - t_start, ok);
     dbg("dxgi: end ok=%d", ok);
     return ok;
 }
@@ -778,13 +811,19 @@ cleanup:
 
 static int grab_primary_monitor(Grab *g) {
     HMONITOR target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+    double t0 = now_ms();
 
     if (grab_via_dxgi(g, target_monitor)) {
+        dbg("bench grab: DXGI succeeded, total capture = %.2f ms", now_ms() - t0);
         return 1;
     }
 
+    double t_dxgi_fail = now_ms() - t0;
     dbg("grab: DXGI path failed or stayed blank, falling back to GDI BitBlt");
-    return grab_via_gdi(g, target_monitor);
+    int r = grab_via_gdi(g, target_monitor);
+    dbg("bench grab: DXGI failed after %.2f ms, GDI fallback ok=%d, total capture = %.2f ms",
+        t_dxgi_fail, r, now_ms() - t0);
+    return r;
 }
 
 static void free_grab(Grab *g) {
@@ -840,6 +879,7 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     uint8_t *buf = NULL;
     uint16_t *pq_buf = NULL; // holds the PQ/Rec.2100 converted copy for HDR
     JxlEncoderStatus st;
+    double t_enc0 = now_ms(), t_stage;
 
     // 1. Create a parallel runner to use all available CPU cores (0 = auto-detect)
     void *runner = JxlThreadParallelRunnerCreate(NULL, 0);
@@ -868,11 +908,13 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     fmt.endianness = JXL_NATIVE_ENDIAN;
     fmt.align = 0;
 
+// HDR is now converted from scRGB FP16 to 16-bit integer
+// PQ / Rec.2100 (Rec.2020 primaries) before encoding.
     if (is_hdr) {
-        // HDR is now converted from scRGB FP16 to 16-bit integer
-        // PQ / Rec.2100 (Rec.2020 primaries) before encoding.
+        t_stage = now_ms();
         pq_buf = scrgb_to_pq2020(rgb, (size_t)w * h);
         if (!pq_buf) goto done;
+        dbg("bench jxl: scRGB->PQ Rec.2020 conversion = %.2f ms", now_ms() - t_stage);
         rgb = (const uint8_t *)pq_buf;
 
         info.bits_per_sample = 16;
@@ -950,14 +992,19 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
             goto done;
         }
     }
-    JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, 4);
+    if (JxlEncoderFrameSettingsSetOption(fs, JXL_ENC_FRAME_SETTING_EFFORT, g_cfg.effort) != JXL_ENC_SUCCESS) {
+        dbg("jxl: SetOption(EFFORT=%d) failed", g_cfg.effort);
+    }
+    dbg("jxl: effort=%d lossless=%d distance=%.2f", g_cfg.effort, lossless, distance);
 
     size_t npix = (size_t)w * h;
     size_t bytes_per_pixel = is_hdr ? 6 : 3;
 
+    t_stage = now_ms();
     if (JxlEncoderAddImageFrame(fs, &fmt, rgb, npix * bytes_per_pixel) != JXL_ENC_SUCCESS) goto done;
-
     JxlEncoderCloseInput(enc);
+    dbg("bench jxl: AddImageFrame = %.2f ms", now_ms() - t_stage);
+    t_stage = now_ms();
 
     size_t cap = (size_t)w * h * (is_hdr ? 8 : 4);
     if (cap < (4 << 20)) cap = (4 << 20);
@@ -981,6 +1028,9 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
         }
         free(buf); buf = NULL; goto done;
     }
+    dbg("bench jxl: ProcessOutput (actual compression) = %.2f ms", now_ms() - t_stage);
+    dbg("bench jxl: encode TOTAL = %.2f ms, output = %zu bytes (%.2f MB)",
+        now_ms() - t_enc0, cap - avail, (double)(cap - avail) / (1024.0 * 1024.0));
     *out_buf = buf;
     *out_size = cap - avail;
     buf = NULL;
@@ -1000,6 +1050,7 @@ done:
 static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path) {
     uint8_t *buf = NULL; 
     size_t size = 0;
+    double t_save0 = now_ms(), t_enc_done, t_write0;
     
     if (!encode_jxl_identity(rgb, w, h, is_hdr, lossless, distance, &buf, &size)) {
         dbg("save_rgb_as_jxl: encode_jxl_identity failed");
@@ -1012,6 +1063,9 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
         free(buf);
         return 0;
     }
+
+    t_enc_done = now_ms();
+    t_write0 = t_enc_done;
 
     int ok = 0; 
     FILE *f = _wfopen(path, L"wb");
@@ -1030,6 +1084,12 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
             ok = 1; // Write and flush succeeded
         }
         fclose(f);
+        
+        {
+            double wms = now_ms() - t_write0;
+            dbg("bench write: %zu bytes in %.2f ms (%.1f MB/s) ok=%d",
+                size, wms, wms > 0 ? ((double)size / 1048576.0) / (wms / 1000.0) : 0.0, ok);
+        }
     } else {
         DWORD err = GetLastError();
         const wchar_t *err_desc = L"Unknown error";
@@ -1103,6 +1163,9 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
             MessageBoxW(NULL, success_msg, L"jxlshot Fallback Save", MB_ICONWARNING | MB_OK | MB_SYSTEMMODAL);
         }
     }
+    
+    dbg("bench save: encode=%.2f ms, write+fallback=%.2f ms, TOTAL=%.2f ms",
+        t_enc_done - t_save0, now_ms() - t_enc_done, now_ms() - t_save0);
     
     free(buf); 
     return ok;

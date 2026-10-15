@@ -22,7 +22,6 @@
 
 
 
-
 #define _WIN32_IE 0x0600
 #define UNICODE
 #define _UNICODE
@@ -41,17 +40,12 @@
 #include <wchar.h>
 #include "jxlshot.c" // Pulls in core logic, config, and unified dbg() logger
 
-
 #include <uxtheme.h>
 #include <urlmon.h>
 #pragma comment(lib, "urlmon.lib") // (For MSVC)
 #pragma comment(lib, "comctl32.lib")
 
 // Undocumented but stable uxtheme APIs for Win32 Dark Mode (Windows 10 1903+)
-
-// Windows Dark Mode Support
-
-
 typedef enum _PreferredAppMode {
     Default    = 0,
     AllowDark  = 1,
@@ -134,7 +128,11 @@ static void install_mouse_hook(void);
 static void uninstall_mouse_hook(void);
 static void execute_about(void);
 
-static void reload_config(void) { init_config(); }
+static void reload_config(void) {
+    init_config();
+    dbg("config reloaded: effort=%d lossless=%d distance=%.2f",
+        g_cfg.effort, g_cfg.lossless, g_cfg.distance);
+}
 
 // Tray Icon & Context Menu
 
@@ -166,16 +164,31 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
     wcsncpy_s(out, out_size, buf, _TRUNCATE);
 }
 
-/* ---------------- Hotkey settings window (frameless, dark) ---------------- */
+/* ---------------- Hotkey & Settings window (frameless, dark) ---------------- */
 
 #define WM_HOTKEY_CAPTURED (WM_USER + 20)
 #define IDC_HK_FULL    101
 #define IDC_HK_REGION  102
 #define IDC_HK_CLOSE   103
 
-#define HK_W 300
-#define HK_H 176
-#define HK_TITLE_H 36
+#define IDC_LOSSLESS   204
+#define IDC_DIST_DN    205
+#define IDC_DIST_UP    206
+#define IDC_EFF_DN     207
+#define IDC_EFF_UP     208
+
+#define HK_W        300
+#define HK_H        332
+#define HK_TITLE_H  36
+#define HK_Y_HEAD   178
+#define HK_Y_LOSS   198
+#define HK_Y_DIST   240
+#define HK_Y_EFF    282
+#define HK_ROW_H    34
+#define HK_STEP_W   34
+#define HK_VAL_W    64
+#define HK_DN_X     (HK_W - 16 - HK_STEP_W - HK_VAL_W - HK_STEP_W)
+#define HK_UP_X     (HK_W - 16 - HK_STEP_W)
 
 #define HK_BG        RGB(32, 32, 32)
 #define HK_BTN       RGB(51, 51, 51)
@@ -214,6 +227,18 @@ static UINT current_mods(void) {
     return mod;
 }
 
+static void jxl_save_settings(void) {
+    wchar_t ini[MAX_PATH], s[32];
+    _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    WritePrivateProfileStringW(L"Capture", L"Lossless", g_cfg.lossless ? L"1" : L"0", ini);
+    _snwprintf(s, 32, L"%.1f", g_cfg.distance);
+    WritePrivateProfileStringW(L"Capture", L"Distance", s, ini);
+    _snwprintf(s, 32, L"%d", g_cfg.effort);
+    WritePrivateProfileStringW(L"Capture", L"Effort", s, ini);
+    dbg("settings changed: effort=%d lossless=%d distance=%.2f",
+        g_cfg.effort, g_cfg.lossless, g_cfg.distance);
+}
+
 static void hk_refresh_buttons(HWND hwnd) {
     wchar_t hk[128], txt[192];
     if (g_catcher_target == 1) wcscpy_s(txt, 192, L"Full Screen:  press a key...");
@@ -229,6 +254,20 @@ static void hk_refresh_buttons(HWND hwnd) {
         _snwprintf(txt, 192, L"Region:  %s", hk); txt[191] = 0;
     }
     SetWindowTextW(GetDlgItem(hwnd, IDC_HK_REGION), txt);
+
+    SetWindowTextW(GetDlgItem(hwnd, IDC_LOSSLESS),
+                   g_cfg.lossless ? L"Lossless:  ON" : L"Lossless:  OFF (lossy)");
+    SetWindowTextW(GetDlgItem(hwnd, IDC_DIST_DN), L"\u2212");
+    SetWindowTextW(GetDlgItem(hwnd, IDC_DIST_UP), L"+");
+    SetWindowTextW(GetDlgItem(hwnd, IDC_EFF_DN),  L"\u2212");
+    SetWindowTextW(GetDlgItem(hwnd, IDC_EFF_UP),  L"+");
+    EnableWindow(GetDlgItem(hwnd, IDC_DIST_DN), !g_cfg.lossless);
+    EnableWindow(GetDlgItem(hwnd, IDC_DIST_UP), !g_cfg.lossless);
+    
+    {
+        int ids[] = { IDC_LOSSLESS, IDC_DIST_DN, IDC_DIST_UP, IDC_EFF_DN, IDC_EFF_UP };
+        for (int i = 0; i < 5; i++) InvalidateRect(GetDlgItem(hwnd, ids[i]), NULL, FALSE);
+    }
 
     InvalidateRect(GetDlgItem(hwnd, IDC_HK_FULL), NULL, FALSE);
     InvalidateRect(GetDlgItem(hwnd, IDC_HK_REGION), NULL, FALSE);
@@ -255,12 +294,14 @@ static void hk_draw_button(LPDRAWITEMSTRUCT di) {
     int id = (int)di->CtlID;
     BOOL hot = (g_hkHoverBtn == di->hwndItem);
     BOOL down = (di->itemState & ODS_SELECTED) != 0;
+    BOOL dis = (di->itemState & ODS_DISABLED) != 0;
     BOOL active = (id == IDC_HK_FULL && g_catcher_target == 1) ||
-                  (id == IDC_HK_REGION && g_catcher_target == 2);
+                  (id == IDC_HK_REGION && g_catcher_target == 2) ||
+                  (id == IDC_LOSSLESS && g_cfg.lossless);
 
     COLORREF bg;
     if (id == IDC_HK_CLOSE) bg = hot ? HK_CLOSE_HOT : HK_BG;
-    else bg = down ? HK_BTN_DOWN : (hot ? HK_BTN_HOT : HK_BTN);
+    else bg = dis ? HK_BTN : (down ? HK_BTN_DOWN : (hot ? HK_BTN_HOT : HK_BTN));
 
     HBRUSH b = CreateSolidBrush(bg);
     FillRect(dc, &rc, b);
@@ -284,7 +325,7 @@ static void hk_draw_button(LPDRAWITEMSTRUCT di) {
     wchar_t txt[192];
     GetWindowTextW(di->hwndItem, txt, 192);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, active ? HK_ACCENT : HK_TEXT);
+    SetTextColor(dc, dis ? HK_DIM : (active ? HK_ACCENT : HK_TEXT));
     HFONT of = (HFONT)SelectObject(dc, g_hkFont);
     DrawTextW(dc, txt, -1, &rc, DT_SINGLELINE | DT_VCENTER | DT_CENTER | DT_END_ELLIPSIS);
     SelectObject(dc, of);
@@ -337,9 +378,14 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             struct { int id; int x, y, w, h; } b[] = {
                 { IDC_HK_FULL,   16, 48,  HK_W - 32, 38 },
                 { IDC_HK_REGION, 16, 94,  HK_W - 32, 38 },
-                { IDC_HK_CLOSE,  HK_W - 41, 1, 38, HK_TITLE_H - 2 }, 
+                { IDC_HK_CLOSE,  HK_W - 41, 1, 38, HK_TITLE_H - 2 },
+                { IDC_LOSSLESS,  16, HK_Y_LOSS, HK_W - 32, HK_ROW_H },
+                { IDC_DIST_DN,   HK_DN_X, HK_Y_DIST, HK_STEP_W, HK_ROW_H },
+                { IDC_DIST_UP,   HK_UP_X, HK_Y_DIST, HK_STEP_W, HK_ROW_H },
+                { IDC_EFF_DN,    HK_DN_X, HK_Y_EFF,  HK_STEP_W, HK_ROW_H },
+                { IDC_EFF_UP,    HK_UP_X, HK_Y_EFF,  HK_STEP_W, HK_ROW_H },
             };
-            for (int i = 0; i < 3; i++) {
+            for (int i = 0; i < (int)(sizeof(b) / sizeof(b[0])); i++) {
                 HWND hb = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                                           b[i].x, b[i].y, b[i].w, b[i].h, hwnd,
                                           (HMENU)(INT_PTR)b[i].id, hi, NULL);
@@ -359,15 +405,40 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             HFONT of = (HFONT)SelectObject(dc, g_hkFont);
             SetTextColor(dc, HK_TEXT);
             RECT t = { 16, 0, HK_W - 48, HK_TITLE_H };
-            DrawTextW(dc, L"Hotkey Settings", -1, &t, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            DrawTextW(dc, L"Settings", -1, &t, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
             SelectObject(dc, g_hkFontSmall);
             SetTextColor(dc, HK_DIM);
-            RECT h = { 16, 140, HK_W - 16, HK_H - 8 };
+            RECT h = { 16, 140, HK_W - 16, 172 };
             DrawTextW(dc, g_catcher_target
                 ? L"Press the new key combo. Esc cancels."
                 : L"Click a button, then press the new key combo.",
                 -1, &h, DT_WORDBREAK | DT_LEFT);
+
+            /* ---- JPEG XL section ---- */
+            SelectObject(dc, g_hkFontSmall);
+            SetTextColor(dc, HK_DIM);
+            RECT hd = { 16, HK_Y_HEAD, HK_W - 16, HK_Y_HEAD + 16 };
+            DrawTextW(dc, L"JPEG XL", -1, &hd, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+
+            SelectObject(dc, g_hkFont);
+            wchar_t vbuf[32];
+            COLORREF dist_col = g_cfg.lossless ? HK_DIM : HK_TEXT;
+
+            RECT lr = { 16, HK_Y_DIST, HK_DN_X - 4, HK_Y_DIST + HK_ROW_H };
+            SetTextColor(dc, dist_col);
+            DrawTextW(dc, L"Distance", -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            RECT vr = { HK_DN_X + HK_STEP_W, HK_Y_DIST, HK_UP_X, HK_Y_DIST + HK_ROW_H };
+            _snwprintf(vbuf, 32, L"%.1f", g_cfg.distance);
+            DrawTextW(dc, vbuf, -1, &vr, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+
+            lr.top = HK_Y_EFF; lr.bottom = HK_Y_EFF + HK_ROW_H;
+            SetTextColor(dc, HK_TEXT);
+            DrawTextW(dc, L"Effort", -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            vr.top = HK_Y_EFF; vr.bottom = HK_Y_EFF + HK_ROW_H;
+            _snwprintf(vbuf, 32, L"%d", g_cfg.effort);
+            DrawTextW(dc, vbuf, -1, &vr, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
+
             SelectObject(dc, of);
             EndPaint(hwnd, &ps);
             return 0;
@@ -386,6 +457,23 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 case IDC_HK_FULL:   hk_begin_capture(hwnd, 1); break;
                 case IDC_HK_REGION: hk_begin_capture(hwnd, 2); break;
                 case IDC_HK_CLOSE:  DestroyWindow(hwnd); break;
+                case IDC_LOSSLESS:
+                    g_cfg.lossless = !g_cfg.lossless;
+                    jxl_save_settings(); hk_refresh_buttons(hwnd); break;
+                case IDC_DIST_DN:
+                    g_cfg.distance -= 0.5f;
+                    if (g_cfg.distance < 0.5f) g_cfg.distance = 0.5f;
+                    jxl_save_settings(); hk_refresh_buttons(hwnd); break;
+                case IDC_DIST_UP:
+                    g_cfg.distance += 0.5f;
+                    if (g_cfg.distance > 25.0f) g_cfg.distance = 25.0f;
+                    jxl_save_settings(); hk_refresh_buttons(hwnd); break;
+                case IDC_EFF_DN:
+                    if (g_cfg.effort > 1)  g_cfg.effort--;
+                    jxl_save_settings(); hk_refresh_buttons(hwnd); break;
+                case IDC_EFF_UP:
+                    if (g_cfg.effort < 10) g_cfg.effort++;
+                    jxl_save_settings(); hk_refresh_buttons(hwnd); break;
             }
             return 0;
         case WM_HOTKEY_CAPTURED: { // posted by the keyboard hook
@@ -434,7 +522,7 @@ static void execute_hotkey_settings(HWND hwnd) {
     int y = mi.rcWork.top  + ((mi.rcWork.bottom - mi.rcWork.top) - HK_H) / 2;
 
     g_hwnd_catcher = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"JxlShotCatcherClass",
-        L"Hotkey Settings", WS_POPUP, x, y, HK_W, HK_H, NULL, NULL, GetModuleHandle(NULL), NULL);
+        L"Settings", WS_POPUP, x, y, HK_W, HK_H, NULL, NULL, GetModuleHandle(NULL), NULL);
 
     if (g_hwnd_catcher) {
         ShowWindow(g_hwnd_catcher, SW_SHOW);
@@ -451,7 +539,7 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, L"Open Export Folder");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENCONFIG, L"Open Config File");
-    AppendMenuW(hMenu, MF_STRING, IDM_HOTKEYS, L"Hotkey Settings...");
+    AppendMenuW(hMenu, MF_STRING, IDM_HOTKEYS, L"Settings...");
     AppendMenuW(hMenu, MF_STRING, IDM_RELOAD, L"Reload Configuration");
     AppendMenuW(hMenu, MF_STRING, IDM_CHECK_UPDATE, L"Check for Updates...");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
@@ -479,7 +567,7 @@ static void execute_full_capture(void) {
     Grab g;
     ZeroMemory(&g, sizeof(g));
 
-    dbg("execute_full_capture: begin");
+    dbg("execute_full_capture: begin (effort=%d)", g_cfg.effort);
     if (!grab_primary_monitor(&g)) {
         dbg("execute_full_capture: grab failed, showing MessageBox");
         MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
@@ -525,9 +613,7 @@ static void execute_full_capture(void) {
     free_grab(&g); 
 }
 
-
 // Version Parsing Helpers
-
 
 typedef struct { int major, minor, patch; } Version;
 
@@ -544,7 +630,6 @@ static int compare_versions(Version a, Version b) {
     if (a.minor != b.minor) return a.minor - b.minor;
     return a.patch - b.patch;
 }
-
 
 static void execute_check_update(HWND hwnd) {
     // Cache-busting URL to guarantee a fresh download every time
@@ -584,7 +669,7 @@ static void execute_check_update(HWND hwnd) {
     MultiByteToWideChar(CP_UTF8, 0, buffer, -1, remote_version_str, 64);
     
     // Trim trailing whitespace/newlines
-    for (int i = wcslen(remote_version_str) - 1; i >= 0; i--) {
+    for (int i = (int)wcslen(remote_version_str) - 1; i >= 0; i--) {
         if (remote_version_str[i] == L'\r' || remote_version_str[i] == L'\n' || remote_version_str[i] == L' ') {
             remote_version_str[i] = L'\0';
         } else {
@@ -660,9 +745,7 @@ static void execute_open_export_folder(void) {
     ShellExecuteW(NULL, L"explore", path_to_open, NULL, NULL, SW_SHOWNORMAL);
 }
 
-
 // Interactive Region Selection
-
 
 static HWND    g_hwndRegion = NULL;
 static HDC     g_hdcMem = NULL, g_hdcBlack = NULL;
@@ -678,6 +761,8 @@ static void crop_and_encode_region(RECT *r) {
     if (!grab_primary_monitor(&g)) {
         return; // Early exit is safe
     }
+    dbg("crop_and_encode_region: begin (effort=%d, %dx%d)", g_cfg.effort,
+        r->right - r->left, r->bottom - r->top);
     
     int rw = r->right - r->left;
     int rh = r->bottom - r->top;
@@ -863,7 +948,6 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_isRegionCapturing = FALSE;
             g_regionCaptureEndTime = GetTickCount(); // Start the 500ms block grace period
             
-            // DO NOT call uninstall_mouse_hook() here anymore!
             if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
             if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
             if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
@@ -874,7 +958,6 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_isDragging = FALSE;
             g_rcSel.left = g_rcSel.top = g_rcSel.right = g_rcSel.bottom = 0;
             
-            // if (!g_cfg.show_cursor) ShowCursor(TRUE);
             return 0;
         }
     }
@@ -882,7 +965,6 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 static void start_region_capture(void) {
-
     // Fallback safety: If the flag was somehow stuck, reset it before starting
     g_isRegionCapturing = TRUE; 
     g_regionCaptureEndTime = 0;
@@ -913,7 +995,6 @@ static void start_region_capture(void) {
 
     ReleaseDC(NULL, g_hdcScreen);
 
-
     WNDCLASSEXW wc = {0}; wc.cbSize = sizeof(wc); wc.lpfnWndProc = RegionWndProc;
     wc.hInstance = GetModuleHandle(NULL); wc.hCursor = LoadCursor(NULL, IDC_CROSS);
     wc.lpszClassName = L"JxlShotRegionClass"; RegisterClassExW(&wc);
@@ -930,8 +1011,6 @@ static void start_region_capture(void) {
         return;
     }
 
-    // if (!g_cfg.show_cursor) ShowCursor(FALSE);
-    
     ShowWindow(g_hwndRegion, SW_SHOW); 
     
     // Crucial Fix: Force the overlay to take keyboard focus so it receives WM_KEYDOWN (Escape)
@@ -954,14 +1033,7 @@ static void start_region_capture(void) {
     install_mouse_hook();
 }
 
-
 // Low-Level Keyboard Hook
-
-
-// Helper function to verify EXACT modifier match. 
-// If the INI requires Ctrl, Ctrl must be pressed. 
-// If the INI does NOT require Ctrl, Ctrl must NOT be pressed.
-
 
 static BOOL check_modifiers(UINT required_mod) {
     BOOL ctrl_pressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -986,7 +1058,7 @@ static BOOL check_modifiers(UINT required_mod) {
 static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
         KBDLLHOOKSTRUCT *pKB = (KBDLLHOOKSTRUCT *)lParam;
-                BOOL k_down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
+        BOOL k_down = (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN);
         BOOL k_up   = (wParam == WM_KEYUP   || wParam == WM_SYSKEYUP);
 
         // Hotkey-settings capture mode: app hotkeys are halted, keys are routed to the dialog.
@@ -1018,8 +1090,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
         }
 
         if (wParam == WM_KEYDOWN) {
-            /* 1. Check Full Capture Hotkey 
-             * Condition: Key is defined (!= 0) AND pressed key matches AND modifiers match exactly */
+            /* 1. Check Full Capture Hotkey */
             if (g_cfg.hk_full_vk != 0 && pKB->vkCode == g_cfg.hk_full_vk) {
                 if (check_modifiers(g_cfg.hk_full_mod)) {
                     dbg("MATCH: Triggering FULL capture (VK=%d, MOD=%d)", g_cfg.hk_full_vk, g_cfg.hk_full_mod);
@@ -1028,8 +1099,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
                 }
             }
             
-            /* 2. Check Region Capture Hotkey 
-             * Condition: Key is defined (!= 0) AND pressed key matches AND modifiers match exactly */
+            /* 2. Check Region Capture Hotkey */
             if (g_cfg.hk_region_vk != 0 && pKB->vkCode == g_cfg.hk_region_vk) {
                 if (check_modifiers(g_cfg.hk_region_mod)) {
                     dbg("MATCH: Triggering REGION capture (VK=%d, MOD=%d)", g_cfg.hk_region_vk, g_cfg.hk_region_mod);
@@ -1080,9 +1150,7 @@ static void uninstall_mouse_hook(void) {
     }
 }
 
-
 // Tray Window Procedure & Entry Point
-
 
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
     switch (msg) {
