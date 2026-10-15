@@ -179,7 +179,7 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
 #define IDC_EFF_UP     208
 
 #define HK_W        300
-#define HK_H        332
+#define HK_H        360
 #define HK_TITLE_H  36
 #define HK_Y_HEAD   178
 #define HK_Y_LOSS   198
@@ -396,6 +396,7 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return 0;
         }
         case WM_ERASEBKGND: return 1;
+
         case WM_PAINT: {
             PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps);
             RECT rc; GetClientRect(hwnd, &rc);
@@ -416,7 +417,6 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 : L"Click a button, then press the new key combo.",
                 -1, &h, DT_WORDBREAK | DT_LEFT);
 
-            /* ---- JPEG XL section ---- */
             SelectObject(dc, g_hkFontSmall);
             SetTextColor(dc, HK_DIM);
             RECT hd = { 16, HK_Y_HEAD, HK_W - 16, HK_Y_HEAD + 16 };
@@ -440,9 +440,53 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             _snwprintf(vbuf, 32, L"%d", g_cfg.effort);
             DrawTextW(dc, vbuf, -1, &vr, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
 
+
+            RECT info = { 16, HK_H - 35, HK_W - 16, HK_H - 5 };
+            SIZE sz;
+
+
+            SetTextColor(dc, HK_DIM);
+            DrawTextW(dc, L"Open ", -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            GetTextExtentPoint32W(dc, L"Open ", 5, &sz);
+            info.left += sz.cx;
+
+
+            SetTextColor(dc, HK_ACCENT);
+            DrawTextW(dc, L".ini", -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            GetTextExtentPoint32W(dc, L".ini", 4, &sz);
+            info.left += sz.cx;
+
+
+            SetTextColor(dc, HK_DIM);
+            DrawTextW(dc, L" file for more infos", -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+
             SelectObject(dc, of);
             EndPaint(hwnd, &ps);
             return 0;
+        }
+        case WM_SETCURSOR: {
+            // Change cursor to hand when hovering over the bottom info area
+            POINT pt;
+            GetCursorPos(&pt);
+            ScreenToClient(hwnd, &pt);
+            RECT info = { 16, HK_H - 35, HK_W - 16, HK_H - 5 };
+            if (pt.x >= info.left && pt.x <= info.right && pt.y >= info.top && pt.y <= info.bottom) {
+                SetCursor(LoadCursor(NULL, IDC_HAND));
+                return TRUE;
+            }
+            break;
+        }
+        case WM_LBUTTONDOWN: {
+            // Check if the user clicked anywhere in the bottom info area
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
+            RECT info = { 16, HK_H - 35, HK_W - 16, HK_H - 5 };
+            
+            if (x >= info.left && x <= info.right && y >= info.top && y <= info.bottom) {
+                // Trigger the existing IDM_OPENCONFIG command in the main tray window
+                PostMessageW(g_hwndTray, WM_COMMAND, MAKEWPARAM(IDM_OPENCONFIG, 0), 0);
+            }
+            break;
         }
         case WM_NCHITTEST: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };

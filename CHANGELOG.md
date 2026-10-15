@@ -1,3 +1,8 @@
+v2.3.0 - 15 October 2026
+- add debug for how much aquiring frame take + encoding +writing
+- add more UI button in setting for changing lossless/lossy + distance
+
+
 v2.2.9 - 13 October 2026
 - made the app use linear FP16 scRGB to PQ Rec.2020 for a correct HDR image [#5](https://github.com/azizr12/jxlscrenshot/issues/5)
 
