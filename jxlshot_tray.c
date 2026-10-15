@@ -46,6 +46,7 @@
 #pragma comment(lib, "comctl32.lib")
 
 // Undocumented but stable uxtheme APIs for Win32 Dark Mode (Windows 10 1903+)
+// Windows Dark Mode Support
 typedef enum _PreferredAppMode {
     Default    = 0,
     AllowDark  = 1,
@@ -164,7 +165,7 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
     wcsncpy_s(out, out_size, buf, _TRUNCATE);
 }
 
-/* ---------------- Hotkey & Settings window (frameless, dark) ---------------- */
+// Hotkey & Settings window (frameless, dark)
 
 #define WM_HOTKEY_CAPTURED (WM_USER + 20)
 #define IDC_HK_FULL    101
@@ -201,9 +202,9 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
 #define HK_CLOSE_HOT RGB(196, 43, 28)
 
 static HWND  g_hwnd_catcher = NULL;
-static int   g_catcher_target = 0;          // 0 = idle, 1 = full, 2 = region
+static int   g_catcher_target = 0; // 0 = idle, 1 = full, 2 = region
 static volatile BOOL g_hotkeyCapturing = FALSE; // checked by the keyboard hook
-static DWORD g_swallowUpVk = 0;             // swallow key-up of the captured key
+static DWORD g_swallowUpVk = 0; // swallow key-up of the captured key
 static HFONT g_hkFont = NULL, g_hkFontSmall = NULL;
 static HWND  g_hkHoverBtn = NULL;
 
@@ -277,9 +278,9 @@ static void hk_refresh_buttons(HWND hwnd) {
 static void hk_begin_capture(HWND hwnd, int target) {
     g_catcher_target = target;
     g_swallowUpVk = 0;
-    g_hotkeyCapturing = TRUE;   // hook now stops firing captures and routes keys here
+    g_hotkeyCapturing = TRUE; // hook now stops firing captures and routes keys here
     hk_refresh_buttons(hwnd);
-    SetFocus(hwnd);             // so Space/Enter can't "click" the button
+    SetFocus(hwnd); // so Space/Enter can't "click" the button
 }
 
 static void hk_end_capture(HWND hwnd) {
@@ -947,7 +948,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_DESTROY: {
             g_isRegionCapturing = FALSE;
             g_regionCaptureEndTime = GetTickCount(); // Start the 500ms block grace period
-            
+// DO NOT call uninstall_mouse_hook() here anymore!
             if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
             if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
             if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
@@ -1035,6 +1036,10 @@ static void start_region_capture(void) {
 
 // Low-Level Keyboard Hook
 
+// Helper function to verify EXACT modifier match. 
+// If the INI requires Ctrl, Ctrl must be pressed. 
+// If the INI does NOT require Ctrl, Ctrl must NOT be pressed.
+
 static BOOL check_modifiers(UINT required_mod) {
     BOOL ctrl_pressed = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
     BOOL shift_pressed = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -1076,21 +1081,24 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
             return CallNextHookEx(g_hhkKeyboard, nCode, wParam, lParam); // let modifiers through
         }
 
-        // Swallow the key-up of the key we just captured (e.g. PrintScreen)
+// Swallow the key-up of the key we just captured (e.g. PrintScreen)
         if (k_up && g_swallowUpVk && pKB->vkCode == g_swallowUpVk) {
             g_swallowUpVk = 0;
             return 1;
         }
-        // FIX: Intercept Escape globally while region selection is active.
-        // This guarantees Esc works even if Windows refuses to give the overlay keyboard focus,
-        // and prevents the Esc key from accidentally exiting fullscreen games or closing underlying menus.
+// Intercept Escape globally while region selection is active.
+// This guarantees Esc works even if Windows refuses to give the overlay keyboard focus,
+// and prevents the Esc key from accidentally exiting fullscreen games or closing underlying menus.
+
         if (g_hwndRegion && pKB->vkCode == VK_ESCAPE && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
             PostMessageW(g_hwndRegion, WM_KEYDOWN, VK_ESCAPE, 0);
             return 1; // Block the key from reaching the underlying application
         }
-
+// Check Full Capture Hotkey 
+// Condition: Key is defined (!= 0)
+// AND pressed key matches AND modifiers match exactly
         if (wParam == WM_KEYDOWN) {
-            /* 1. Check Full Capture Hotkey */
+            // Check Full Capture Hotkey
             if (g_cfg.hk_full_vk != 0 && pKB->vkCode == g_cfg.hk_full_vk) {
                 if (check_modifiers(g_cfg.hk_full_mod)) {
                     dbg("MATCH: Triggering FULL capture (VK=%d, MOD=%d)", g_cfg.hk_full_vk, g_cfg.hk_full_mod);
@@ -1099,7 +1107,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
                 }
             }
             
-            /* 2. Check Region Capture Hotkey */
+            /// Check Region Capture Hotkey
             if (g_cfg.hk_region_vk != 0 && pKB->vkCode == g_cfg.hk_region_vk) {
                 if (check_modifiers(g_cfg.hk_region_mod)) {
                     dbg("MATCH: Triggering REGION capture (VK=%d, MOD=%d)", g_cfg.hk_region_vk, g_cfg.hk_region_mod);

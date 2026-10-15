@@ -11,7 +11,8 @@
 *  THE PICTURE EXPORTING FOLLOW THE EXPORT PATH !!!!!!!
 *
 * Configuration is read from jxlshot.ini located next to the executable.
-* Debug logs are written to %TMP%\jxlshot_debug.log
+* Debug logs are written to jxlshot_debug.log next to the executable
+* (falls back to %TMP%\jxlshot_debug.log if that folder is not writable)
 *
 * jxlshot.c — minimal command-line screenshot tool for Windows.
 *
@@ -312,17 +313,29 @@ static FILE *g_dbg = NULL;
 
 static void dbg_init(void) {
     if (!g_cfg.debug_enabled) { g_dbg = NULL; return; }
-    wchar_t temp_dir[MAX_PATH], log_path[MAX_PATH];
-    GetTempPathW(MAX_PATH, temp_dir);
-    _snwprintf(log_path, MAX_PATH, L"%sjxlshot_debug.log", temp_dir);
+    wchar_t log_path[MAX_PATH];
+
+    // Primary: same folder as the executable (g_exe_dir is set by init_paths())
+    _snwprintf(log_path, MAX_PATH, L"%s\\jxlshot_debug.log", g_exe_dir);
+    log_path[MAX_PATH - 1] = L'\0';
     g_dbg = _wfopen(log_path, L"a");
+
+    // Fallback: %TMP% if the exe folder is read-only
+    if (!g_dbg) {
+        wchar_t temp_dir[MAX_PATH];
+        GetTempPathW(MAX_PATH, temp_dir);
+        _snwprintf(log_path, MAX_PATH, L"%sjxlshot_debug.log", temp_dir);
+        log_path[MAX_PATH - 1] = L'\0';
+        g_dbg = _wfopen(log_path, L"a");
+    }
     if (!g_dbg) return;
-    
+
     SYSTEMTIME st; GetLocalTime(&st);
     fprintf(g_dbg, "\n===== jxlshot run started %04d-%02d-%02d %02d:%02d:%02d =====\n",
             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
     fprintf(g_dbg, "[config] effort=%d lossless=%d distance=%.2f blank_check=%d\n",
             g_cfg.effort, g_cfg.lossless, g_cfg.distance, g_cfg.blank_check_mode);
+    fprintf(g_dbg, "[config] log file: %ls\n", log_path);
     fflush(g_dbg);
 }
 
