@@ -170,7 +170,7 @@ static void ensure_default_ini(void) {
             L";                    2.0+ = Higher compression, slight quality reduction.\n"
             L";   Lossless       : If set to 1, strictly forces true lossless (overrides Distance).\n"
             L";                    If set to 0, the encoder uses the 'Distance' value above.\n"
-            L";   Effort         : Encoder effort 1-10 (default 4). Lower = faster capture/save,\n"
+            L";   Effort         : Encoder effort 1-10 (default 7). Lower = faster capture/save,\n"
             L";                    higher = smaller file but much slower encoding.\n"
             L";\n"
             L"; [General Settings]\n"
