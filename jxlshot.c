@@ -179,8 +179,11 @@ static void ensure_default_ini(void) {
         L"HotkeyRegionVK=44\n"
         L"HotkeyRegionMod=2\n"
         L"BlankCheckMode=2\n";
+
 // Lossless at distance 1.0 give small size compare to lossy 1.0
 // Changing effort in distance 1.0 when using lossy is not useful
+
+
     FILE *f = _wfopen(tmp_path, L"wb");
     if (!f) return;
 
