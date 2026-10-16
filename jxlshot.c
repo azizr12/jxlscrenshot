@@ -91,133 +91,111 @@ static void init_paths(void) {
     g_exe_dir[MAX_PATH - 1] = 0;
 }
 
+// Adds one key to [Capture] only if it is missing.
+// Migrates from legacy sections if found there, otherwise uses the default.
+static void ini_ensure_key(const wchar_t *ini, const wchar_t *key, const wchar_t *def) {
+    static const wchar_t *marker = L"__JXLSHOT_KEY_NOT_FOUND__";
+    static const wchar_t *legacy[] = { L"Settings", L"General" };
+    wchar_t buf[MAX_PATH];
+
+    GetPrivateProfileStringW(L"Capture", key, marker, buf, MAX_PATH, ini);
+    if (wcscmp(buf, marker) != 0) return; // already present (even if empty)
+
+    for (int i = 0; i < 2; i++) {
+        GetPrivateProfileStringW(legacy[i], key, marker, buf, MAX_PATH, ini);
+        if (wcscmp(buf, marker) != 0) {
+            WritePrivateProfileStringW(L"Capture", key, buf, ini);
+            return;
+        }
+    }
+    WritePrivateProfileStringW(L"Capture", key, def, ini);
+}
+
 static void ensure_default_ini(void) {
     wchar_t ini_path[MAX_PATH];
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-    wchar_t val_effort[64] = L"";
-    BOOL has_effort = FALSE;
-    BOOL file_exists = (GetFileAttributesW(ini_path) != INVALID_FILE_ATTRIBUTES);
-    
-    // 1. Read existing values if the file exists, using a marker to detect missing keys.
-    const wchar_t *marker = L"__JXLSHOT_KEY_NOT_FOUND__";
-    wchar_t buf[512];
-    
-    wchar_t val_debug[64] = L"";
-    wchar_t val_lossless[64] = L"";
-    wchar_t val_distance[64] = L"";
-    wchar_t val_export_path[MAX_PATH] = L"";
-    wchar_t val_blank_check[64] = L"";
-    
-    // New integer-based hotkey variables
-    wchar_t val_hk_full_vk[64] = L"";
-    wchar_t val_hk_full_mod[64] = L"";
-    wchar_t val_hk_region_vk[64] = L"";
-    wchar_t val_hk_region_mod[64] = L"";
-    
-    BOOL has_debug = FALSE;
-    BOOL has_lossless = FALSE;
-    BOOL has_distance = FALSE;
-    BOOL has_export_path = FALSE;
-    BOOL has_blank_check = FALSE;
-    
-    BOOL has_hk_full_vk = FALSE;
-    BOOL has_hk_full_mod = FALSE;
-    BOOL has_hk_region_vk = FALSE;
-    BOOL has_hk_region_mod = FALSE;
+    ini_path[MAX_PATH - 1] = 0;
 
-    if (file_exists) {
-        #define CHECK_KEY(key, val_buf, size, has_flag) \
-            do { \
-                if (GetPrivateProfileStringW(L"Capture", key, marker, buf, 512, ini_path) > 0 && wcscmp(buf, marker) != 0) { \
-                    wcsncpy_s(val_buf, size, buf, _TRUNCATE); has_flag = TRUE; \
-                } else if (GetPrivateProfileStringW(L"Settings", key, marker, buf, 512, ini_path) > 0 && wcscmp(buf, marker) != 0) { \
-                    wcsncpy_s(val_buf, size, buf, _TRUNCATE); has_flag = TRUE; \
-                } else if (GetPrivateProfileStringW(L"General", key, marker, buf, 512, ini_path) > 0 && wcscmp(buf, marker) != 0) { \
-                    wcsncpy_s(val_buf, size, buf, _TRUNCATE); has_flag = TRUE; \
-                } \
-            } while(0)
+    // Case 1: file exists -> never rewrite it, only fill in missing keys.
+    if (GetFileAttributesW(ini_path) != INVALID_FILE_ATTRIBUTES) {
+        ini_ensure_key(ini_path, L"Debug",           L"0");
+        ini_ensure_key(ini_path, L"Lossless",        L"0");
+        ini_ensure_key(ini_path, L"Distance",        L"1.0");
+        ini_ensure_key(ini_path, L"Effort",          L"7");
+        ini_ensure_key(ini_path, L"ExportPath",      L"");
+        ini_ensure_key(ini_path, L"HotkeyFullVK",    L"44");
+        ini_ensure_key(ini_path, L"HotkeyFullMod",   L"0");
+        ini_ensure_key(ini_path, L"HotkeyRegionVK",  L"44");
+        ini_ensure_key(ini_path, L"HotkeyRegionMod", L"2");
+        ini_ensure_key(ini_path, L"BlankCheckMode",  L"2");
+        return;
+    }
 
-        CHECK_KEY(L"Debug", val_debug, 64, has_debug);
-        CHECK_KEY(L"Lossless", val_lossless, 64, has_lossless);
-        CHECK_KEY(L"Distance", val_distance, 64, has_distance);
-        CHECK_KEY(L"ExportPath", val_export_path, MAX_PATH, has_export_path);
-        CHECK_KEY(L"BlankCheckMode", val_blank_check, 64, has_blank_check);
-        CHECK_KEY(L"Effort", val_effort, 64, has_effort);
-        // Read new integer-based hotkey values
-        CHECK_KEY(L"HotkeyFullVK", val_hk_full_vk, 64, has_hk_full_vk);
-        CHECK_KEY(L"HotkeyFullMod", val_hk_full_mod, 64, has_hk_full_mod);
-        CHECK_KEY(L"HotkeyRegionVK", val_hk_region_vk, 64, has_hk_region_vk);
-        CHECK_KEY(L"HotkeyRegionMod", val_hk_region_mod, 64, has_hk_region_mod);
-        
-        #undef CHECK_KEY
+    // Case 2 file missing -> write the template to a temp file, then rename.
+    wchar_t tmp_path[MAX_PATH];
+    _snwprintf(tmp_path, MAX_PATH, L"%s\\jxlshot.ini.tmp", g_exe_dir);
+    tmp_path[MAX_PATH - 1] = 0;
+
+    static const wchar_t default_ini[] =
+        L"; ==============================================================================\n"
+        L"; JXLShot Configuration File\n"
+        L"; ==============================================================================\n"
+        L";\n"
+        L"; [Quality & Compression Guide]\n"
+        L";   Distance       : Controls the quality vs. file size trade-off.\n"
+        L";                    0.0 = True lossless (exact pixel match, larger file).\n"
+        L";                    1.0 = Visually lossless (recommended for screenshots).\n"
+        L";                    2.0+ = Higher compression, slight quality reduction.\n"
+        L";   Lossless       : If set to 1, strictly forces true lossless (overrides Distance).\n"
+        L";                    If set to 0, the encoder uses the 'Distance' value above.\n"
+        L";   Effort         : Encoder effort 1-10 (default 7). Lower = faster capture/save,\n"
+        L";                    higher = smaller file but much slower encoding.\n"
+        L";\n"
+        L"; [General Settings]\n"
+        L";   Debug          : 1 = Enable debug logging; 0 = Disable.\n"
+        L";   ExportPath     : Custom directory for saving screenshots.\n"
+        L";                    Leave blank to use the default Windows Pictures folder.\n"
+        L";   BlankCheckMode : 0 = Disabled, 1 = Basic, 2 = Advanced, 3 = HARDCORE.\n"
+        L";\n"
+        L"; [Hotkey Settings] (Use the 'Hotkey Settings...' tray menu to configure these easily!)\n"
+        L";   HotkeyFullVK    : Virtual Key code for Full Screen capture (e.g., 44 = PrintScreen).\n"
+        L";   HotkeyFullMod   : Modifier flags for Full Screen (0=None, 1=Shift, 2=Ctrl, 4=Alt, 8=Win).\n"
+        L";   HotkeyRegionVK  : Virtual Key code for Region capture.\n"
+        L";   HotkeyRegionMod : Modifier flags for Region capture.\n"
+        L";\n"
+        L"; ==============================================================================\n"
+        L"\n"
+        L"[Capture]\n"
+        L"Debug=0\n"
+        L"Lossless=0\n"
+        L"Distance=1.0\n"
+        L"Effort=7\n"
+        L"ExportPath=\n"
+        L"HotkeyFullVK=44\n"
+        L"HotkeyFullMod=0\n"
+        L"HotkeyRegionVK=44\n"
+        L"HotkeyRegionMod=2\n"
+        L"BlankCheckMode=2\n";
+
+    FILE *f = _wfopen(tmp_path, L"wb");
+    if (!f) return;
+
+    int ok = 1;
+    const uint16_t bom = 0xFEFF; // UTF-16 LE BOM
+    ok &= (fwrite(&bom, sizeof bom, 1, f) == 1);
+
+    // Write raw UTF-16 code units, expanding \n to \r\n
+    const uint16_t crlf_cr = L'\r';
+    for (const wchar_t *p = default_ini; *p && ok; p++) {
+        if (*p == L'\n') ok &= (fwrite(&crlf_cr, sizeof crlf_cr, 1, f) == 1);
+        uint16_t ch = (uint16_t)*p;
+        ok &= (fwrite(&ch, sizeof ch, 1, f) == 1);
     }
-    
-    // 2. Write the full default template. 
-    FILE *f = _wfopen(ini_path, L"wb");
-    if (f) {
-        unsigned short bom = 0xFEFF;
-        fwrite(&bom, sizeof(bom), 1, f);
-        
-        const wchar_t *default_ini = 
-            L"; ==============================================================================\n"
-            L"; JXLShot Configuration File\n"
-            L"; ==============================================================================\n"
-            L";\n"
-            L"; [Quality & Compression Guide]\n"
-            L";   Distance       : Controls the quality vs. file size trade-off.\n"
-            L";                    0.0 = True lossless (exact pixel match, larger file).\n"
-            L";                    1.0 = Visually lossless (recommended for screenshots).\n"
-            L";                    2.0+ = Higher compression, slight quality reduction.\n"
-            L";   Lossless       : If set to 1, strictly forces true lossless (overrides Distance).\n"
-            L";                    If set to 0, the encoder uses the 'Distance' value above.\n"
-            L";   Effort         : Encoder effort 1-10 (default 7). Lower = faster capture/save,\n"
-            L";                    higher = smaller file but much slower encoding.\n"
-            L";\n"
-            L"; [General Settings]\n"
-            L";   Debug          : 1 = Enable debug logging; 0 = Disable.\n"
-            L";   ExportPath     : Custom directory for saving screenshots.\n"
-            L";                    Leave blank to use the default Windows Pictures folder.\n"
-            L";   BlankCheckMode : 0 = Disabled, 1 = Basic, 2 = Advanced, 3 = HARDCORE.\n"
-            L";\n"
-            L"; [Hotkey Settings] (Use the 'Hotkey Settings...' tray menu to configure these easily!)\n"
-            L";   HotkeyFullVK    : Virtual Key code for Full Screen capture (e.g., 44 = PrintScreen).\n"
-            L";   HotkeyFullMod   : Modifier flags for Full Screen (0=None, 1=Shift, 2=Ctrl, 4=Alt, 8=Win).\n"
-            L";   HotkeyRegionVK  : Virtual Key code for Region capture.\n"
-            L";   HotkeyRegionMod : Modifier flags for Region capture.\n"
-            L";\n"
-            L"; ==============================================================================\n"
-            L"\n"
-            L"[Capture]\n"
-            L"Debug=0\n"
-            L"Lossless=0\n"
-            L"Distance=1.0\n"
-            L"Effort=7\n"
-            L"ExportPath=\n"
-            L"HotkeyFullVK=44\n"
-            L"HotkeyFullMod=0\n"
-            L"HotkeyRegionVK=44\n"
-            L"HotkeyRegionMod=2\n"
-            L"BlankCheckMode=2\n";
-        
-        fputws(default_ini, f);
-        fclose(f);
-    } else {
-        return; // Failed to create file
-    }
-    
-    // 3. Restore the user's custom values (only if they existed previously).
-    if (file_exists) {
-        if (has_debug) WritePrivateProfileStringW(L"Capture", L"Debug", val_debug, ini_path);
-        if (has_lossless) WritePrivateProfileStringW(L"Capture", L"Lossless", val_lossless, ini_path);
-        if (has_distance) WritePrivateProfileStringW(L"Capture", L"Distance", val_distance, ini_path);
-        if (has_export_path) WritePrivateProfileStringW(L"Capture", L"ExportPath", val_export_path, ini_path);
-        if (has_blank_check) WritePrivateProfileStringW(L"Capture", L"BlankCheckMode", val_blank_check, ini_path);
-        if (has_effort) WritePrivateProfileStringW(L"Capture", L"Effort", val_effort, ini_path);
-        // Restore new integer-based hotkey values
-        if (has_hk_full_vk) WritePrivateProfileStringW(L"Capture", L"HotkeyFullVK", val_hk_full_vk, ini_path);
-        if (has_hk_full_mod) WritePrivateProfileStringW(L"Capture", L"HotkeyFullMod", val_hk_full_mod, ini_path);
-        if (has_hk_region_vk) WritePrivateProfileStringW(L"Capture", L"HotkeyRegionVK", val_hk_region_vk, ini_path);
-        if (has_hk_region_mod) WritePrivateProfileStringW(L"Capture", L"HotkeyRegionMod", val_hk_region_mod, ini_path);
+    ok &= (fflush(f) == 0);
+    fclose(f);
+
+    if (!ok || !MoveFileExW(tmp_path, ini_path, MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp_path);
     }
 }
 
@@ -668,10 +646,11 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
 
             D3D11_TEXTURE2D_DESC desc;
             tex->lpVtbl->GetDesc(tex, &desc);
-            
-            // --- GET ROTATION FROM DXGI ---
+
+
             DXGI_OUTDUPL_DESC dupl_desc;
             dupl->lpVtbl->GetDesc(dupl, &dupl_desc);
+// GET ROTATION FROM DXGI
             DXGI_MODE_ROTATION rotation = dupl_desc.Rotation;
 
             dbg("dxgi: DXGI reports rotation = %d (1=Identity, 2=90, 3=180, 4=270)", rotation);
@@ -894,16 +873,17 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     JxlEncoderStatus st;
     double t_enc0 = now_ms(), t_stage;
 
-    // 1. Create a parallel runner to use all available CPU cores (0 = auto-detect)
-    void *runner = JxlThreadParallelRunnerCreate(NULL, 0);
-
+    //  Create a parallel runner to use all available CPU cores
+    void *runner = JxlThreadParallelRunnerCreate(
+    NULL, JxlThreadParallelRunnerDefaultNumWorkerThreads());
+    if (!lossless && distance <= 0.0f) lossless = 1;
     JxlEncoder *enc = JxlEncoderCreate(NULL);
     if (!enc) {
         if (runner) JxlThreadParallelRunnerDestroy(runner);
         return 0;
     }
 
-    // 2. Attach the multithreading runner to the encoder
+    // Attach the multithreading runner to the encoder
     if (runner) {
         JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner);
     }
