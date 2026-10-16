@@ -1,3 +1,8 @@
+v2.3.1 - 16 October 2026
+- fixed bug in .ini function that rewrite itself on evry run
+- PLEASE NOTE THAT LOSSY FEATURE ISNT USEFUL IT THERE BUT YOU BENEFIT FROM IT BY USING DISTANCE 1.0+, which cause inflated size compare to lossless at same distance
+-
+
 v2.3.0 - 15 October 2026
 - add debug for how much aquiring frame take + encoding + writing
 - add more UI button in setting for changing lossless/lossy + distance + JXL efffort

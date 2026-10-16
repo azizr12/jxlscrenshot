@@ -7,7 +7,10 @@
 *   jxlshot.exe -q -d 3.0      lossy capture, distance 3.0 (lower = better)
 *   jxlshot.exe -w 3000        wait 3000 ms before capturing
 *
-*
+* These are based on libjxl :
+* "https://github.com/libjxl/libjxl/blob/main/doc/man/cjxl.txt"
+* "https://libjxl.readthedocs.io/en/latest/"
+* 
 *  THE PICTURE EXPORTING FOLLOW THE EXPORT PATH !!!!!!!
 *
 * Configuration is read from jxlshot.ini located next to the executable.
@@ -119,9 +122,9 @@ static void ensure_default_ini(void) {
     // Case 1: file exists -> never rewrite it, only fill in missing keys.
     if (GetFileAttributesW(ini_path) != INVALID_FILE_ATTRIBUTES) {
         ini_ensure_key(ini_path, L"Debug",           L"0");
-        ini_ensure_key(ini_path, L"Lossless",        L"0");
+        ini_ensure_key(ini_path, L"Lossless",        L"1");
         ini_ensure_key(ini_path, L"Distance",        L"1.0");
-        ini_ensure_key(ini_path, L"Effort",          L"7");
+        ini_ensure_key(ini_path, L"Effort",          L"8");
         ini_ensure_key(ini_path, L"ExportPath",      L"");
         ini_ensure_key(ini_path, L"HotkeyFullVK",    L"44");
         ini_ensure_key(ini_path, L"HotkeyFullMod",   L"0");
@@ -167,16 +170,17 @@ static void ensure_default_ini(void) {
         L"\n"
         L"[Capture]\n"
         L"Debug=0\n"
-        L"Lossless=0\n"
+        L"Lossless=1\n"
         L"Distance=1.0\n"
-        L"Effort=7\n"
+        L"Effort=8\n"
         L"ExportPath=\n"
         L"HotkeyFullVK=44\n"
         L"HotkeyFullMod=0\n"
         L"HotkeyRegionVK=44\n"
         L"HotkeyRegionMod=2\n"
         L"BlankCheckMode=2\n";
-
+// Lossless at distance 1.0 give small size compare to lossy 1.0
+// Changing effort in distance 1.0 when using lossy is not useful
     FILE *f = _wfopen(tmp_path, L"wb");
     if (!f) return;
 
