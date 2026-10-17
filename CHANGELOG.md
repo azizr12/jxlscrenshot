@@ -1,5 +1,9 @@
 v2.3.1 - 
 - fixed bug in .ini function that rewrite itself on every run
+- fixed **DXGI** capture aborting on `WAIT_TIMEOUT` on static screens, which killed the blank-frame retries and could silently fall back to **SDR** on HDR monitors
+- tightened the capture retry budget (4 attempts / 150 ms) so the UI thread can not freeze for seconds while waiting for a new frame
+- fixed **export path** building dropping the separator or overflowing at `MAX_PATH`, which could lose the filename or save under the wrong name
+- fixed save **error / fallback pop-ups** being shown from the encoder thread, they are now handled on the UI thread
 - PLEASE NOTE THAT LOSSY FEATURE ISNT USEFUL For Screenshot most of the time, which cause inflated size compare to lossless at same distance
 
 

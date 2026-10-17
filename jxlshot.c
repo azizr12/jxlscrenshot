@@ -360,27 +360,38 @@ static void set_dpi_aware(void) {
 }
 
 static void build_out_path(wchar_t *path, int n, int is_hdr) {
-    SYSTEMTIME st; 
+    SYSTEMTIME st;
     GetLocalTime(&st);
-    
-    wchar_t safe_dir[MAX_PATH];
-    wcsncpy(safe_dir, g_cfg.export_path, MAX_PATH - 1);
-    safe_dir[MAX_PATH - 1] = L'\0';
-    
-    size_t len = wcslen(safe_dir);
-    if (len > 0 && safe_dir[len - 1] != L'\\') {
-        wcsncat(safe_dir, L"\\", MAX_PATH - len - 1);
-    }
-    
-    // Dynamically append _hdr if the capture is HDR
-    if (is_hdr) {
-        _snwprintf(path, n, L"%sjxlshot_%04d%02d%02d_%02d%02d%02d_%03d_hdr.jxl",
-                   safe_dir, st.wYear, st.wMonth, st.wDay, 
-                   st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+
+    // Build the filename on its own first. That lets the directory copy below
+    // reserve room for the separator and the name, so a very long export path
+    // can never be glued straight onto the filename (the old code dropped the
+    // separator entirely once the directory reached MAX_PATH - 1 characters).
+    wchar_t fname[64];
+    _snwprintf(fname, 64, is_hdr
+            ? L"jxlshot_%04d%02d%02d_%02d%02d%02d_%03d_hdr.jxl"
+            : L"jxlshot_%04d%02d%02d_%02d%02d%02d_%03d.jxl",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+    fname[63] = L'\0';
+
+    size_t flen = wcslen(fname);
+    size_t room = (n > 1) ? (size_t)n - 1 : 0;   // usable chars before the NUL
+    size_t dmax = (room > flen + 1) ? (room - flen - 1) : 0;
+    if (dmax > MAX_PATH - 1) dmax = MAX_PATH - 1;
+
+    wchar_t dir[MAX_PATH];
+    size_t dlen = wcslen(g_cfg.export_path);
+    if (dlen > dmax) dlen = dmax;                // always leave room for "\" + name
+    memcpy(dir, g_cfg.export_path, dlen * sizeof(wchar_t));
+    dir[dlen] = L'\0';
+
+    // Collapse a trailing separator so we never emit two in a row.
+    if (dlen > 0 && dir[dlen - 1] == L'\\') dir[--dlen] = L'\0';
+
+    if (dlen > 0) {
+        _snwprintf(path, (size_t)n, L"%s\\%s", dir, fname);
     } else {
-        _snwprintf(path, n, L"%sjxlshot_%04d%02d%02d_%02d%02d%02d_%03d.jxl",
-                   safe_dir, st.wYear, st.wMonth, st.wDay, 
-                   st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
+        _snwprintf(path, (size_t)n, L"%s", fname);
     }
     path[n - 1] = L'\0';
 }
@@ -632,14 +643,26 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
      * right after the duplication interface is (re)created.
      */
     {
-        const int MAX_ATTEMPTS = 8;
+        const int MAX_ATTEMPTS = 4;
         for (int attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
             if (resource) { resource->lpVtbl->Release(resource); resource = NULL; }
             if (tex) { tex->lpVtbl->Release(tex); tex = NULL; }
 
             t_a = now_ms();
             DXGI_OUTDUPL_FRAME_INFO frame_info;
-            HRESULT hr = dupl->lpVtbl->AcquireNextFrame(dupl, 500, &frame_info, &resource);
+            HRESULT hr = dupl->lpVtbl->AcquireNextFrame(dupl, 150, &frame_info, &resource);
+            if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
+                /* Desktop Duplication only produces a frame when the desktop
+                 * changes, so on a static screen this is NOT a hard failure: it
+                 * just means there is no new frame yet. Treating it as fatal
+                 * aborted the DXGI path (and, on HDR monitors, silently dropped
+                 * to the SDR-only GDI fallback) before the retry loop could even
+                 * run. Retry instead; if every attempt times out we fall through
+                 * to the existing fallback. */
+                dbg("dxgi: AcquireNextFrame attempt %d timed out (no new frame)", attempt);
+                SwitchToThread();
+                continue;
+            }
             if (FAILED(hr)) {
                 dbg("dxgi: AcquireNextFrame attempt %d FAILED hr=0x%08lX", attempt, hr);
                 goto cleanup;
@@ -771,7 +794,7 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
 
             dbg("dxgi: attempt %d frame is blank, retrying", attempt);
             SwitchToThread(); // Yields remainder of time slice to the game/DWM
-            Sleep(7); // Fallback to a short sleep to guarantee frame pacing alignment
+            Sleep(4); // Fallback to a short sleep to guarantee frame pacing alignment
         }
 
         if (!ok) {
@@ -1047,6 +1070,20 @@ done:
     return ok;
 }
 
+// UI notification sink for save results. save_rgb_as_jxl() runs on a background
+// EncodeWorker thread, and a MessageBox shown straight from that worker has no
+// owner window and no message pump of its own: it can appear behind other
+// windows or steal focus unpredictably. The tray build installs g_saveNotify so
+// the box is raised by the UI thread instead; other builds (the CLI) leave it
+// NULL and show the box inline.
+typedef void (*SaveNotifyFn)(UINT icon, const wchar_t *title, const wchar_t *body);
+static SaveNotifyFn g_saveNotify = NULL;
+
+static void notify_save_result(UINT icon, const wchar_t *title, const wchar_t *body) {
+    if (g_saveNotify) { g_saveNotify(icon, title, body); return; }
+    MessageBoxW(NULL, body, title, icon | MB_OK);
+}
+
 static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path) {
     uint8_t *buf = NULL; 
     size_t size = 0;
@@ -1146,21 +1183,22 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
             dbg("save_rgb_as_jxl: fallback _wfopen FAILED. GetLastError: %lu", GetLastError());
         }
         
-        // User Notifications
+        // Route notifications through the UI thread (see g_saveNotify): this
+        // code runs on the EncodeWorker, not on the window thread.
         if (!ok) {
             wchar_t err_msg[512];
             _snwprintf(err_msg, 512, 
                 L"Failed to save screenshot to:\n%s\n\nFallback to Pictures folder:\n%s\nalso failed.\n\n"
                 L"Please check disk space and permissions.", 
                 path, fallback_path);
-            MessageBoxW(NULL, err_msg, L"jxlshot Save Error", MB_ICONERROR | MB_OK | MB_SYSTEMMODAL);
+            notify_save_result(MB_ICONERROR, L"jxlshot Save Error", err_msg);
         } else {
             wchar_t success_msg[512];
             _snwprintf(success_msg, 512, 
                 L"Failed to save to configured export path.\n\n"
                 L"Screenshot was successfully saved to fallback location:\n%s", 
                 fallback_path);
-            MessageBoxW(NULL, success_msg, L"jxlshot Fallback Save", MB_ICONWARNING | MB_OK | MB_SYSTEMMODAL);
+            notify_save_result(MB_ICONWARNING, L"jxlshot Fallback Save", success_msg);
         }
     }
     

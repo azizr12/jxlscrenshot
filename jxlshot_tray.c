@@ -1202,6 +1202,33 @@ static void uninstall_mouse_hook(void) {
     }
 }
 
+// Save-result notifications marshalled from the EncodeWorker to the UI thread.
+
+#define WM_JXLSHOT_SAVE_NOTIFY (WM_USER + 30)
+
+typedef struct {
+    UINT    icon;
+    wchar_t title[64];
+    wchar_t body[1024];
+} SaveNotify;
+
+// Installed into jxlshot.c's g_saveNotify. Copies the message and posts it to
+// the tray window so the MessageBox is owned by a real top-level window and is
+// shown on the thread that owns the message loop (not the encode worker).
+static void show_save_notification_ui(UINT icon, const wchar_t *title, const wchar_t *body) {
+    SaveNotify *n = (SaveNotify *)malloc(sizeof *n);
+    if (n) {
+        n->icon = icon;
+        wcsncpy_s(n->title, 64, title, _TRUNCATE);
+        wcsncpy_s(n->body, 1024, body, _TRUNCATE);
+        if (g_hwndTray && PostMessageW(g_hwndTray, WM_JXLSHOT_SAVE_NOTIFY, 0, (LPARAM)n))
+            return;
+        free(n);
+    }
+    // Last resort (no tray window yet, or during shutdown): show it inline.
+    MessageBoxW(NULL, body, title, icon | MB_OK);
+}
+
 // Tray Window Procedure & Entry Point
 
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
@@ -1211,6 +1238,14 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
             break;
         case WM_HOOK_FULL_CAPTURE: execute_full_capture(); break;
         case WM_HOOK_REGION_CAPTURE: start_region_capture(); break;
+        case WM_JXLSHOT_SAVE_NOTIFY: {
+            SaveNotify *n = (SaveNotify *)lParam;
+            if (n) {
+                MessageBoxW(g_hwndMenuOwner, n->body, n->title, n->icon | MB_OK);
+                free(n);
+            }
+            return 0;
+        }
         case WM_COMMAND:
             switch (LOWORD(wp)) {
                 case IDM_FULL: execute_full_capture(); break;
@@ -1285,6 +1320,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 
     install_keyboard_hook();
+
+    // Route background save notifications to the UI thread from now on.
+    g_saveNotify = show_save_notification_ui;
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) { 
