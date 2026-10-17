@@ -249,7 +249,7 @@ static void init_config(void) {
     g_cfg.lossless = 1; 
     g_cfg.distance = 1.0f; 
     g_cfg.blank_check_mode = 2;
-    g_cfg.effort = 4;
+    g_cfg.effort = 8;
     g_cfg.hk_full_mod = 0; 
     g_cfg.hk_full_vk = VK_SNAPSHOT;
     g_cfg.hk_region_mod = MOD_CONTROL; 
@@ -269,7 +269,7 @@ static void init_config(void) {
     g_cfg.debug_enabled = get_cfg_int(L"Debug", 1, ini_path);
     g_cfg.lossless = get_cfg_int(L"Lossless", 1, ini_path);
     g_cfg.blank_check_mode = get_cfg_int(L"BlankCheckMode", 2, ini_path);
-    g_cfg.effort = get_cfg_int(L"Effort", 4, ini_path);
+    g_cfg.effort = get_cfg_int(L"Effort", 8, ini_path);
     if (g_cfg.effort < 1)  g_cfg.effort = 1;
     if (g_cfg.effort > 10) g_cfg.effort = 10;
     if (g_cfg.blank_check_mode < 0) g_cfg.blank_check_mode = 0;
