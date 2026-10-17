@@ -19,6 +19,11 @@ static HFONT g_hBodyFont = NULL;
 static HFONT g_hXFont = NULL;
 static HICON g_hAppIcon = NULL; // Single global handle for the 128x128 icon
 
+// Single-instance guard. Every GDI object above is window-scoped state; allowing
+// two About windows at once means whichever closes first deletes the brush/fonts
+// the other still uses (GDI use-after-free). Keep it to one.
+static HWND g_hwndAbout = NULL;
+
 // Forward declaration
 extern void ApplyDarkMode(HWND hwnd);
 extern HWND g_hwndTray;
@@ -238,14 +243,14 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             break;
         }
 
-        case WM_ACTIVATE:
-            if (wParam == WA_INACTIVE) {
-                SetForegroundWindow(hwnd);
-            }
-            break;
+        // NOTE: the old WM_ACTIVATE handler called SetForegroundWindow() every
+        // time the dialog lost focus. Combined with WS_EX_TOPMOST that produced a
+        // foreground war (and two instances fought each other). Removed: a normal
+        // topmost window is the correct behaviour.
 
         case WM_DESTROY:
-            EnableWindow(g_hwndTray, TRUE);
+            // Re-enabling a message-only/hidden window never did anything; the
+            // EnableWindow(g_hwndTray, ...) calls were dead code and are gone.
             
             // Clean up GDI objects safely
             if (g_hAboutBgBrush) { DeleteObject(g_hAboutBgBrush); g_hAboutBgBrush = NULL; }
@@ -259,7 +264,8 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             
             // CRITICAL: DO NOT call PostQuitMessage(0) here. 
             // It will terminate your entire tray application when this dialog closes.
-            
+
+            g_hwndAbout = NULL;
             return 0;
 
         case WM_CLOSE:
@@ -270,7 +276,12 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 }
 
 static void execute_about(void) {
-    EnableWindow(g_hwndTray, FALSE);
+    // Single instance: focus the existing window instead of creating a second.
+    if (g_hwndAbout) {
+        SetForegroundWindow(g_hwndAbout);
+        return;
+    }
+
     AllowSetForegroundWindow(GetCurrentProcessId());
 
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LINK_CLASS };
@@ -279,6 +290,7 @@ static void execute_about(void) {
     // ICON LOADING
     // Modern .ico files often skip 128x128 and go straight to 256x256 (PNG compressed).
     // We cascade through these specific sizes to guarantee we retrieve the custom icon.
+    // Must be loaded before the window class is registered so wc.hIcon is valid.
     if (!g_hAppIcon) {
         // Attempt 1: Exact 128x128
         g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, LR_DEFAULTCOLOR);
@@ -289,41 +301,35 @@ static void execute_about(void) {
         }
     }
 
-    // Window bumped up slightly (520x300) to accommodate the larger fonts and
-    // give the icon more breathing room away from the text column.
-    const int dlgWidth = 520;
-    const int dlgHeight = 300;
-
-    WNDCLASSEXW wc = {0};
-    wc.cbSize = sizeof(wc);
-    
-    // Only register the class if it hasn't been registered yet
-    if (!GetClassInfoExW(GetModuleHandleW(NULL), L"JxlShotAboutClass", &wc)) {
+    // Register the window class exactly once. (The old code registered it twice:
+    // once inside the GetClassInfoExW guard and once again unconditionally, where
+    // the second call always failed.)
+    static BOOL registered = FALSE;
+    if (!registered) {
+        WNDCLASSEXW wc = {0};
+        wc.cbSize = sizeof(wc);
         wc.lpfnWndProc = AboutWindowProc;
         wc.hInstance = GetModuleHandleW(NULL);
         wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
         wc.hbrBackground = NULL;
         wc.lpszClassName = L"JxlShotAboutClass";
+        wc.hIcon = g_hAppIcon;
+        wc.hIconSm = g_hAppIcon;
         RegisterClassExW(&wc);
+        registered = TRUE;
     }
-    wc.lpfnWndProc = AboutWindowProc;
-    wc.hInstance = GetModuleHandleW(NULL);
-    wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-    wc.hbrBackground = NULL;
-    wc.lpszClassName = L"JxlShotAboutClass";
 
-    // Assign the loaded icon to the window class
-    wc.hIcon = g_hAppIcon;
-    wc.hIconSm = g_hAppIcon;
-
-    RegisterClassExW(&wc);
+    // Window bumped up slightly (520x300) to accommodate the larger fonts and
+    // give the icon more breathing room away from the text column.
+    const int dlgWidth = 520;
+    const int dlgHeight = 300;
 
     RECT rc;
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &rc, 0);
     int x = rc.left + (rc.right - rc.left - dlgWidth) / 2;
     int y = rc.top + (rc.bottom - rc.top - dlgHeight) / 2;
 
-    HWND hwndAbout = CreateWindowExW(
+    g_hwndAbout = CreateWindowExW(
         WS_EX_TOPMOST, // Remove WS_EX_APPWINDOW
         L"JxlShotAboutClass",
         L"About",
@@ -335,13 +341,12 @@ static void execute_about(void) {
         NULL
     );
 
-    if (hwndAbout) {
-        SetForegroundWindow(hwndAbout);
+    if (g_hwndAbout) {
+        SetForegroundWindow(g_hwndAbout);
         
         // REMOVED the local while(GetMessage) loop.
         // The main application's message loop will handle this window automatically.
     } else {
-        EnableWindow(g_hwndTray, TRUE);
         MessageBoxW(NULL, L"Failed to create About dialog.", L"jxlshot", MB_ICONERROR);
     }
 }
