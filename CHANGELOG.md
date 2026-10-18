@@ -4,6 +4,14 @@ v2.3.1 -
 - tightened the capture retry budget (4 attempts / 150 ms) so the UI thread can not freeze for seconds while waiting for a new frame
 - fixed **export path** building dropping the separator or overflowing at `MAX_PATH`, which could lose the filename or save under the wrong name
 - fixed save **error / fallback pop-ups** being shown from the encoder thread, they are now handled on the UI thread
+- fixed **ghost tray icon** left behind on exit, the Exit menu item now destroys the tray window so the icon is removed properly
+- fixed an in-flight save being killed when the app exits, the app now waits for **background saves to finish** so files are never left truncated
+- moved the global **keyboard/mouse hooks** to their own thread so a busy capture or update check can no longer make Windows silently drop the hotkeys
+- fixed **region capture** reading past the captured buffer when the selection size and the grab size disagreed
+- fixed a possible crash while building the **fallback save path** when both the Pictures folder and `USERPROFILE` were unavailable
+- clamped and NUL-terminated the save error/fallback **message strings** so they can not be left unterminated
+- added a **single instance** guard, no more duplicate tray icons or double global hotkeys
+- checked the tray/window/class creation results and now report an error instead of failing silently
 - PLEASE NOTE THAT LOSSY FEATURE ISNT USEFUL For Screenshot most of the time, which cause inflated size compare to lossless at same distance
 
 

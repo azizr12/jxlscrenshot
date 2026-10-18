@@ -634,12 +634,14 @@ static void execute_full_capture(void) {
         task->distance = g_cfg.distance;
         wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
         
+        InterlockedIncrement(&g_activeEncodes);
         HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
         if (hThread) {
             CloseHandle(hThread);
             g.bits = NULL; // Thread owns the buffer now
             dbg("execute_full_capture: encoding offloaded to background thread");
         } else {
+            InterlockedDecrement(&g_activeEncodes);
             dbg("execute_full_capture: CreateThread failed, falling back to synchronous");
             if (!save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path)) {
                 MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
@@ -808,7 +810,16 @@ static void crop_and_encode_region(RECT *r) {
     }
     dbg("crop_and_encode_region: begin (effort=%d, %dx%d)", g_cfg.effort,
         r->right - r->left, r->bottom - r->top);
-    
+
+    // Clamp the selection to the captured buffer. The overlay is sized from
+    // SM_CXSCREEN/SM_CYSCREEN and the grab comes from DXGI/GDI; if those ever
+    // disagree (rotation/DPI edge cases) an unclamped rect would read past the
+    // end of g.bits.
+    if (r->left   < 0)   r->left   = 0;
+    if (r->top    < 0)   r->top    = 0;
+    if (r->right  > g.w) r->right  = g.w;
+    if (r->bottom > g.h) r->bottom = g.h;
+
     int rw = r->right - r->left;
     int rh = r->bottom - r->top;
     
@@ -850,12 +861,14 @@ static void crop_and_encode_region(RECT *r) {
         task->distance = g_cfg.distance;
         wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
         
+        InterlockedIncrement(&g_activeEncodes);
         HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
         if (hThread) {
             CloseHandle(hThread);
             // crop_bits is owned by the thread now; do NOT free it here.
             dbg("crop_and_encode_region: encoding offloaded to background thread");
         } else {
+            InterlockedDecrement(&g_activeEncodes);
             // Fallback to synchronous if thread creation fails
             dbg("crop_and_encode_region: CreateThread failed, falling back to synchronous");
             save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path);
@@ -1181,26 +1194,59 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
     return CallNextHookEx(g_hhkMouse, nCode, wParam, lParam);
 }
 
-static void install_keyboard_hook(void) {
-    if (g_hhkKeyboard) return;
+// Low-level keyboard/mouse hooks. Windows delivers a WH_*_LL callback on the
+// thread that installed the hook, and silently removes the hook if a callback
+// is not serviced within LowLevelHooksTimeout (~300 ms). The UI thread blocks
+// for hundreds of milliseconds during a capture and during the update check,
+// so the hooks live on their own thread that does nothing but pump messages.
+static HANDLE g_hookThread = NULL;
+static DWORD  g_hookThreadId = 0;
+
+static DWORD WINAPI HookThreadProc(LPVOID param) {
+    (void)param;
     g_hhkKeyboard = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(NULL), 0);
-}
+    g_hhkMouse    = SetWindowsHookExW(WH_MOUSE_LL,    LowLevelMouseProc,    GetModuleHandle(NULL), 0);
 
-static void uninstall_keyboard_hook(void) {
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
     if (g_hhkKeyboard) { UnhookWindowsHookEx(g_hhkKeyboard); g_hhkKeyboard = NULL; }
+    if (g_hhkMouse)    { UnhookWindowsHookEx(g_hhkMouse);    g_hhkMouse = NULL; }
+    return 0;
 }
 
-static void install_mouse_hook(void) {
-    if (g_hhkMouse) return;
-    g_hhkMouse = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(NULL), 0);
-}
-
-static void uninstall_mouse_hook(void) {
-    if (g_hhkMouse) { 
-        UnhookWindowsHookEx(g_hhkMouse); 
-        g_hhkMouse = NULL; 
+// Start the dedicated hook thread. If it cannot be created, fall back to
+// installing the hooks on the calling (UI) thread, exactly as before.
+static void install_keyboard_hook(void) {
+    if (g_hookThread || g_hhkKeyboard) return;
+    g_hookThreadId = 0;
+    g_hookThread = CreateThread(NULL, 0, HookThreadProc, NULL, 0, &g_hookThreadId);
+    if (!g_hookThread) {
+        g_hhkKeyboard = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(NULL), 0);
+        g_hhkMouse    = SetWindowsHookExW(WH_MOUSE_LL,    LowLevelMouseProc,    GetModuleHandle(NULL), 0);
     }
 }
+
+// Unhook both hooks and join the hook thread. Safe to call more than once.
+static void uninstall_keyboard_hook(void) {
+    if (g_hhkKeyboard) { UnhookWindowsHookEx(g_hhkKeyboard); g_hhkKeyboard = NULL; }
+    if (g_hhkMouse)    { UnhookWindowsHookEx(g_hhkMouse);    g_hhkMouse = NULL; }
+    if (g_hookThread) {
+        if (g_hookThreadId) PostThreadMessageW(g_hookThreadId, WM_QUIT, 0, 0);
+        WaitForSingleObject(g_hookThread, 2000);
+        CloseHandle(g_hookThread);
+        g_hookThread = NULL;
+        g_hookThreadId = 0;
+    }
+}
+
+// The mouse hook now lives on the hook thread alongside the keyboard hook, so
+// there is nothing to install lazily. Kept for the existing call sites.
+static void install_mouse_hook(void) { }
+static void uninstall_mouse_hook(void) { }
 
 // Save-result notifications marshalled from the EncodeWorker to the UI thread.
 
@@ -1257,17 +1303,26 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 case IDM_RELOAD: reload_config(); break;
                 case IDM_CHECK_UPDATE: execute_check_update(hwnd); break;
                 case IDM_ABOUT: execute_about(); break;
-                case IDM_EXIT: PostQuitMessage(0); break;
+                // DestroyWindow (not PostQuitMessage) so WM_DESTROY actually runs
+                // and the tray icon is removed. Posting WM_QUIT directly skipped
+                // WM_DESTROY entirely and left a ghost icon in the tray.
+                case IDM_EXIT:
+                    if (g_hwndTray) DestroyWindow(g_hwndTray);
+                    else PostQuitMessage(0);
+                    break;
             } break;
-        case WM_DESTROY:
-            uninstall_keyboard_hook();
-            uninstall_mouse_hook(); // clean up when the app fully exits
+        case WM_DESTROY: {
+            // Null the owner pointer *before* destroying it: this same wndproc
+            // also runs for g_hwndMenuOwner, so a stale pointer would recurse.
+            HWND menuOwner = g_hwndMenuOwner;
+            g_hwndMenuOwner = NULL;
+            uninstall_mouse_hook();
+            uninstall_keyboard_hook(); // joins the hook thread
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
-            if (g_hwndMenuOwner) {
-                DestroyWindow(g_hwndMenuOwner);
-                g_hwndMenuOwner = NULL;
-            }
-            PostQuitMessage(0); break;
+            if (menuOwner) DestroyWindow(menuOwner);
+            PostQuitMessage(0);
+            break;
+        }
         default: return DefWindowProcW(hwnd, msg, wp, lParam);
     }
     return 0;
@@ -1278,6 +1333,16 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     // 1. Initialize COM for Shell APIs (SHBrowseForFolder), TaskDialog, and DXGI/D3D11 stability
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
+    // Single instance: a second tray would install duplicate global hooks and a
+    // second tray icon, and whichever exits first would tear the hooks down from
+    // under the other. The handle is intentionally kept for the process lifetime.
+    HANDLE hInstanceLock = CreateMutexW(NULL, TRUE, L"JxlShotTray_SingleInstance_Mutex");
+    if (hInstanceLock && GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(hInstanceLock);
+        CoUninitialize();
+        return 0;
+    }
 
     set_dpi_aware(); 
     init_paths(); 
@@ -1292,9 +1357,18 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     wc.lpfnWndProc = TrayWndProc;
     wc.hInstance = hInst; 
     wc.lpszClassName = L"JxlShotTrayClass"; 
-    RegisterClassExW(&wc);
+    if (!RegisterClassExW(&wc)) {
+        MessageBoxW(NULL, L"Failed to initialize the tray application window class.", L"jxlshot", MB_ICONERROR);
+        CoUninitialize();
+        return 1;
+    }
 
     g_hwndTray = CreateWindowExW(0, L"JxlShotTrayClass", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInst, NULL);
+    if (!g_hwndTray) {
+        MessageBoxW(NULL, L"Failed to create the tray window.", L"jxlshot", MB_ICONERROR);
+        CoUninitialize();
+        return 1;
+    }
 
     // Create a hidden popup window specifically to own the context menu
     g_hwndMenuOwner = CreateWindowExW(
@@ -1305,8 +1379,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
         0, 0, 0, 0,
         NULL, NULL, hInst, NULL
     );
-    ShowWindow(g_hwndMenuOwner, SW_HIDE);
-    ApplyDarkMode(g_hwndMenuOwner);
+    if (g_hwndMenuOwner) {
+        ShowWindow(g_hwndMenuOwner, SW_HIDE);
+        ApplyDarkMode(g_hwndMenuOwner);
+    } else {
+        dbg("WinMain: menu-owner window creation failed; menus will fall back to the tray window");
+    }
 
     ZeroMemory(&g_nid, sizeof(g_nid));
     g_nid.cbSize = sizeof(g_nid); 
@@ -1317,7 +1395,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
 
     g_nid.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON)); 
     wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
-    Shell_NotifyIconW(NIM_ADD, &g_nid);
+    if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
+        dbg("WinMain: Shell_NotifyIcon(NIM_ADD) failed");
+    }
 
     install_keyboard_hook();
 
@@ -1329,6 +1409,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
         TranslateMessage(&msg); 
         DispatchMessage(&msg); 
     }
+
+    // Wait for any in-flight background save before returning: WinMain returning
+    // calls ExitProcess(), which would hard-kill the worker mid-write and leave a
+    // truncated .jxl on disk. The message loop has stopped, so no new worker can
+    // be spawned meanwhile.
+    drain_encodes();
 
     uninstall_keyboard_hook();
 

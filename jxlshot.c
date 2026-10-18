@@ -1141,7 +1141,7 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
         dbg("save_rgb_as_jxl: Primary save failed. Attempting fallback to User Pictures folder.");
         
         wchar_t fallback_path[MAX_PATH];
-        wchar_t fallback_dir[MAX_PATH];
+        wchar_t fallback_dir[MAX_PATH] = L"";
         
         // Use Known Folders API to guarantee the correct localized folder name
         PWSTR pszPicturesPath = NULL;
@@ -1150,7 +1150,11 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
             CoTaskMemFree(pszPicturesPath); // Free the memory allocated by the API
         } else {
             // Absolute last-resort fallback: Just use the User Profile root directory.
-            GetEnvironmentVariableW(L"USERPROFILE", fallback_dir, MAX_PATH);
+            // Guard both failure (0) and "buffer too small" (>= MAX_PATH), where the
+            // contents of fallback_dir are documented as undefined, so the wcslen()
+            // below never walks uninitialised stack memory.
+            DWORD n = GetEnvironmentVariableW(L"USERPROFILE", fallback_dir, MAX_PATH);
+            if (n == 0 || n >= MAX_PATH) fallback_dir[0] = L'\0';
         }
         
         size_t len = wcslen(fallback_dir);
@@ -1191,6 +1195,7 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
                 L"Failed to save screenshot to:\n%s\n\nFallback to Pictures folder:\n%s\nalso failed.\n\n"
                 L"Please check disk space and permissions.", 
                 path, fallback_path);
+            err_msg[511] = L'\0'; // _snwprintf may not NUL-terminate on truncation (MSVC)
             notify_save_result(MB_ICONERROR, L"jxlshot Save Error", err_msg);
         } else {
             wchar_t success_msg[512];
@@ -1198,6 +1203,7 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
                 L"Failed to save to configured export path.\n\n"
                 L"Screenshot was successfully saved to fallback location:\n%s", 
                 fallback_path);
+            success_msg[511] = L'\0'; // _snwprintf may not NUL-terminate on truncation (MSVC)
             notify_save_result(MB_ICONWARNING, L"jxlshot Fallback Save", success_msg);
         }
     }
@@ -1218,6 +1224,20 @@ typedef struct {
     wchar_t out_path[MAX_PATH];
 } EncodeTask;
 
+// Number of background EncodeWorker threads currently in flight. Incremented on
+// the creating thread *before* CreateThread (so the count is never briefly zero
+// while a worker is starting up) and decremented by the worker itself on exit.
+static volatile LONG g_activeEncodes = 0;
+
+#ifdef JXLSHOT_TRAY_BUILD
+// Block until every background encode has finished. Only the tray shutdown path
+// needs this (the CLI already joins its single worker); guarded so the CLI
+// translation unit does not warn about an unused static function.
+static void drain_encodes(void) {
+    while (InterlockedCompareExchange(&g_activeEncodes, 0, 0) > 0) Sleep(10);
+}
+#endif
+
 static DWORD WINAPI EncodeWorker(LPVOID param) {
     // Tell Windows this is a background task so it yields to the games/OS
     // This help to avoid hammering perfomance
@@ -1232,6 +1252,7 @@ static DWORD WINAPI EncodeWorker(LPVOID param) {
     // Clean up memory allocated for this specific task
     free(task->bits);
     free(task);
+    InterlockedDecrement(&g_activeEncodes);
     return 0;
 }
 
@@ -1284,6 +1305,7 @@ int main(int argc, char **argv) {
         wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
         
         // Spawn the background thread
+        InterlockedIncrement(&g_activeEncodes);
         HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
         if (hThread) {
             g.bits = NULL; // Prevent free_grab from freeing the buffer (thread owns it now)
@@ -1298,6 +1320,7 @@ int main(int argc, char **argv) {
             dbg("main: background thread completed");
         } else {
             // Fallback to synchronous if thread creation fails
+            InterlockedDecrement(&g_activeEncodes);
             dbg("main: CreateThread failed, falling back to synchronous save");
             rc = save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path) ? 0 : 1;
             free(task->bits);
