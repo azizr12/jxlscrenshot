@@ -46,7 +46,7 @@ jobs:
           mkdir -p dist
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wall -Wextra \
               -Wl,--gc-sections -mwindows -o dist/jxlshot_tray.exe jxlshot_tray.c resource.o \
-              -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lwinhttp
+              -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lurlmon
 
           # Copy auxiliary files
           cp README.md dist/ 2>/dev/null || true

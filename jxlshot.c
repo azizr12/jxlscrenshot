@@ -15,7 +15,9 @@
 *
 * Configuration is read from jxlshot.ini located next to the executable.
 * Debug logs are written to jxlshot_debug.log next to the executable
-* (falls back to %TMP%\jxlshot_debug.log if that folder is not writable)
+* (falls back to %TMP%\jxlshot_debug.log if that folder is not writable).
+* The log is the one file this app is allowed to overwrite: it is opened for
+* writing at every start, so the previous run's log is truncated to 0 bytes.
 *
 * jxlshot.c — minimal command-line screenshot tool for Windows.
 *
@@ -300,18 +302,22 @@ static void dbg_init(void) {
     if (!g_cfg.debug_enabled) { g_dbg = NULL; return; }
     wchar_t log_path[MAX_PATH];
 
+    // The debug log is the one file the app is allowed to overwrite, so it is
+    // opened with "w": every run starts with an empty log and the data of the
+    // previous run is truncated to 0 bytes.
+
     // Primary: same folder as the executable (g_exe_dir is set by init_paths())
     _snwprintf(log_path, MAX_PATH, L"%s\\jxlshot_debug.log", g_exe_dir);
     log_path[MAX_PATH - 1] = L'\0';
-    g_dbg = _wfopen(log_path, L"a");
+    g_dbg = _wfopen(log_path, L"w");
 
-    // Fallback: %TMP% if the exe folder is read-only
+    // Fallback: %TMP% if the exe folder is read-only (also truncated)
     if (!g_dbg) {
         wchar_t temp_dir[MAX_PATH];
         GetTempPathW(MAX_PATH, temp_dir);
         _snwprintf(log_path, MAX_PATH, L"%sjxlshot_debug.log", temp_dir);
         log_path[MAX_PATH - 1] = L'\0';
-        g_dbg = _wfopen(log_path, L"a");
+        g_dbg = _wfopen(log_path, L"w");
     }
     if (!g_dbg) return;
 

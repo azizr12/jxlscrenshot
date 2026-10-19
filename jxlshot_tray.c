@@ -18,7 +18,8 @@
 // jxlshot_tray.c — System tray extension for jxlshot.
 
 // Configuration is read from jxlshot.ini located next to the executable.
-// Debug logs are written to %TEMP%\jxlshot_debug.log
+// Debug logs are written to jxlshot_debug.log next to the executable (opened
+// fresh at every start, truncating the previous run's data to 0 bytes).
 
 
 
