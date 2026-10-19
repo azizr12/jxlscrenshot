@@ -605,15 +605,26 @@ static void show_tray_menu(HWND hwnd) {
     }
     
     // Bring the hidden menu owner to the foreground so the menu inherits its theme
+    HWND prevFg = GetForegroundWindow();
     if (g_hwndMenuOwner) {
         SetForegroundWindow(g_hwndMenuOwner);
     } else {
         SetForegroundWindow(hwnd);
     }
     
-    // Pass g_hwndMenuOwner, NOT the message-only g_hwndTray
-    TrackPopupMenu(hMenu, TPM_RIGHTBUTTON, pt.x, pt.y, 0, g_hwndMenuOwner ? g_hwndMenuOwner : hwnd, NULL);
-    DestroyMenu(hMenu); PostMessage(hwnd, WM_NULL, 0, 0);
+    // TPM_RETURNCMD: post the command after the menu is gone and run it from
+    // the normal message loop, like the hotkey. Handled inside TrackPopupMenu
+    // the screen grab froze the popup that had just been clicked.
+    UINT cmd = (UINT)TrackPopupMenu(hMenu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0,
+                                    g_hwndMenuOwner ? g_hwndMenuOwner : hwnd, NULL);
+    DestroyMenu(hMenu);
+    PostMessage(hwnd, WM_NULL, 0, 0);
+
+    // Hand the foreground back. The owner is only a menu host, and leaving it
+    // front-most is the one thing the menu path does that the hotkey does not.
+    if (prevFg && prevFg != g_hwndMenuOwner && IsWindow(prevFg)) SetForegroundWindow(prevFg);
+
+    if (cmd) PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(cmd, 0), 0);
 }
 
 static void execute_full_capture(void) {
