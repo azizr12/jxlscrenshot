@@ -1254,11 +1254,8 @@ static void drain_encodes(void) {
 #endif
 
 static DWORD WINAPI EncodeWorker(LPVOID param) {
-    // Tell Windows this is a background task so it yields to the games/OS
-    // This help to avoid hammering perfomance
-    // and then user may experience some sort of lagging
-    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-
+    // Stock priority, every core: lowering this thread was what made the mouse
+    // cursor stutter while a capture was encoding.
     EncodeTask *task = (EncodeTask *)param;
     
     // Perform the heavy encoding and file I/O in the background
