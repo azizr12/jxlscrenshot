@@ -1,3 +1,9 @@
+Unreleased
+- added a **VERSIONINFO** resource so the executable finally carries file-version properties (`VS_VERSION_INFO` needed `winver.h`; without it the block is stored under a string name and Windows ignores it)
+- fixed the About dialog icon overlapping the close button hit-box
+- build: one CI workflow (portable + installer jobs) instead of two overlapping ones, `-Wall -Wextra` enabled, `winhttp` replaces `urlmon`; the tree now compiles warning-free with GCC 16
+
+
 v2.3.1 - 15 October 2026
 - fixed bug in .ini function that rewrite itself on every run
 - fixed **DXGI** capture aborting on `WAIT_TIMEOUT` on static screens, which killed the blank-frame retries and could silently fall back to **SDR** on HDR monitors
