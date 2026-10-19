@@ -5,7 +5,7 @@ Unreleased
 - fixed the About dialog icon overlapping the close button hit-box
 - the tray icon now turns **green** for a moment after a successful capture, so a save is visible without a pop-up (failures still show the existing error dialogs)
 - build: one CI workflow (portable + installer jobs) instead of two overlapping ones, with `-Wall -Wextra`
-
+- fix issue related to taking screenshot from tray menu cause the entire system stuttering
 
 
 v2.3.1 - 19 October 2026
