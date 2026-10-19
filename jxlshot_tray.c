@@ -102,6 +102,11 @@ static HWND g_hwndMenuOwner = NULL;
 #define WM_HOOK_FULL_CAPTURE   (WM_USER + 10)
 #define WM_HOOK_REGION_CAPTURE (WM_USER + 11)
 
+// After a successful capture the tray icon turns green, then this timer puts
+// the normal icon back.
+#define TIMER_TRAY_ICON        1
+#define TRAY_ICON_OK_MS        1500
+
 #define ID_TRAY          1
 #define IDM_FULL         101
 #define IDM_REGION       102
@@ -118,6 +123,8 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDI_APP_ICON  1001
 
 static NOTIFYICONDATAW g_nid;
+static HICON           g_iconNormal = NULL; // shared module icon, never destroyed
+static HICON           g_iconOk = NULL;     // green-dot variant, owned by us
 static HWND            g_hwndTray = NULL;
 static HHOOK           g_hhkKeyboard = NULL;
 static HHOOK           g_hhkMouse = NULL;
@@ -1252,6 +1259,7 @@ static void uninstall_mouse_hook(void) { }
 // Save-result notifications marshalled from the EncodeWorker to the UI thread.
 
 #define WM_JXLSHOT_SAVE_NOTIFY (WM_USER + 30)
+#define WM_JXLSHOT_SAVE_OK     (WM_USER + 31)
 
 typedef struct {
     UINT    icon;
@@ -1276,6 +1284,82 @@ static void show_save_notification_ui(UINT icon, const wchar_t *title, const wch
     MessageBoxW(NULL, body, title, icon | MB_OK);
 }
 
+
+// Success feedback: a green-dot tray icon for a successful capture
+
+// Builds the app icon with a green dot in the lower-right corner.
+// Returns a new icon owned by the caller, or NULL.
+static HICON make_success_icon(HICON base, int size) {
+    if (size < 8) size = 16;
+
+    BITMAPINFO bi;
+    ZeroMemory(&bi, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = size;
+    bi.bmiHeader.biHeight = -size; // negative: top-down, row 0 is the top
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    HDC screen = CreateCompatibleDC(NULL);
+    if (!screen) return NULL;
+
+    HICON icon = NULL;
+    void *bits = NULL;
+    HBITMAP color = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (color && bits) {
+        HGDIOBJ old = SelectObject(screen, color);
+        memset(bits, 0, (size_t)size * (size_t)size * 4);
+        if (base) DrawIconEx(screen, 0, 0, base, size, size, 0, NULL, DI_NORMAL);
+
+        // GDI never writes the alpha channel, so the dot is painted pixel by
+        // pixel (BGRA) instead of with Ellipse() - otherwise it stays invisible.
+        const int r = (size / 4 < 3) ? 3 : size / 4;
+        const int cx = size - r - 1, cy = size - r - 1;
+        unsigned char *px = (unsigned char *)bits;
+        for (int y = 0; y < size; y++) {
+            for (int x = 0; x < size; x++) {
+                int dx = x - cx, dy = y - cy;
+                if (dx * dx + dy * dy <= r * r) {
+                    unsigned char *p = px + ((size_t)y * (size_t)size + (size_t)x) * 4;
+                    p[0] = 60; p[1] = 190; p[2] = 60; p[3] = 255; // green
+                }
+            }
+        }
+        SelectObject(screen, old);
+
+        HBITMAP mask = CreateBitmap(size, size, 1, 1, NULL);
+        if (mask) {
+            ICONINFO ii;
+            ZeroMemory(&ii, sizeof(ii));
+            ii.fIcon = TRUE;
+            ii.hbmColor = color;
+            ii.hbmMask = mask;
+            icon = CreateIconIndirect(&ii);
+            DeleteObject(mask);
+        }
+    }
+    if (color) DeleteObject(color);
+    DeleteDC(screen);
+    return icon;
+}
+
+// Installed into jxlshot.c's g_saveOk; runs on the EncodeWorker thread.
+static void notify_save_ok_ui(void) {
+    if (g_hwndTray) PostMessageW(g_hwndTray, WM_JXLSHOT_SAVE_OK, 0, 0);
+}
+
+// UI thread: swap in the green icon; the timer puts the normal one back.
+static void show_save_ok(HWND hwnd) {
+    if (!g_iconOk) g_iconOk = make_success_icon(g_iconNormal, GetSystemMetrics(SM_CXSMICON));
+    if (!g_iconOk) return;
+    g_nid.hIcon = g_iconOk;
+    g_nid.uFlags = NIF_ICON;
+    Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    SetTimer(hwnd, TIMER_TRAY_ICON, TRAY_ICON_OK_MS, NULL);
+}
+
 // Tray Window Procedure & Entry Point
 
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
@@ -1293,6 +1377,19 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
             }
             return 0;
         }
+        case WM_JXLSHOT_SAVE_OK:
+            show_save_ok(hwnd);
+            return 0;
+        case WM_TIMER:
+            if (wp == TIMER_TRAY_ICON) {
+                KillTimer(hwnd, TIMER_TRAY_ICON);
+                g_nid.hIcon = g_iconNormal;
+                g_nid.uFlags = NIF_ICON;
+                Shell_NotifyIconW(NIM_MODIFY, &g_nid);
+                g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+                return 0;
+            }
+            return DefWindowProcW(hwnd, msg, wp, lParam);
         case WM_COMMAND:
             switch (LOWORD(wp)) {
                 case IDM_FULL: execute_full_capture(); break;
@@ -1319,6 +1416,12 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
             g_hwndMenuOwner = NULL;
             uninstall_mouse_hook();
             uninstall_keyboard_hook(); // joins the hook thread
+            KillTimer(hwnd, TIMER_TRAY_ICON);
+            if (g_iconOk) {
+                DestroyIcon(g_iconOk);
+                g_iconOk = NULL;
+            }
+            g_nid.hIcon = g_iconNormal; // never leave a destroyed icon referenced
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
             if (menuOwner) DestroyWindow(menuOwner);
             PostQuitMessage(0);
@@ -1394,7 +1497,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP; 
     g_nid.uCallbackMessage = WM_TRAYICON;
 
-    g_nid.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON)); 
+    g_iconNormal = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
+    g_nid.hIcon = g_iconNormal;
     wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
     if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
         dbg("WinMain: Shell_NotifyIcon(NIM_ADD) failed");
@@ -1404,6 +1508,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
 
     // Route background save notifications to the UI thread from now on.
     g_saveNotify = show_save_notification_ui;
+    g_saveOk = notify_save_ok_ui;
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) { 
