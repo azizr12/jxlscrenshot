@@ -1035,8 +1035,9 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     dbg("bench jxl: AddImageFrame = %.2f ms", now_ms() - t_stage);
     t_stage = now_ms();
 
-    size_t cap = (size_t)w * h * (is_hdr ? 8 : 4);
-    if (cap < (4 << 20)) cap = (4 << 20);
+    // Start small: screenshots compress well, and the growth loop below
+    // doubles the buffer only if the encoder actually needs more.
+    size_t cap = (4 << 20);
     buf = (uint8_t *)malloc(cap);
     if (!buf) goto done;
 
