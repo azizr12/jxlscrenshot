@@ -1,4 +1,4 @@
-v2.3.1 - 
+v2.3.1 - 15 October 2026
 - fixed bug in .ini function that rewrite itself on every run
 - fixed **DXGI** capture aborting on `WAIT_TIMEOUT` on static screens, which killed the blank-frame retries and could silently fall back to **SDR** on HDR monitors
 - tightened the capture retry budget (4 attempts / 150 ms) so the UI thread can not freeze for seconds while waiting for a new frame
