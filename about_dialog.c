@@ -115,9 +115,11 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
                 WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 256, 250, 22, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
 
             // Splash Icon
-            // Pushed further right (x=350) so there's a clear gap between it and the text column.
+            // Pushed further right (x=340) so there's a clear gap between it and
+            // the text column, while still stopping short of the close button
+            // (kCloseBtnRect starts at x=472; the icon ends at x=468).
             HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"",
-                WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 350, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
+                WS_CHILD | WS_VISIBLE | SS_ICON | SS_CENTERIMAGE, 340, 30, 128, 128, hwnd, (HMENU)IDC_ABOUT_ICON, GetModuleHandleW(NULL), NULL);
             SendMessageW(hIconCtrl, STM_SETICON, (WPARAM)g_hAppIcon, 0);
 
             return 0;
