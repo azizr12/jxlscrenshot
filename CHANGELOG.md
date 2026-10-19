@@ -3,6 +3,7 @@ Unreleased
 - the app overwrites nothing else: `jxlshot.ini` is only written when it is missing (or for a setting changed in the UI), and a screenshot gets a date-stamped name, which already makes the `.jxl` write unique avoid overwritten other files unless you have wrong time which is not the app fault
 - added a **VERSIONINFO** resource so the executable finally carries file-version properties (`VS_VERSION_INFO` needed `winver.h`; without it the block is stored under a string name and Windows ignores it)
 - fixed the About dialog icon overlapping the close button hit-box
+- the tray icon now turns **green** for a moment after a successful capture, so a save is visible without a pop-up (failures still show the existing error dialogs)
 - build: one CI workflow (portable + installer jobs) instead of two overlapping ones, with `-Wall -Wextra`
 
 

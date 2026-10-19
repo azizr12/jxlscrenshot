@@ -1085,6 +1085,11 @@ done:
 typedef void (*SaveNotifyFn)(UINT icon, const wchar_t *title, const wchar_t *body);
 static SaveNotifyFn g_saveNotify = NULL;
 
+// Installed by the tray build: called once per successful capture so the tray
+// icon can flash green. Left NULL by builds without a tray (the CLI).
+typedef void (*SaveOkFn)(void);
+static SaveOkFn g_saveOk = NULL;
+
 static void notify_save_result(UINT icon, const wchar_t *title, const wchar_t *body) {
     if (g_saveNotify) { g_saveNotify(icon, title, body); return; }
     MessageBoxW(NULL, body, title, icon | MB_OK);
@@ -1141,7 +1146,11 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
         else if (err == ERROR_DISK_FULL) err_desc = L"Disk full";
         dbg("save_rgb_as_jxl: _wfopen FAILED for path '%ls'. Error code: %lu (%ls)", path, err, err_desc);
     }
-    
+
+    // Success feedback: let the tray flash its green icon. Only the normal
+    // in-place write reports here; a fallback save pops its own dialog.
+    if (ok && g_saveOk) g_saveOk();
+
     if (!ok) {
         // Fallback logic: try saving to the user's localized Pictures folder
         dbg("save_rgb_as_jxl: Primary save failed. Attempting fallback to User Pictures folder.");
