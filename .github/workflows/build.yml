@@ -1,14 +1,11 @@
-# One job: builds the portable ZIP and the installer EXE, uploads both,
-# and attaches both to a GitHub release when a v* tag is pushed.
-
-name: build-windows installer
+name: build-portable
 on:
   push:
     branches:
       - main
       - master
     tags:
-      - 'v*'
+      - '*'
   workflow_dispatch:
 
 jobs:
@@ -35,10 +32,10 @@ jobs:
 
       - name: Compile and bundle runtime DLLs
         run: |
-          # Compile the resource file
+          # EXPLICITLY compile the resource file using windres
           windres -i resource.rc -o resource.o
 
-          # Compile tray version
+          # Compile Tray version using the compiled resource object
           gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
               -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.o \
               -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lurlmon
@@ -46,63 +43,32 @@ jobs:
           # Prepare distribution directory
           mkdir -p dist
           cp jxlshot_tray.exe dist/
+          
+          # Copy auxiliary files
           cp README.md dist/ 2>/dev/null || true
 
-          # Copy all MinGW/libjxl DLL dependencies without running the exe
+          # Extract and copy required MinGW/libjxl DLLs
+          # Safely catches all transitive dependencies without executing the .exe (using ldd)
           ldd jxlshot_tray.exe | grep "/mingw64/bin" | awk '{print $3}' | sort -u | xargs -I {} cp {} dist/
 
-          echo "--- dist contents ---"
-          ls -lh dist/
 
-      - name: Package portable ZIP
+      - name: Package Distribution (Create ZIP)
         run: |
-          # Keep the portable files at the ZIP root
-          (cd dist && zip -r ../jxlshot-windows-x64.zip .)
+          # Create the zip archive directly in the workspace root
+          zip -r jxlshot-windows-x64.zip dist/
+          
+          # Verify the file was created and show its details
           ls -lh jxlshot-windows-x64.zip
 
-      - name: Build Inno Setup Installer
-        shell: pwsh
-        run: |
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-Not (Test-Path $iscc)) {
-              Write-Host "Inno Setup not found. Installing via Chocolatey..."
-              choco install innosetup -y --no-progress
-          }
-          if (-Not (Test-Path $iscc)) {
-              throw "Inno Setup compiler not found."
-          }
 
-          # setup.iss reads dist\jxlshot_tray.exe and dist\*.dll
-          & $iscc setup.iss
-          if ($LASTEXITCODE -ne 0) {
-              throw "ISCC failed with exit code $LASTEXITCODE"
-          }
-
-          # setup.iss has OutputDir=Output, so the installer lands here
-          if (-Not (Test-Path "Output\jxlshot-setup-x64.exe")) {
-              Get-ChildItem -Recurse -Filter *.exe | Select-Object FullName
-              throw "The installer EXE was not created."
-          }
-
-      - name: Upload portable ZIP
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: jxlshot-windows-x64
           path: jxlshot-windows-x64.zip
-          if-no-files-found: error
-
-      - name: Upload installer EXE
-        uses: actions/upload-artifact@v4
-        with:
-          name: jxlshot-setup-x64
-          path: Output/jxlshot-setup-x64.exe
-          if-no-files-found: error
 
       - name: Publish release (on tag)
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          fail_on_unmatched_files: true
-          files: |
-            jxlshot-windows-x64.zip
-            Output/jxlshot-setup-x64.exe
+          files: jxlshot-windows-x64.zip
