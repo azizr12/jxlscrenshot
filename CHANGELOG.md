@@ -1,5 +1,7 @@
-v2.3.6 - 
+v2.3.7 - 
 - region capture: the selection is cropped from the cached overlay frame that was actually displayed, instead of calling `grab_primary_monitor()` a second time after the overlay closes. Region output is SDR, matching the overlay image
+- region capture: HDR-aware. The monitor under the cursor is captured once; the overlay shows a converted SDR preview, while the saved crop keeps the original FP16 scRGB pixels (`.jxl` file gets the `_hdr` name).
+- multimonitor: new `MultiMonitor` INI setting. `focusmonitor` captures the monitor under the cursor; `separateimages` captures every monitor to separate files (`_m1.jxl`, `_m2.jxl`, ...); `seperateimages` is accepted as an alias. Region capture always uses the monitor under the cursor.
 
 
 v2.3.6 - 20 October 2026
