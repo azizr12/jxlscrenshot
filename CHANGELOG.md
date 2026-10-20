@@ -1,7 +1,11 @@
+v2.3.6 - 20 October 2026
+- update check: removed the `VERSION` download function that  the tray item used to check for update, now its just **Open Releases Page** and only opens the GitHub releases URL in the default browser. The executable no longer imports `URLDownloadToFileW` or links `urlmon` which is one of the reason caused Microsoft Defender to flag it as **Trojan:Win32/Wacatac.B!ml**
+
+
 v2.3.5 - 20 October 2026
 - REVERT **VERSIONINFO** in resource because fuck you BitDefender which flag it as **Gen:Variant.Barys.512093**
 - fixed **region capture** excluding the last pixel row/column: dragging across the full 1920×1080 screen now saves 1920×1080 instead of 1919×1079
-- changed inno setup to **no solid compresion** because shitty Microsoft Defender too flag it as **Trojan:Win32/Wacatac.B!ml** sometimes yes sometimes no the shitty ML is so aweful
+- changed inno setup to **no solid compresion** because shitty Microsoft Defender too flag it as **Trojan:Win32/Wacatac.B!ml** sometimes yes sometimes no the shitty ML is so awful
 
 v2.3.2 - 20 October 2026
 - debug log: it is now the one file the app is allowed to overwrite. `jxlshot_debug.log` is opened for writing at every start, so the old data of the previous run is truncated to 0 bytes instead of growing forever
