@@ -743,6 +743,7 @@ static HDC     g_hdcDim = NULL;   // pre-dimmed screenshot (built once)
 static HDC     g_hdcBack = NULL;  // off-screen frame, presented in one blit
 static HDC     g_measureDC = NULL;
 static HBITMAP g_hbmScreen = NULL, g_hbmDim = NULL, g_hbmBack = NULL;
+static uint8_t *g_screenBits = NULL; // pixels of the frame shown under the overlay
 static HFONT   g_dimFont = NULL; // Arial label for the live W × H readout
 static int     g_dimTextH = 16;  // label height, cached when the font is built
 static int     g_dimOutline = 1; // label outline thickness, scaled by DPI
@@ -750,7 +751,7 @@ static int     g_screenW, g_screenH;
 static RECT    g_rcSel;
 static BOOL    g_isDragging = FALSE;
 
-static HBITMAP create_screen_dib(HDC dc) {
+static HBITMAP create_screen_dib(HDC dc, void **bits) {
     BITMAPINFO bi;
     ZeroMemory(&bi, sizeof bi);
     bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -759,7 +760,7 @@ static HBITMAP create_screen_dib(HDC dc) {
     bi.bmiHeader.biPlanes = 1;
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
-    return CreateDIBSection(dc, &bi, DIB_RGB_COLORS, NULL, NULL, 0);
+    return CreateDIBSection(dc, &bi, DIB_RGB_COLORS, bits, NULL, 0);
 }
 
 // Normalized selection rectangle (drag direction does not matter).
@@ -819,65 +820,65 @@ static void region_dirty_rect(RECT *out) {
 }
 
 static void crop_and_encode_region(RECT *r) {
-    Grab g;
-    ZeroMemory(&g, sizeof(g)); // Ensure clean initial state
-    
-    if (!grab_primary_monitor(&g)) {
-        return; // Early exit is safe
+    if (!g_screenBits || g_screenW <= 0 || g_screenH <= 0) {
+        dbg("crop_and_encode_region: no cached overlay frame");
+        return;
     }
-    dbg("crop_and_encode_region: begin (effort=%d, %dx%d)", g_cfg.effort,
-        r->right - r->left, r->bottom - r->top);
 
-    // Clamp the selection to the captured buffer. The overlay is sized from
-    // SM_CXSCREEN/SM_CYSCREEN and the grab comes from DXGI/GDI; if those ever
-    // disagree (rotation/DPI edge cases) an unclamped rect would read past the
-    // end of g.bits.
-    if (r->left   < 0)   r->left   = 0;
-    if (r->top    < 0)   r->top    = 0;
-    if (r->right  > g.w) r->right  = g.w;
-    if (r->bottom > g.h) r->bottom = g.h;
+    dbg("crop_and_encode_region: using displayed frame (effort=%d, %dx%d)",
+        g_cfg.effort, r->right - r->left, r->bottom - r->top);
+
+    // Clamp the selection to the cached frame.
+    if (r->left   < 0)          r->left   = 0;
+    if (r->top    < 0)          r->top    = 0;
+    if (r->right  > g_screenW)  r->right  = g_screenW;
+    if (r->bottom > g_screenH)  r->bottom = g_screenH;
 
     int rw = r->right - r->left;
     int rh = r->bottom - r->top;
-    
-    if (rw <= 0 || rh <= 0) {
-        free_grab(&g); // Guaranteed cleanup before early exit
+
+    if (rw <= 0 || rh <= 0) return;
+
+    // g_hdcMem is a 32-bit top-down DIB (BGRA); the encoder wants packed RGB24.
+    const size_t src_bpp = 4;
+    const size_t dst_bpp = 3;
+    uint8_t *crop_bits = (uint8_t *)malloc((size_t)rw * rh * dst_bpp);
+    if (!crop_bits) {
+        dbg("crop_and_encode_region: malloc failed");
         return;
     }
 
-    // Determine bytes per pixel based on HDR (6 bytes) or SDR (3 bytes)
-    size_t bytes_per_pixel = g.is_hdr ? 6 : 3;
-    
-    uint8_t *crop_bits = (uint8_t *)malloc((size_t)rw * rh * bytes_per_pixel);
-    if (!crop_bits) {
-        free_grab(&g); // Guaranteed cleanup before early exit
-        return;
-    }
-    
-    // Copy row by row from the tightly packed source buffer
+    // Make sure GDI has finished writing the bitmap before reading its bits.
+    GdiFlush();
+
     for (int y = 0; y < rh; y++) {
-        memcpy(
-            crop_bits + (size_t)y * rw * bytes_per_pixel, 
-            g.bits + ((size_t)(r->top + y) * g.w + r->left) * bytes_per_pixel, 
-            rw * bytes_per_pixel
-        );
+        const uint8_t *src = g_screenBits +
+            ((size_t)(r->top + y) * g_screenW + r->left) * src_bpp;
+        uint8_t *dst = crop_bits + (size_t)y * rw * dst_bpp;
+
+        for (int x = 0; x < rw; x++) {
+            dst[0] = src[2]; // R
+            dst[1] = src[1]; // G
+            dst[2] = src[0]; // B
+            src += src_bpp;
+            dst += dst_bpp;
+        }
     }
-    
-    wchar_t out_path[MAX_PATH]; 
-    build_out_path(out_path, MAX_PATH, g.is_hdr); 
-    
-    // UPDATED: Use the new identity save function and pass g.is_hdr
-    // (Now offloaded to background thread to prevent UI/game freezing)
+
+    wchar_t out_path[MAX_PATH];
+    build_out_path(out_path, MAX_PATH, 0);
+
+    // Offload encoding so the UI does not freeze.
     EncodeTask *task = (EncodeTask *)malloc(sizeof(EncodeTask));
     if (task) {
         task->bits = crop_bits; // Transfer ownership of crop_bits to the thread
         task->w = rw;
         task->h = rh;
-        task->is_hdr = g.is_hdr;
+        task->is_hdr = 0;
         task->lossless = g_cfg.lossless;
         task->distance = g_cfg.distance;
         wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
-        
+
         InterlockedIncrement(&g_activeEncodes);
         HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
         if (hThread) {
@@ -895,11 +896,9 @@ static void crop_and_encode_region(RECT *r) {
     } else {
         // Fallback if malloc fails
         dbg("crop_and_encode_region: malloc failed for EncodeTask, falling back to synchronous");
-        save_rgb_as_jxl(crop_bits, rw, rh, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path);
-        free(crop_bits); // Guaranteed heap cleanup on fallback
+        save_rgb_as_jxl(crop_bits, rw, rh, 0, g_cfg.lossless, g_cfg.distance, out_path);
+        free(crop_bits);
     }
-
-    free_grab(&g);   // Guaranteed cleanup
 }
 
 LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1026,14 +1025,18 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 region_sel_rect(&r);
         
                 ShowWindow(hwnd, SW_HIDE);
+
+                // Crop the frame the user actually saw before WM_DESTROY frees
+                // the overlay's DIB. Do not grab the screen a second time here:
+                // that frame can differ from the one under the selection.
+                if (!IsRectEmpty(&r)) {
+                    crop_and_encode_region(&r);
+                }
+
                 DestroyWindow(hwnd);
                 
                 // Force desktop to repaint immediately to clear any ghosting artifacts
                 RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
-
-                if (!IsRectEmpty(&r)) {
-                    crop_and_encode_region(&r);
-                }
             } 
             return 0;
         }
@@ -1075,6 +1078,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_hbmDim)   { DeleteObject(g_hbmDim); g_hbmDim = NULL; }
             if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
             if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
+            g_screenBits = NULL;
             if (g_measureDC){ DeleteDC(g_measureDC); g_measureDC = NULL; }
             if (g_dimFont)  { DeleteObject(g_dimFont); g_dimFont = NULL; }
             
@@ -1103,15 +1107,15 @@ static void start_region_capture(void) {
     g_screenW = GetSystemMetrics(SM_CXSCREEN); g_screenH = GetSystemMetrics(SM_CYSCREEN);
     HDC hdcScreen = GetDC(NULL);
 
-    // Original screenshot.
+    // Original screenshot. The region crop later reads this exact frame.
     g_hdcMem = CreateCompatibleDC(hdcScreen);
-    g_hbmScreen = create_screen_dib(hdcScreen);
+    g_hbmScreen = create_screen_dib(hdcScreen, (void **)&g_screenBits);
     SelectObject(g_hdcMem, g_hbmScreen);
     BitBlt(g_hdcMem, 0, 0, g_screenW, g_screenH, hdcScreen, 0, 0, SRCCOPY);
 
     // Dimmed copy: blend the dark layer once, not on every mouse move.
     g_hdcDim = CreateCompatibleDC(hdcScreen);
-    g_hbmDim = create_screen_dib(hdcScreen);
+    g_hbmDim = create_screen_dib(hdcScreen, NULL);
     SelectObject(g_hdcDim, g_hbmDim);
     BitBlt(g_hdcDim, 0, 0, g_screenW, g_screenH, g_hdcMem, 0, 0, SRCCOPY);
     HDC hdcBlack = CreateCompatibleDC(hdcScreen);
@@ -1127,7 +1131,7 @@ static void start_region_capture(void) {
 
     // Back buffer: WM_PAINT composes here, then presents one finished frame.
     g_hdcBack = CreateCompatibleDC(hdcScreen);
-    g_hbmBack = create_screen_dib(hdcScreen);
+    g_hbmBack = create_screen_dib(hdcScreen, NULL);
     SelectObject(g_hdcBack, g_hbmBack);
     BitBlt(g_hdcBack, 0, 0, g_screenW, g_screenH, g_hdcDim, 0, 0, SRCCOPY);
 
@@ -1173,6 +1177,7 @@ static void start_region_capture(void) {
         if (g_hbmDim)   { DeleteObject(g_hbmDim); g_hbmDim = NULL; }
         if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
         if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
+        g_screenBits = NULL;
         if (g_measureDC){ DeleteDC(g_measureDC); g_measureDC = NULL; }
         if (g_dimFont)  { DeleteObject(g_dimFont); g_dimFont = NULL; }
         return;
