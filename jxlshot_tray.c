@@ -137,8 +137,9 @@ static void execute_about(void);
 
 static void reload_config(void) {
     init_config();
-    dbg("config reloaded: effort=%d lossless=%d distance=%.2f",
-        g_cfg.effort, g_cfg.lossless, g_cfg.distance);
+    dbg("config reloaded: effort=%d lossless=%d distance=%.2f multimonitor=%s",
+        g_cfg.effort, g_cfg.lossless, g_cfg.distance,
+        g_cfg.multimonitor ? "separateimages" : "focusmonitor");
 }
 
 // Tray Icon & Context Menu
@@ -625,12 +626,93 @@ static void show_tray_menu(HWND hwnd) {
     if (cmd) PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(cmd, 0), 0);
 }
 
+// Hand a captured frame to the encoder. On success the worker owns the pixels
+// and g->bits is cleared; on failure the frame is consumed here. Returns 1 if
+// the frame was accepted (threaded or synchronous fallback).
+static int queue_grab_encode(Grab *g, const wchar_t *path) {
+    if (!g || !g->bits || !path) return 0;
+
+    EncodeTask *task = (EncodeTask *)malloc(sizeof(EncodeTask));
+    if (task) {
+        task->bits = g->bits;
+        g->bits = NULL;
+        task->w = g->w;
+        task->h = g->h;
+        task->is_hdr = g->is_hdr;
+        task->lossless = g_cfg.lossless;
+        task->distance = g_cfg.distance;
+        wcsncpy_s(task->out_path, MAX_PATH, path, _TRUNCATE);
+
+        InterlockedIncrement(&g_activeEncodes);
+        HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
+        if (hThread) {
+            CloseHandle(hThread);
+            dbg("queue_grab_encode: encoding offloaded (%ls)", path);
+            return 1;
+        }
+
+        InterlockedDecrement(&g_activeEncodes);
+        dbg("queue_grab_encode: CreateThread failed, saving synchronously");
+        int ok = save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr,
+                                task->lossless, task->distance, task->out_path);
+        free(task->bits);
+        free(task);
+        return ok;
+    }
+
+    dbg("queue_grab_encode: malloc failed, saving synchronously");
+    int ok = save_rgb_as_jxl(g->bits, g->w, g->h, g->is_hdr,
+                            g_cfg.lossless, g_cfg.distance, path);
+    free_grab(g);
+    return ok;
+}
+
 static void execute_full_capture(void) {
+    dbg("execute_full_capture: begin (effort=%d, multimonitor=%s)",
+        g_cfg.effort, g_cfg.multimonitor ? "separateimages" : "focusmonitor");
+
+    if (g_cfg.multimonitor == 1) {
+        MonitorEntry monitors[16];
+        int count = enumerate_monitors(monitors, 16);
+
+        if (count <= 0) {
+            MessageBoxW(NULL, L"No monitors found.", L"jxlshot", MB_ICONERROR);
+            return;
+        }
+
+        int saved = 0;
+        for (int i = 0; i < count; i++) {
+            Grab g;
+            ZeroMemory(&g, sizeof(g));
+            if (!grab_monitor(&g, monitors[i].hmon)) {
+                dbg("execute_full_capture: monitor %d grab failed", i + 1);
+                free_grab(&g);
+                continue;
+            }
+
+            wchar_t tag[16];
+            _snwprintf(tag, 16, L"_m%d", i + 1);
+            tag[15] = 0;
+
+            wchar_t out_path[MAX_PATH];
+            build_out_path_tag(out_path, MAX_PATH, g.is_hdr, tag);
+            dbg("execute_full_capture: monitor %d -> %ls", i + 1, out_path);
+
+            if (queue_grab_encode(&g, out_path)) saved++;
+            free_grab(&g);
+        }
+
+        if (saved == 0) {
+            MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
+        } else if (saved < count) {
+            dbg("execute_full_capture: only %d of %d monitors saved", saved, count);
+        }
+        return;
+    }
+
     Grab g;
     ZeroMemory(&g, sizeof(g));
-
-    dbg("execute_full_capture: begin (effort=%d)", g_cfg.effort);
-    if (!grab_primary_monitor(&g)) {
+    if (!grab_monitor(&g, monitor_under_cursor())) {
         dbg("execute_full_capture: grab failed, showing MessageBox");
         MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
         return;
@@ -640,41 +722,10 @@ static void execute_full_capture(void) {
     build_out_path(out_path, MAX_PATH, g.is_hdr);
     dbg("execute_full_capture: writing to %ls", out_path);
 
-    // OFFLOAD TO BACKGROUND THREAD
-    EncodeTask *task = (EncodeTask *)malloc(sizeof(EncodeTask));
-    if (task) {
-        task->bits = g.bits;
-        task->w = g.w;
-        task->h = g.h;
-        task->is_hdr = g.is_hdr;
-        task->lossless = g_cfg.lossless;
-        task->distance = g_cfg.distance;
-        wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
-        
-        InterlockedIncrement(&g_activeEncodes);
-        HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
-        if (hThread) {
-            CloseHandle(hThread);
-            g.bits = NULL; // Thread owns the buffer now
-            dbg("execute_full_capture: encoding offloaded to background thread");
-        } else {
-            InterlockedDecrement(&g_activeEncodes);
-            dbg("execute_full_capture: CreateThread failed, falling back to synchronous");
-            if (!save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path)) {
-                MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
-            }
-            free(task->bits);
-            free(task);
-            g.bits = NULL; 
-        }
-    } else {
-        dbg("execute_full_capture: malloc failed, falling back to synchronous");
-        if (!save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path)) {
-            MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
-        }
+    if (!queue_grab_encode(&g, out_path)) {
+        MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
     }
-
-    free_grab(&g); 
+    free_grab(&g);
 }
 
 static void execute_open_releases(HWND hwnd) {
@@ -744,6 +795,8 @@ static HDC     g_hdcBack = NULL;  // off-screen frame, presented in one blit
 static HDC     g_measureDC = NULL;
 static HBITMAP g_hbmScreen = NULL, g_hbmDim = NULL, g_hbmBack = NULL;
 static uint8_t *g_screenBits = NULL; // pixels of the frame shown under the overlay
+static Grab     g_regionFrame;        // one captured monitor frame: overlay + crop
+static RECT     g_regionMonitorRect;  // screen coordinates of that monitor
 static HFONT   g_dimFont = NULL; // Arial label for the live W × H readout
 static int     g_dimTextH = 16;  // label height, cached when the font is built
 static int     g_dimOutline = 1; // label outline thickness, scaled by DPI
@@ -761,6 +814,66 @@ static HBITMAP create_screen_dib(HDC dc, void **bits) {
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
     return CreateDIBSection(dc, &bi, DIB_RGB_COLORS, bits, NULL, 0);
+}
+
+// Display-only conversion from linear scRGB to 8-bit sRGB. The saved region
+// keeps the original FP16 scRGB pixels; this only builds the overlay preview.
+static uint8_t linear_to_srgb8(float v) {
+    if (!(v > 0.0f)) return 0;
+    if (v >= 1.0f) return 255;
+
+    float s = (v <= 0.0031308f)
+        ? 12.92f * v
+        : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f;
+
+    int n = (int)(s * 255.0f + 0.5f);
+    if (n < 0) n = 0;
+    if (n > 255) n = 255;
+    return (uint8_t)n;
+}
+
+static uint8_t g_hdr_srgb_lut[65536];
+static BOOL    g_hdr_srgb_lut_ready = FALSE;
+
+static void init_hdr_srgb_lut(void) {
+    for (uint32_t i = 0; i < 65536; i++) {
+        g_hdr_srgb_lut[i] = linear_to_srgb8(half_to_float((uint16_t)i));
+    }
+    g_hdr_srgb_lut_ready = TRUE;
+}
+
+// Build the 32-bit overlay DIB from the single captured frame. SDR is copied
+// as-is; HDR is converted for the preview only.
+static void build_overlay_from_region_frame(void) {
+    if (!g_screenBits || !g_regionFrame.bits) return;
+
+    const int w = g_screenW;
+    const int h = g_screenH;
+    const size_t src_bpp = g_regionFrame.is_hdr ? 6 : 3;
+    const uint8_t *src = g_regionFrame.bits;
+    uint8_t *dst = g_screenBits;
+
+    if (g_regionFrame.is_hdr) {
+        if (!g_hdr_srgb_lut_ready) init_hdr_srgb_lut();
+
+        for (size_t i = 0, n = (size_t)w * h; i < n; i++, src += src_bpp, dst += 4) {
+            uint16_t hr = (uint16_t)(src[0] | (src[1] << 8));
+            uint16_t hg = (uint16_t)(src[2] | (src[3] << 8));
+            uint16_t hb = (uint16_t)(src[4] | (src[5] << 8));
+
+            dst[0] = g_hdr_srgb_lut[hb];
+            dst[1] = g_hdr_srgb_lut[hg];
+            dst[2] = g_hdr_srgb_lut[hr];
+            dst[3] = 255;
+        }
+    } else {
+        for (size_t i = 0, n = (size_t)w * h; i < n; i++, src += src_bpp, dst += 4) {
+            dst[0] = src[2]; // B
+            dst[1] = src[1]; // G
+            dst[2] = src[0]; // R
+            dst[3] = 255;
+        }
+    }
 }
 
 // Normalized selection rectangle (drag direction does not matter).
@@ -820,85 +933,37 @@ static void region_dirty_rect(RECT *out) {
 }
 
 static void crop_and_encode_region(RECT *r) {
-    if (!g_screenBits || g_screenW <= 0 || g_screenH <= 0) {
-        dbg("crop_and_encode_region: no cached overlay frame");
+    if (!g_regionFrame.bits || g_regionFrame.w <= 0 || g_regionFrame.h <= 0) {
+        dbg("crop_and_encode_region: no captured frame");
         return;
     }
 
-    dbg("crop_and_encode_region: using displayed frame (effort=%d, %dx%d)",
-        g_cfg.effort, r->right - r->left, r->bottom - r->top);
+    dbg("crop_and_encode_region: using displayed frame (effort=%d, %dx%d, %s)",
+        g_cfg.effort, r->right - r->left, r->bottom - r->top,
+        g_regionFrame.is_hdr ? "HDR" : "SDR");
 
-    // Clamp the selection to the cached frame.
-    if (r->left   < 0)          r->left   = 0;
-    if (r->top    < 0)          r->top    = 0;
-    if (r->right  > g_screenW)  r->right  = g_screenW;
-    if (r->bottom > g_screenH)  r->bottom = g_screenH;
+    if (r->left   < 0)                r->left   = 0;
+    if (r->top    < 0)                r->top    = 0;
+    if (r->right  > g_regionFrame.w)  r->right  = g_regionFrame.w;
+    if (r->bottom > g_regionFrame.h)  r->bottom = g_regionFrame.h;
 
     int rw = r->right - r->left;
     int rh = r->bottom - r->top;
-
     if (rw <= 0 || rh <= 0) return;
 
-    // g_hdcMem is a 32-bit top-down DIB (BGRA); the encoder wants packed RGB24.
-    const size_t src_bpp = 4;
-    const size_t dst_bpp = 3;
-    uint8_t *crop_bits = (uint8_t *)malloc((size_t)rw * rh * dst_bpp);
-    if (!crop_bits) {
-        dbg("crop_and_encode_region: malloc failed");
+    Grab crop;
+    if (!crop_grab(&g_regionFrame, r->left, r->top, rw, rh, &crop)) {
+        dbg("crop_and_encode_region: crop failed");
         return;
     }
 
-    // Make sure GDI has finished writing the bitmap before reading its bits.
-    GdiFlush();
-
-    for (int y = 0; y < rh; y++) {
-        const uint8_t *src = g_screenBits +
-            ((size_t)(r->top + y) * g_screenW + r->left) * src_bpp;
-        uint8_t *dst = crop_bits + (size_t)y * rw * dst_bpp;
-
-        for (int x = 0; x < rw; x++) {
-            dst[0] = src[2]; // R
-            dst[1] = src[1]; // G
-            dst[2] = src[0]; // B
-            src += src_bpp;
-            dst += dst_bpp;
-        }
-    }
-
     wchar_t out_path[MAX_PATH];
-    build_out_path(out_path, MAX_PATH, 0);
+    build_out_path(out_path, MAX_PATH, crop.is_hdr);
 
-    // Offload encoding so the UI does not freeze.
-    EncodeTask *task = (EncodeTask *)malloc(sizeof(EncodeTask));
-    if (task) {
-        task->bits = crop_bits; // Transfer ownership of crop_bits to the thread
-        task->w = rw;
-        task->h = rh;
-        task->is_hdr = 0;
-        task->lossless = g_cfg.lossless;
-        task->distance = g_cfg.distance;
-        wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
-
-        InterlockedIncrement(&g_activeEncodes);
-        HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
-        if (hThread) {
-            CloseHandle(hThread);
-            // crop_bits is owned by the thread now; do NOT free it here.
-            dbg("crop_and_encode_region: encoding offloaded to background thread");
-        } else {
-            InterlockedDecrement(&g_activeEncodes);
-            // Fallback to synchronous if thread creation fails
-            dbg("crop_and_encode_region: CreateThread failed, falling back to synchronous");
-            save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path);
-            free(task->bits); // Guaranteed heap cleanup on fallback
-            free(task);
-        }
-    } else {
-        // Fallback if malloc fails
-        dbg("crop_and_encode_region: malloc failed for EncodeTask, falling back to synchronous");
-        save_rgb_as_jxl(crop_bits, rw, rh, 0, g_cfg.lossless, g_cfg.distance, out_path);
-        free(crop_bits);
+    if (!queue_grab_encode(&crop, out_path)) {
+        dbg("crop_and_encode_region: save failed");
     }
+    free_grab(&crop);
 }
 
 LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -1079,12 +1144,15 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
             if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
             g_screenBits = NULL;
+            free_grab(&g_regionFrame);
             if (g_measureDC){ DeleteDC(g_measureDC); g_measureDC = NULL; }
             if (g_dimFont)  { DeleteObject(g_dimFont); g_dimFont = NULL; }
             
             // Completely clear all region selection state so the app remembers nothing
             g_hwndRegion = NULL;
             g_isDragging = FALSE;
+            g_regionMonitorRect.left = g_regionMonitorRect.top = 0;
+            g_regionMonitorRect.right = g_regionMonitorRect.bottom = 0;
             g_rcSel.left = g_rcSel.top = g_rcSel.right = g_rcSel.bottom = 0;
             
             return 0;
@@ -1104,14 +1172,47 @@ static void start_region_capture(void) {
     g_isDragging = FALSE;
     g_rcSel.left = g_rcSel.top = g_rcSel.right = g_rcSel.bottom = 0;
 
-    g_screenW = GetSystemMetrics(SM_CXSCREEN); g_screenH = GetSystemMetrics(SM_CYSCREEN);
+    // Capture the monitor under the cursor once. This exact frame is shown in
+    // the overlay and is also the source of the saved region, so HDR survives.
+    free_grab(&g_regionFrame);
+    HMONITOR target_monitor = monitor_under_cursor();
+    MONITORINFO mi = { sizeof(mi) };
+    if (!GetMonitorInfoW(target_monitor, &mi)) {
+        dbg("start_region_capture: GetMonitorInfo failed");
+        g_isRegionCapturing = FALSE;
+        g_regionCaptureEndTime = GetTickCount();
+        return;
+    }
+
+    if (!grab_monitor(&g_regionFrame, target_monitor) ||
+        !g_regionFrame.bits || g_regionFrame.w <= 0 || g_regionFrame.h <= 0) {
+        dbg("start_region_capture: grab failed");
+        free_grab(&g_regionFrame);
+        g_isRegionCapturing = FALSE;
+        g_regionCaptureEndTime = GetTickCount();
+        return;
+    }
+
+    g_regionMonitorRect = mi.rcMonitor;
+    g_screenW = g_regionFrame.w;
+    g_screenH = g_regionFrame.h;
     HDC hdcScreen = GetDC(NULL);
 
-    // Original screenshot. The region crop later reads this exact frame.
+    // Original screenshot: SDR preview of the captured frame on the overlay.
     g_hdcMem = CreateCompatibleDC(hdcScreen);
     g_hbmScreen = create_screen_dib(hdcScreen, (void **)&g_screenBits);
+    if (!g_hdcMem || !g_hbmScreen || !g_screenBits) {
+        if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
+        if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
+        g_screenBits = NULL;
+        free_grab(&g_regionFrame);
+        ReleaseDC(NULL, hdcScreen);
+        g_isRegionCapturing = FALSE;
+        g_regionCaptureEndTime = GetTickCount();
+        return;
+    }
     SelectObject(g_hdcMem, g_hbmScreen);
-    BitBlt(g_hdcMem, 0, 0, g_screenW, g_screenH, hdcScreen, 0, 0, SRCCOPY);
+    build_overlay_from_region_frame();
 
     // Dimmed copy: blend the dark layer once, not on every mouse move.
     g_hdcDim = CreateCompatibleDC(hdcScreen);
@@ -1167,7 +1268,10 @@ static void start_region_capture(void) {
     wc.lpszClassName = L"JxlShotRegionClass"; RegisterClassExW(&wc);
 
     g_hwndRegion = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"JxlShotRegionClass", L"",
-                                   WS_POPUP, 0, 0, g_screenW, g_screenH, NULL, NULL, GetModuleHandle(NULL), NULL);
+                                   WS_POPUP,
+                                   g_regionMonitorRect.left, g_regionMonitorRect.top,
+                                   g_screenW, g_screenH,
+                                   NULL, NULL, GetModuleHandle(NULL), NULL);
     
     // If window creation fails, clean up GDI objects immediately to prevent leaks
     if (!g_hwndRegion) {
@@ -1178,6 +1282,7 @@ static void start_region_capture(void) {
         if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
         if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
         g_screenBits = NULL;
+        free_grab(&g_regionFrame);
         if (g_measureDC){ DeleteDC(g_measureDC); g_measureDC = NULL; }
         if (g_dimFont)  { DeleteObject(g_dimFont); g_dimFont = NULL; }
         return;
@@ -1268,7 +1373,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
 // Check Full Capture Hotkey 
 // Condition: Key is defined (!= 0)
 // AND pressed key matches AND modifiers match exactly
-        if (wParam == WM_KEYDOWN) {
+        if (k_down) {
             // Check Full Capture Hotkey
             if (g_cfg.hk_full_vk != 0 && pKB->vkCode == g_cfg.hk_full_vk) {
                 if (check_modifiers(g_cfg.hk_full_mod)) {
@@ -1286,6 +1391,7 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
                     return 1; // Block key from propagating to other apps
                 }
             }
+
         }
     }
     
