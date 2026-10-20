@@ -1,3 +1,7 @@
+v2.3.3 - Unreleased
+- 
+
+
 v2.3.2 - 20 October 2026
 - debug log: it is now the one file the app is allowed to overwrite. `jxlshot_debug.log` is opened for writing at every start, so the old data of the previous run is truncated to 0 bytes instead of growing forever
 - the app overwrites nothing else: `jxlshot.ini` is only written when it is missing (or for a setting changed in the UI), and a screenshot gets a date-stamped name, which already makes the `.jxl` write unique avoid overwritten other files unless you have wrong time which is not the app fault
