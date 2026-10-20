@@ -19,9 +19,8 @@ AllowNoIcons=yes
 OutputDir=Output
 OutputBaseFilename=jxlshot-setup-x64
 ; shitty Microsoft Defender flag the executable as threaf if you enable compression
-Compression=none
+Compression=lzma
 SolidCompression=no
-; keep it no Compression
 WizardStyle=classic dark
 ; No admin rights required for AppData installation
 PrivilegesRequired=lowest
