@@ -82,7 +82,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               throw "ISCC failed with exit code $LASTEXITCODE"
           }
-          if (-Not (Test-Path "Output\jxlshot-setup-x64.exe")) {
+          if (-Not (Test-Path "jxlshot-setup-x64.exe")) {
               throw "The installer EXE was not created."
           }
 
@@ -97,7 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: jxlshot-setup-x64
-          path: Output/jxlshot-setup-x64.exe
+          path: jxlshot-setup-x64.exe
           if-no-files-found: error
 
       - name: Publish release (on tag)
@@ -106,4 +106,4 @@ jobs:
         with:
           files: |
             jxlshot-windows-x64.zip
-            Output/jxlshot-setup-x64.exe
+            jxlshot-setup-x64.exe
