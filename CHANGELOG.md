@@ -1,3 +1,7 @@
+v2.3.6 - 
+- region capture: the selection is cropped from the cached overlay frame that was actually displayed, instead of calling `grab_primary_monitor()` a second time after the overlay closes. Region output is SDR, matching the overlay image
+
+
 v2.3.6 - 20 October 2026
 - update check: removed the `VERSION` download function that  the tray item used to check for update, now its just **Open Releases Page** and only opens the GitHub releases URL in the default browser. The executable no longer imports `URLDownloadToFileW` or links `urlmon` which is one of the reason caused Microsoft Defender to flag it as **Trojan:Win32/Wacatac.B!ml**
 
