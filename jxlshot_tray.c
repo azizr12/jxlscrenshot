@@ -814,11 +814,80 @@ static void execute_open_export_folder(void) {
 // Interactive Region Selection
 
 static HWND    g_hwndRegion = NULL;
-static HDC     g_hdcMem = NULL, g_hdcBlack = NULL;
-static HBITMAP g_hbmScreen = NULL, g_hbmBlack = NULL;
+static HDC     g_hdcMem = NULL;   // untouched screenshot
+static HDC     g_hdcDim = NULL;   // pre-dimmed screenshot (built once)
+static HDC     g_hdcBack = NULL;  // off-screen frame, presented in one blit
+static HDC     g_measureDC = NULL;
+static HBITMAP g_hbmScreen = NULL, g_hbmDim = NULL, g_hbmBack = NULL;
+static HFONT   g_dimFont = NULL; // Arial label for the live W × H readout
+static int     g_dimTextH = 16;  // label height, cached when the font is built
+static int     g_dimOutline = 1; // label outline thickness, scaled by DPI
 static int     g_screenW, g_screenH;
 static RECT    g_rcSel;
 static BOOL    g_isDragging = FALSE;
+
+static HBITMAP create_screen_dib(HDC dc) {
+    BITMAPINFO bi;
+    ZeroMemory(&bi, sizeof bi);
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = g_screenW;
+    bi.bmiHeader.biHeight = -g_screenH;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    return CreateDIBSection(dc, &bi, DIB_RGB_COLORS, NULL, NULL, 0);
+}
+
+// Normalized selection rectangle (drag direction does not matter).
+static void region_sel_rect(RECT *r) {
+    int x = min(g_rcSel.left, g_rcSel.right);
+    int y = min(g_rcSel.top, g_rcSel.bottom);
+    int w = abs(g_rcSel.right - g_rcSel.left);
+    int h = abs(g_rcSel.bottom - g_rcSel.top);
+    SetRect(r, x, y, x + w, y + h);
+}
+
+static BOOL region_has_selection(void) {
+    RECT r;
+    region_sel_rect(&r);
+    return g_isDragging || !IsRectEmpty(&r);
+}
+
+// Bounds of the "1234 × 567" label, matching exactly where WM_PAINT draws it.
+static void region_label_rect(const RECT *sel, RECT *out) {
+    int w = sel->right - sel->left;
+    int h = sel->bottom - sel->top;
+
+    wchar_t text[64];
+    int len = _snwprintf(text, 64, L"%d × %d", w, h);
+    if (len < 0) len = 0;
+
+    SIZE sz = {0};
+    if (g_measureDC) {
+        HFONT font = g_dimFont ? g_dimFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+        HGDIOBJ old = SelectObject(g_measureDC, font);
+        GetTextExtentPoint32W(g_measureDC, text, len, &sz);
+        SelectObject(g_measureDC, old);
+    }
+
+    int textX = sel->left + 8;
+    int textY = (sel->top - g_dimTextH - 8) < 0 ? sel->top + 8 : sel->top - g_dimTextH - 8;
+
+    SetRect(out,
+            textX - g_dimOutline,
+            textY - g_dimOutline,
+            textX + sz.cx + g_dimOutline + 2,
+            textY + g_dimTextH + g_dimOutline + 2);
+}
+
+// Everything that has to be repainted when the selection changes.
+static void region_dirty_rect(RECT *out) {
+    RECT sel, label;
+    region_sel_rect(&sel);
+    region_label_rect(&sel, &label);
+    UnionRect(out, &sel, &label);
+    InflateRect(out, 4, 4); // 2 px border plus a little slack
+}
 
 static void crop_and_encode_region(RECT *r) {
     Grab g;
@@ -906,51 +975,86 @@ static void crop_and_encode_region(RECT *r) {
 
 LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case WM_ERASEBKGND:
+            return 1; // fully repainted in WM_PAINT; never erase first
+
         case WM_PAINT: {
-            PAINTSTRUCT ps; 
+            PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
-            
-            // 1. Restore the original screen capture
-            BitBlt(hdc, 0, 0, g_screenW, g_screenH, g_hdcMem, 0, 0, SRCCOPY);
-            
-            // 2. Apply dark mode overlay (Alpha 120 provides a modern dimmed effect)
-            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 120, 0 };
-            AlphaBlend(hdc, 0, 0, g_screenW, g_screenH, g_hdcBlack, 0, 0, 1, 1, bf);
 
-            // 3. Draw the selection area and border
-            if (g_isDragging || (g_rcSel.right > g_rcSel.left && g_rcSel.bottom > g_rcSel.top)) {
-                int x = min(g_rcSel.left, g_rcSel.right);
-                int y = min(g_rcSel.top, g_rcSel.bottom);
-                int w = abs(g_rcSel.right - g_rcSel.left);
-                int h = abs(g_rcSel.bottom - g_rcSel.top);
-                
-                // Restore the clear (non-dimmed) image in the selected region
-                BitBlt(hdc, x, y, w, h, g_hdcMem, x, y, SRCCOPY);
-                
-                // Modern Accent Color Border (Windows Blue: #0078D7)
-                HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
-                HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
-                HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-                Rectangle(hdc, x, y, x + w, y + h);
-                
-                // Clean up GDI objects properly
-                SelectObject(hdc, hOldBrush); 
-                SelectObject(hdc, hOldPen); 
-                DeleteObject(hPen);
+            RECT dirty = ps.rcPaint;
+            int dx = dirty.left;
+            int dy = dirty.top;
+            int dw = dirty.right - dirty.left;
+            int dh = dirty.bottom - dirty.top;
 
-                // 4. Dimension Tooltip (White text, transparent background)
-                SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, RGB(255, 255, 255));
-                
-                wchar_t dimText[64];
-                _snwprintf(dimText, 64, L"%d × %d", w, h);
-                
-                // Prevent tooltip from drawing off the top edge of the screen
-                int textY = (y - 24) < 0 ? (y + 8) : (y - 24);
-                TextOutW(hdc, x + 8, textY, dimText, (int)wcslen(dimText));
+            if (dw > 0 && dh > 0) {
+                // 1. Start from the screenshot that was dimmed once at capture time.
+                BitBlt(g_hdcBack, dx, dy, dw, dh, g_hdcDim, dx, dy, SRCCOPY);
+
+                if (region_has_selection()) {
+                    RECT sel;
+                    region_sel_rect(&sel);
+
+                    // 2. Restore the clear (non-dimmed) image inside the selection.
+                    RECT inter;
+                    if (IntersectRect(&inter, &sel, &dirty)) {
+                        BitBlt(g_hdcBack, inter.left, inter.top,
+                               inter.right - inter.left, inter.bottom - inter.top,
+                               g_hdcMem, inter.left, inter.top, SRCCOPY);
+                    }
+
+                    int saved = SaveDC(g_hdcBack);
+                    IntersectClipRect(g_hdcBack, dx, dy, dx + dw, dy + dh);
+
+                    // 3. Accent border.
+                    HPEN hPen = CreatePen(PS_SOLID, 2, RGB(0, 120, 215));
+                    HPEN hOldPen = (HPEN)SelectObject(g_hdcBack, hPen);
+                    HBRUSH hOldBrush = (HBRUSH)SelectObject(g_hdcBack, GetStockObject(NULL_BRUSH));
+                    Rectangle(g_hdcBack, sel.left, sel.top, sel.right, sel.bottom);
+                    SelectObject(g_hdcBack, hOldBrush);
+                    SelectObject(g_hdcBack, hOldPen);
+                    DeleteObject(hPen);
+
+                    // 4. Dimension label: white glyphs with a dark outline.
+                    SetBkMode(g_hdcBack, TRANSPARENT);
+
+                    wchar_t dimText[64];
+                    _snwprintf(dimText, 64, L"%d × %d",
+                               sel.right - sel.left, sel.bottom - sel.top);
+                    int dimLen = (int)wcslen(dimText);
+
+                    HFONT oldFont = (HFONT)SelectObject(g_hdcBack,
+                        g_dimFont ? g_dimFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+
+                    TEXTMETRICW tm;
+                    GetTextMetricsW(g_hdcBack, &tm);
+
+                    int textY = (sel.top - tm.tmHeight - 8) < 0
+                                ? sel.top + 8
+                                : sel.top - tm.tmHeight - 8;
+                    int textX = sel.left + 8;
+
+                    // Draw the dark border around the glyphs, then the white core.
+                    SetTextColor(g_hdcBack, RGB(0, 0, 0));
+                    for (int oy = -g_dimOutline; oy <= g_dimOutline; oy++) {
+                        for (int ox = -g_dimOutline; ox <= g_dimOutline; ox++) {
+                            if (ox || oy) TextOutW(g_hdcBack, textX + ox, textY + oy, dimText, dimLen);
+                        }
+                    }
+                    SetTextColor(g_hdcBack, RGB(255, 255, 255));
+                    TextOutW(g_hdcBack, textX, textY, dimText, dimLen);
+
+                    SelectObject(g_hdcBack, oldFont);
+                    RestoreDC(g_hdcBack, saved);
+                }
+
+                // 5. Present the finished frame in one blit, so no half-drawn
+                //    frame (dimmed or undimmed) can ever reach the screen.
+                BitBlt(hdc, dx, dy, dw, dh, g_hdcBack, dx, dy, SRCCOPY);
             }
-            
-            EndPaint(hwnd, &ps); 
+
+            EndPaint(hwnd, &ps);
             return 0;
         }
 
@@ -960,15 +1064,27 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_rcSel.top = GET_Y_LPARAM(lp);
             g_rcSel.right = g_rcSel.left; 
             g_rcSel.bottom = g_rcSel.top;
-            SetCapture(hwnd); 
-            InvalidateRect(hwnd, NULL, FALSE); 
+            SetCapture(hwnd);
+
+            RECT dirty;
+            region_dirty_rect(&dirty);
+            InvalidateRect(hwnd, &dirty, FALSE);
             return 0;
         }
         case WM_MOUSEMOVE: {
             if (g_isDragging) {
-                g_rcSel.right = GET_X_LPARAM(lp); 
-                g_rcSel.bottom = GET_Y_LPARAM(lp);
-                InvalidateRect(hwnd, NULL, FALSE);
+                int nx = GET_X_LPARAM(lp);
+                int ny = GET_Y_LPARAM(lp);
+                if (nx == g_rcSel.right && ny == g_rcSel.bottom) return 0;
+
+                // Repaint only where the old and new selection (plus label) were.
+                RECT oldDirty, newDirty, dirty;
+                region_dirty_rect(&oldDirty);
+                g_rcSel.right = nx;
+                g_rcSel.bottom = ny;
+                region_dirty_rect(&newDirty);
+                UnionRect(&dirty, &oldDirty, &newDirty);
+                InvalidateRect(hwnd, &dirty, FALSE);
             } 
             return 0;
         }
@@ -1025,10 +1141,14 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_isRegionCapturing = FALSE;
             g_regionCaptureEndTime = GetTickCount(); // Start the 500ms block grace period
 // DO NOT call uninstall_mouse_hook() here anymore!
-            if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
-            if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
+            if (g_hdcBack)  { DeleteDC(g_hdcBack); g_hdcBack = NULL; }
+            if (g_hbmBack)  { DeleteObject(g_hbmBack); g_hbmBack = NULL; }
+            if (g_hdcDim)   { DeleteDC(g_hdcDim); g_hdcDim = NULL; }
+            if (g_hbmDim)   { DeleteObject(g_hbmDim); g_hbmDim = NULL; }
             if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
             if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
+            if (g_measureDC){ DeleteDC(g_measureDC); g_measureDC = NULL; }
+            if (g_dimFont)  { DeleteObject(g_dimFont); g_dimFont = NULL; }
             
             // Completely clear all region selection state so the app remembers nothing
             g_hwndRegion = NULL;
@@ -1053,24 +1173,62 @@ static void start_region_capture(void) {
     g_rcSel.left = g_rcSel.top = g_rcSel.right = g_rcSel.bottom = 0;
 
     g_screenW = GetSystemMetrics(SM_CXSCREEN); g_screenH = GetSystemMetrics(SM_CYSCREEN);
-    HDC g_hdcScreen = GetDC(NULL);
-    g_hdcMem = CreateCompatibleDC(g_hdcScreen);
-    
-    BITMAPINFO bi = {0}; bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bi.bmiHeader.biWidth = g_screenW; bi.bmiHeader.biHeight = -g_screenH;
-    bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
-    g_hbmScreen = CreateDIBSection(g_hdcScreen, &bi, DIB_RGB_COLORS, NULL, NULL, 0);
+    HDC hdcScreen = GetDC(NULL);
+
+    // Original screenshot.
+    g_hdcMem = CreateCompatibleDC(hdcScreen);
+    g_hbmScreen = create_screen_dib(hdcScreen);
     SelectObject(g_hdcMem, g_hbmScreen);
-    BitBlt(g_hdcMem, 0, 0, g_screenW, g_screenH, g_hdcScreen, 0, 0, SRCCOPY);
+    BitBlt(g_hdcMem, 0, 0, g_screenW, g_screenH, hdcScreen, 0, 0, SRCCOPY);
 
-    g_hdcBlack = CreateCompatibleDC(g_hdcScreen);
-    g_hbmBlack = CreateCompatibleBitmap(g_hdcScreen, 1, 1);
-    HBITMAP hOldBmp = (HBITMAP)SelectObject(g_hdcBlack, g_hbmBlack);
-    RECT rc = {0, 0, 1, 1};
-    FillRect(g_hdcBlack, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
-    SelectObject(g_hdcBlack, hOldBmp);
+    // Dimmed copy: blend the dark layer once, not on every mouse move.
+    g_hdcDim = CreateCompatibleDC(hdcScreen);
+    g_hbmDim = create_screen_dib(hdcScreen);
+    SelectObject(g_hdcDim, g_hbmDim);
+    BitBlt(g_hdcDim, 0, 0, g_screenW, g_screenH, g_hdcMem, 0, 0, SRCCOPY);
+    HDC hdcBlack = CreateCompatibleDC(hdcScreen);
+    HBITMAP hbmBlack = CreateCompatibleBitmap(hdcScreen, 1, 1);
+    HBITMAP hbmBlackOld = (HBITMAP)SelectObject(hdcBlack, hbmBlack);
+    RECT rcBlack = {0, 0, 1, 1};
+    FillRect(hdcBlack, &rcBlack, (HBRUSH)GetStockObject(BLACK_BRUSH));
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 120, 0 };
+    AlphaBlend(g_hdcDim, 0, 0, g_screenW, g_screenH, hdcBlack, 0, 0, 1, 1, bf);
+    SelectObject(hdcBlack, hbmBlackOld);
+    DeleteObject(hbmBlack);
+    DeleteDC(hdcBlack);
 
-    ReleaseDC(NULL, g_hdcScreen);
+    // Back buffer: WM_PAINT composes here, then presents one finished frame.
+    g_hdcBack = CreateCompatibleDC(hdcScreen);
+    g_hbmBack = create_screen_dib(hdcScreen);
+    SelectObject(g_hdcBack, g_hbmBack);
+    BitBlt(g_hdcBack, 0, 0, g_screenW, g_screenH, g_hdcDim, 0, 0, SRCCOPY);
+
+    // Arial label font and metrics, built once per capture.
+    if (!g_dimFont) {
+        LOGFONTW lf;
+        ZeroMemory(&lf, sizeof lf);
+        lf.lfHeight = -MulDiv(14, GetDeviceCaps(hdcScreen, LOGPIXELSY), 72);
+        lf.lfWeight = FW_BOLD;
+        lf.lfCharSet = DEFAULT_CHARSET;
+        lf.lfQuality = ANTIALIASED_QUALITY;
+        lf.lfPitchAndFamily = DEFAULT_PITCH | FF_SWISS;
+        wcscpy_s(lf.lfFaceName, LF_FACESIZE, L"Arial");
+        g_dimFont = CreateFontIndirectW(&lf);
+    }
+    g_dimTextH = 16;
+    {
+        HGDIOBJ oldFont = SelectObject(hdcScreen,
+            g_dimFont ? g_dimFont : (HFONT)GetStockObject(DEFAULT_GUI_FONT));
+        TEXTMETRICW tm;
+        if (GetTextMetricsW(hdcScreen, &tm)) g_dimTextH = tm.tmHeight;
+        SelectObject(hdcScreen, oldFont);
+    }
+    g_dimOutline = GetDeviceCaps(hdcScreen, LOGPIXELSY) / 96;
+    if (g_dimOutline < 1) g_dimOutline = 1;
+
+    g_measureDC = CreateCompatibleDC(hdcScreen);
+
+    ReleaseDC(NULL, hdcScreen);
 
     WNDCLASSEXW wc = {0}; wc.cbSize = sizeof(wc); wc.lpfnWndProc = RegionWndProc;
     wc.hInstance = GetModuleHandle(NULL); wc.hCursor = LoadCursor(NULL, IDC_CROSS);
@@ -1081,10 +1239,14 @@ static void start_region_capture(void) {
     
     // If window creation fails, clean up GDI objects immediately to prevent leaks
     if (!g_hwndRegion) {
-        if (g_hdcBlack) { DeleteDC(g_hdcBlack); g_hdcBlack = NULL; }
-        if (g_hbmBlack) { DeleteObject(g_hbmBlack); g_hbmBlack = NULL; }
+        if (g_hdcBack)  { DeleteDC(g_hdcBack); g_hdcBack = NULL; }
+        if (g_hbmBack)  { DeleteObject(g_hbmBack); g_hbmBack = NULL; }
+        if (g_hdcDim)   { DeleteDC(g_hdcDim); g_hdcDim = NULL; }
+        if (g_hbmDim)   { DeleteObject(g_hbmDim); g_hbmDim = NULL; }
         if (g_hdcMem)   { DeleteDC(g_hdcMem); g_hdcMem = NULL; }
         if (g_hbmScreen){ DeleteObject(g_hbmScreen); g_hbmScreen = NULL; }
+        if (g_measureDC){ DeleteDC(g_measureDC); g_measureDC = NULL; }
+        if (g_dimFont)  { DeleteObject(g_dimFont); g_dimFont = NULL; }
         return;
     }
 
