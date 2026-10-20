@@ -1,7 +1,7 @@
 v2.3.5 - 20 October 2026
 - REVERT **VERSIONINFO** in resource because fuck you BitDefender which flag it as **Gen:Variant.Barys.512093**
 - fixed **region capture** excluding the last pixel row/column: dragging across the full 1920×1080 screen now saves 1920×1080 instead of 1919×1079
-- changed inno setup to **no compresion** because shitty Microsoft Defender too flag it as **Trojan:Win32/Wacatac.B!ml**
+- changed inno setup to **no solid compresion** because shitty Microsoft Defender too flag it as **Trojan:Win32/Wacatac.B!ml** sometimes yes sometimes no the shitty ML is so aweful
 
 v2.3.2 - 20 October 2026
 - debug log: it is now the one file the app is allowed to overwrite. `jxlshot_debug.log` is opened for writing at every start, so the old data of the previous run is truncated to 0 bytes instead of growing forever
