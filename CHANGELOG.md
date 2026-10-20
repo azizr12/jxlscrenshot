@@ -5,7 +5,11 @@ Unreleased
 - fixed the About dialog icon overlapping the close button hit-box
 - the tray icon now turns **green** for a moment after a successful capture, so a save is visible without a pop-up (failures still show the existing error dialogs)
 - build: one CI workflow (portable + installer jobs) instead of two overlapping ones, with `-Wall -Wextra`
-- fix issue related to taking screenshot from tray menu cause the entire system stuttering
+- fix issue of down the thread priority which actually make it worse than helping
+- fixed the tray menu **stuttering** during capture: the menu command is now posted after `TrackPopupMenu` returns instead of running the capture inside the menu's modal loop
+- fixed **region selection flicker**: the overlay is now double-buffered and the dim layer is built once per capture, and mouse movement repaints only the old/new selection area instead of the whole screen
+- the region size label is now larger **Arial** with a dark outline so it stays readable over both bright and dark content
+- the encoder output buffer now starts at **4 MB** instead of allocating 33–66 MB per capture, and only grows if the encoder actually needs more
 
 
 v2.3.1 - 19 October 2026
