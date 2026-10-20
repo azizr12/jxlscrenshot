@@ -9,6 +9,7 @@ v2.3.2 - 20 October 2026
 - added a **VERSIONINFO** resource so the executable finally carries file-version properties (`VS_VERSION_INFO` needed `winver.h`; without it the block is stored under a string name and Windows ignores it)
 - fixed the About dialog icon overlapping the close button hit-box
 - the tray icon now turns **green** for a moment after a successful capture, so a save is visible without a pop-up (failures still show the existing error dialogs)
+- build: one CI workflow (portable + installer jobs) instead of two overlapping ones, with `-Wall -Wextra`
 - fix issue of down the thread priority which actually make it worse than helping
 - fixed the tray menu **stuttering** during capture: the menu command is now posted after `TrackPopupMenu` returns instead of running the capture inside the menu's modal loop
 - fixed **region selection flicker**: the overlay is now double-buffered and the dim layer is built once per capture, and mouse movement repaints only the old/new selection area instead of the whole screen
