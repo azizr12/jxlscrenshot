@@ -839,11 +839,16 @@ static HBITMAP create_screen_dib(HDC dc) {
 }
 
 // Normalized selection rectangle (drag direction does not matter).
+// Mouse coordinates are pixels: dragging from 0 to 1919 covers 1920 pixels,
+// so a non-zero span must include its last row/column. A click without a drag
+// still has zero width and height, so it still cancels the capture.
 static void region_sel_rect(RECT *r) {
     int x = min(g_rcSel.left, g_rcSel.right);
     int y = min(g_rcSel.top, g_rcSel.bottom);
     int w = abs(g_rcSel.right - g_rcSel.left);
     int h = abs(g_rcSel.bottom - g_rcSel.top);
+    if (w > 0) w++;
+    if (h > 0) h++;
     SetRect(r, x, y, x + w, y + h);
 }
 
@@ -1093,9 +1098,8 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 g_isDragging = FALSE; 
                 ReleaseCapture();
         
-                RECT r = g_rcSel;
-                if (r.left > r.right) { int t = r.left; r.left = r.right; r.right = t; }
-                if (r.top > r.bottom) { int t = r.top; r.top = r.bottom; r.bottom = t; }
+                RECT r;
+                region_sel_rect(&r);
         
                 ShowWindow(hwnd, SW_HIDE);
                 DestroyWindow(hwnd);
@@ -1103,7 +1107,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 // Force desktop to repaint immediately to clear any ghosting artifacts
                 RedrawWindow(NULL, NULL, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
 
-                if ((r.right - r.left) > 0 && (r.bottom - r.top) > 0) {
+                if (!IsRectEmpty(&r)) {
                     crop_and_encode_region(&r);
                 }
             } 
