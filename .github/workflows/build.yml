@@ -1,3 +1,8 @@
+# One workflow, three jobs:
+#   portable  -> builds dist\jxlshot_tray.exe + DLLs, and a portable ZIP
+#   installer -> downloads the portable EXE (not the ZIP) and builds setup.exe
+#   release   -> publishes the installer EXE and portable ZIP on a tag
+
 name: build-windows installer
 on:
   push:
