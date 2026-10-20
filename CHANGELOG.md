@@ -1,4 +1,5 @@
 v2.3.3 - Unreleased
+- REVERT **VERSIONINFO** in resource because fuck you BitDefender
 - 
 
 
