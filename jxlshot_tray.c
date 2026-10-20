@@ -42,8 +42,6 @@
 #include "jxlshot.c" // Pulls in core logic, config, and unified dbg() logger
 
 #include <uxtheme.h>
-#include <urlmon.h>
-#pragma comment(lib, "urlmon.lib") // (For MSVC)
 #pragma comment(lib, "comctl32.lib")
 
 // Undocumented but stable uxtheme APIs for Win32 Dark Mode (Windows 10 1903+)
@@ -594,7 +592,7 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_OPENCONFIG, L"Open Config File");
     AppendMenuW(hMenu, MF_STRING, IDM_HOTKEYS, L"Settings...");
     AppendMenuW(hMenu, MF_STRING, IDM_RELOAD, L"Reload Configuration");
-    AppendMenuW(hMenu, MF_STRING, IDM_CHECK_UPDATE, L"Check for Updates...");
+    AppendMenuW(hMenu, MF_STRING, IDM_CHECK_UPDATE, L"Open Releases Page");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, L"About...");
     AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
@@ -679,85 +677,11 @@ static void execute_full_capture(void) {
     free_grab(&g); 
 }
 
-// Version Parsing Helpers
-
-typedef struct { int major, minor, patch; } Version;
-
-static Version parse_version(const wchar_t* str) {
-    Version v = {0, 0, 0};
-    if (str) {
-        swscanf(str, L"%d.%d.%d", &v.major, &v.minor, &v.patch);
-    }
-    return v;
-}
-
-static int compare_versions(Version a, Version b) {
-    if (a.major != b.major) return a.major - b.major;
-    if (a.minor != b.minor) return a.minor - b.minor;
-    return a.patch - b.patch;
-}
-
-static void execute_check_update(HWND hwnd) {
-    // Cache-busting URL to guarantee a fresh download every time
-    wchar_t remote_url[512];
-    _snwprintf(remote_url, 512, L"https://raw.githubusercontent.com/azizr12/jxlscrenshot/main/VERSION?t=%llu", (unsigned long long)GetTickCount64());
-    
-    wchar_t temp_path[MAX_PATH];
-    GetTempPathW(MAX_PATH, temp_path);
-    wcscat_s(temp_path, MAX_PATH, L"jxlshot_version.txt");
-
-    // Download the file synchronously
-    HRESULT hr = URLDownloadToFileW(NULL, remote_url, temp_path, 0, NULL);
-    
-    if (FAILED(hr)) {
-        MessageBoxW(hwnd, L"Failed to connect to the update server.\nPlease check your internet connection.", L"Update Check", MB_ICONWARNING | MB_OK);
-        return;
-    }
-
-    HANDLE hFile = CreateFileW(temp_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if (hFile == INVALID_HANDLE_VALUE) {
-        MessageBoxW(hwnd, L"Failed to read update information.", L"Update Check", MB_ICONERROR | MB_OK);
-        return;
-    }
-
-    char buffer[64] = {0};
-    DWORD bytes_read = 0;
-    ReadFile(hFile, buffer, sizeof(buffer) - 1, &bytes_read, NULL);
-    CloseHandle(hFile);
-    DeleteFileW(temp_path); // Clean up temp file immediately
-
-    if (bytes_read == 0) {
-        MessageBoxW(hwnd, L"Update server returned empty data.", L"Update Check", MB_ICONERROR | MB_OK);
-        return;
-    }
-
-    wchar_t remote_version_str[64] = {0};
-    MultiByteToWideChar(CP_UTF8, 0, buffer, -1, remote_version_str, 64);
-    
-    // Trim trailing whitespace/newlines
-    for (int i = (int)wcslen(remote_version_str) - 1; i >= 0; i--) {
-        if (remote_version_str[i] == L'\r' || remote_version_str[i] == L'\n' || remote_version_str[i] == L' ') {
-            remote_version_str[i] = L'\0';
-        } else {
-            break;
-        }
-    }
-
-    // Parse and compare versions
-    Version remote_v = parse_version(remote_version_str);
-    Version current_v = parse_version(APP_VERSIONW);
-
-    if (compare_versions(remote_v, current_v) > 0) {
-        wchar_t msg[256];
-        _snwprintf(msg, 256, L"A new version is available!\n\nCurrent Version: %s\nLatest Version:  %s\n\nWould you like to open the releases page?", APP_VERSIONW, remote_version_str);
-        
-        int result = MessageBoxW(hwnd, msg, L"Update Available", MB_ICONINFORMATION | MB_YESNO);
-        if (result == IDYES) {
-            ShellExecuteW(hwnd, L"open", L"https://github.com/azizr12/jxlscrenshot/releases/latest", NULL, NULL, SW_SHOWNORMAL);
-        }
-    } else {
-        MessageBoxW(hwnd, L"You are already using the latest version.", L"Update Check", MB_ICONINFORMATION | MB_OK);
-    }
+static void execute_open_releases(HWND hwnd) {
+    // No version download and no temp file: let the browser do the work.
+    ShellExecuteW(hwnd, L"open",
+                  L"https://github.com/azizr12/jxlscrenshot/releases/latest",
+                  NULL, NULL, SW_SHOWNORMAL);
 }
 
 static void execute_set_path(void) {
@@ -1382,8 +1306,8 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
 // Low-level keyboard/mouse hooks. Windows delivers a WH_*_LL callback on the
 // thread that installed the hook, and silently removes the hook if a callback
 // is not serviced within LowLevelHooksTimeout (~300 ms). The UI thread blocks
-// for hundreds of milliseconds during a capture and during the update check,
-// so the hooks live on their own thread that does nothing but pump messages.
+// for hundreds of milliseconds during a capture, so the hooks live on their
+// own thread that does nothing but pump messages.
 static HANDLE g_hookThread = NULL;
 static DWORD  g_hookThreadId = 0;
 
@@ -1576,7 +1500,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 case IDM_OPENCONFIG: execute_open_config(hwnd); break;
                 case IDM_HOTKEYS: execute_hotkey_settings(hwnd); break;
                 case IDM_RELOAD: reload_config(); break;
-                case IDM_CHECK_UPDATE: execute_check_update(hwnd); break;
+                case IDM_CHECK_UPDATE: execute_open_releases(hwnd); break;
                 case IDM_ABOUT: execute_about(); break;
                 // DestroyWindow (not PostQuitMessage) so WM_DESTROY actually runs
                 // and the tray icon is removed. Posting WM_QUIT directly skipped
