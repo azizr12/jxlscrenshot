@@ -1,4 +1,4 @@
-v2.3.4 - 20 October 2026
+v2.3.5 - 20 October 2026
 - REVERT **VERSIONINFO** in resource because fuck you BitDefender which flag it as **Gen:Variant.Barys.512093**
 - fixed **region capture** excluding the last pixel row/column: dragging across the full 1920×1080 screen now saves 1920×1080 instead of 1919×1079
 - changed inno setup to **no compresion** because shitty Microsoft Defender too flag it as **Trojan:Win32/Wacatac.B!ml**
