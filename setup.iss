@@ -18,10 +18,10 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=Output
 OutputBaseFilename=jxlshot-setup-x64
-; shitty Microsoft Defender flag the executable as threaf if you enable compression
+; shitty Microsoft Defender flag the executable as threat if you enable solid compression
 Compression=lzma
 SolidCompression=no
-WizardStyle=classic dark
+WizardStyle=modern
 ; No admin rights required for AppData installation
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
