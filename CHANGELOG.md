@@ -1,6 +1,6 @@
-v2.3.3 - Unreleased
+v2.3.3 - 20 October 2026
 - REVERT **VERSIONINFO** in resource because fuck you BitDefender
-- 
+- fixed **region capture** excluding the last pixel row/column: dragging across the full 1920×1080 screen now saves 1920×1080 instead of 1919×1079
 
 
 v2.3.2 - 20 October 2026
