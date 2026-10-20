@@ -59,6 +59,7 @@ static void ensure_default_ini(void);
 static void init_config(void);
 static void dbg_init(void);
 static void build_out_path(wchar_t *path, int n, int is_hdr);
+static void build_out_path_tag(wchar_t *path, int n, int is_hdr, const wchar_t *tag);
 static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path);
 
 
@@ -72,6 +73,7 @@ typedef struct {
 // JXL encoder effort 1..10 (higher = smaller file, slower)
     int     blank_check_mode; 
 // 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels
+    int     multimonitor; // 0 = focusmonitor, 1 = separateimages
     wchar_t export_path[MAX_PATH];
     UINT    hk_full_mod;
     UINT    hk_full_vk;
@@ -133,6 +135,7 @@ static void ensure_default_ini(void) {
         ini_ensure_key(ini_path, L"HotkeyRegionVK",  L"44");
         ini_ensure_key(ini_path, L"HotkeyRegionMod", L"2");
         ini_ensure_key(ini_path, L"BlankCheckMode",  L"2");
+        ini_ensure_key(ini_path, L"MultiMonitor",    L"focusmonitor");
         return;
     }
 
@@ -153,14 +156,17 @@ static void ensure_default_ini(void) {
         L";                    2.0+ = Higher compression, slight quality reduction.\n"
         L";   Lossless       : If set to 1, strictly forces true lossless (overrides Distance).\n"
         L";                    If set to 0, the encoder uses the 'Distance' value above.\n"
-        L";   Effort         : Encoder effort 1-10 (default 7). Lower = faster capture/save,\n"
-        L";                    higher = smaller file but much slower encoding.\n"
+        L";   Effort         : Encoder effort 1-10 (default 8). Lower = faster capture/save,\n"
+        L";                      higher = smaller file but much slower encoding.\n"
         L";\n"
         L"; [General Settings]\n"
         L";   Debug          : 1 = Enable debug logging; 0 = Disable.\n"
         L";   ExportPath     : Custom directory for saving screenshots.\n"
         L";                    Leave blank to use the default Windows Pictures folder.\n"
         L";   BlankCheckMode : 0 = Disabled, 1 = Basic, 2 = Advanced, 3 = HARDCORE.\n"
+        L";   MultiMonitor   : focusmonitor   = full capture uses the monitor under the cursor.\n"
+        L";                    separateimages = full capture writes every monitor as _m1, _m2, ...\n"
+        L";                      (seperateimages is accepted as an alias)\n"
         L";\n"
         L"; [Hotkey Settings] (Use the 'Hotkey Settings...' tray menu to configure these easily!)\n"
         L";   HotkeyFullVK    : Virtual Key code for Full Screen capture (e.g., 44 = PrintScreen).\n"
@@ -180,7 +186,8 @@ static void ensure_default_ini(void) {
         L"HotkeyFullMod=0\n"
         L"HotkeyRegionVK=44\n"
         L"HotkeyRegionMod=2\n"
-        L"BlankCheckMode=2\n";
+        L"BlankCheckMode=2\n"
+        L"MultiMonitor=focusmonitor\n";
 
 // Lossless at distance 1.0 give small size compare to lossy 1.0
 // Changing effort in distance 1.0 when using lossy is not useful
@@ -252,6 +259,7 @@ static void init_config(void) {
     g_cfg.distance = 1.0f; 
     g_cfg.blank_check_mode = 2;
     g_cfg.effort = 8;
+    g_cfg.multimonitor = 0;
     g_cfg.hk_full_mod = 0; 
     g_cfg.hk_full_vk = VK_SNAPSHOT;
     g_cfg.hk_region_mod = MOD_CONTROL; 
@@ -286,6 +294,11 @@ static void init_config(void) {
     if (path_buf[0] != L'\0') {
         wcsncpy_s(g_cfg.export_path, MAX_PATH, path_buf, _TRUNCATE);
     }
+
+    wchar_t mm_buf[64];
+    get_cfg_string(L"MultiMonitor", L"focusmonitor", mm_buf, 64, ini_path);
+    g_cfg.multimonitor = (_wcsicmp(mm_buf, L"separateimages") == 0 ||
+                          _wcsicmp(mm_buf, L"seperateimages") == 0) ? 1 : 0;
 
     // Read integer-based hotkey config directly instead of parsing strings
     g_cfg.hk_full_vk = get_cfg_int(L"HotkeyFullVK", VK_SNAPSHOT, ini_path);
@@ -324,8 +337,9 @@ static void dbg_init(void) {
     SYSTEMTIME st; GetLocalTime(&st);
     fprintf(g_dbg, "\n===== jxlshot run started %04d-%02d-%02d %02d:%02d:%02d =====\n",
             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    fprintf(g_dbg, "[config] effort=%d lossless=%d distance=%.2f blank_check=%d\n",
-            g_cfg.effort, g_cfg.lossless, g_cfg.distance, g_cfg.blank_check_mode);
+    fprintf(g_dbg, "[config] effort=%d lossless=%d distance=%.2f blank_check=%d multimonitor=%s\n",
+            g_cfg.effort, g_cfg.lossless, g_cfg.distance, g_cfg.blank_check_mode,
+            g_cfg.multimonitor ? "separateimages" : "focusmonitor");
     fprintf(g_dbg, "[config] log file: %ls\n", log_path);
     fflush(g_dbg);
 }
@@ -365,20 +379,22 @@ static void set_dpi_aware(void) {
     }
 }
 
-static void build_out_path(wchar_t *path, int n, int is_hdr) {
+static void build_out_path_tag(wchar_t *path, int n, int is_hdr, const wchar_t *tag) {
     SYSTEMTIME st;
     GetLocalTime(&st);
+    if (!tag) tag = L"";
 
     // Build the filename on its own first. That lets the directory copy below
     // reserve room for the separator and the name, so a very long export path
     // can never be glued straight onto the filename (the old code dropped the
     // separator entirely once the directory reached MAX_PATH - 1 characters).
-    wchar_t fname[64];
-    _snwprintf(fname, 64, is_hdr
-            ? L"jxlshot_%04d%02d%02d_%02d%02d%02d_%03d_hdr.jxl"
-            : L"jxlshot_%04d%02d%02d_%02d%02d%02d_%03d.jxl",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-    fname[63] = L'\0';
+    wchar_t fname[96];
+    _snwprintf(fname, 96, is_hdr
+            ? L"jxlshot_%04d%02d%02d_%02d%02d%02d_%03d_hdr%s.jxl"
+            : L"jxlshot_%04d%02d%02d_%02d%02d%02d_%03d%s.jxl",
+        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds,
+        tag);
+    fname[95] = L'\0';
 
     size_t flen = wcslen(fname);
     size_t room = (n > 1) ? (size_t)n - 1 : 0;   // usable chars before the NUL
@@ -400,6 +416,10 @@ static void build_out_path(wchar_t *path, int n, int is_hdr) {
         _snwprintf(path, (size_t)n, L"%s", fname);
     }
     path[n - 1] = L'\0';
+}
+
+static void build_out_path(wchar_t *path, int n, int is_hdr) {
+    build_out_path_tag(path, n, is_hdr, NULL);
 }
 
 // Screen capture (DXGI Desktop Duplication for native SDR/HDR)
@@ -837,10 +857,13 @@ cleanup:
 
 // Public entry point: try DXGI first, fall back to GDI
 
-static int grab_primary_monitor(Grab *g) {
-    HMONITOR target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
-    double t0 = now_ms();
+static int grab_monitor(Grab *g, HMONITOR target_monitor) {
+    ZeroMemory(g, sizeof *g);
+    if (!target_monitor) {
+        target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+    }
 
+    double t0 = now_ms();
     if (grab_via_dxgi(g, target_monitor)) {
         dbg("bench grab: DXGI succeeded, total capture = %.2f ms", now_ms() - t0);
         return 1;
@@ -854,9 +877,100 @@ static int grab_primary_monitor(Grab *g) {
     return r;
 }
 
+static int grab_primary_monitor(Grab *g) {
+    return grab_monitor(g, MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY));
+}
+
 static void free_grab(Grab *g) {
     if (g->bits) free(g->bits);
     ZeroMemory(g, sizeof *g);
+}
+
+// Monitor enumeration used by "separateimages". Results are sorted left-to-right
+// so the _m1, _m2 suffixes stay stable across runs.
+typedef struct {
+    HMONITOR hmon;
+    RECT     rc;
+} MonitorEntry;
+
+typedef struct {
+    MonitorEntry *items;
+    int count;
+    int max;
+} MonitorEnumCtx;
+
+static BOOL CALLBACK monitor_enum_cb(HMONITOR hmon, HDC hdc, LPRECT rc, LPARAM lp) {
+    (void)hdc;
+    (void)rc;
+    MonitorEnumCtx *ctx = (MonitorEnumCtx *)lp;
+    if (ctx->count >= ctx->max) return FALSE;
+
+    MONITORINFO mi = { sizeof(mi) };
+    if (GetMonitorInfoW(hmon, &mi)) {
+        ctx->items[ctx->count].hmon = hmon;
+        ctx->items[ctx->count].rc = mi.rcMonitor;
+        ctx->count++;
+    }
+    return TRUE;
+}
+
+static int compare_monitor_entry(const void *a, const void *b) {
+    const MonitorEntry *ma = (const MonitorEntry *)a;
+    const MonitorEntry *mb = (const MonitorEntry *)b;
+    if (ma->rc.left != mb->rc.left) return ma->rc.left - mb->rc.left;
+    return ma->rc.top - mb->rc.top;
+}
+
+static int enumerate_monitors(MonitorEntry *out, int max) {
+    if (!out || max <= 0) return 0;
+    MonitorEnumCtx ctx = { out, 0, max };
+    EnumDisplayMonitors(NULL, NULL, monitor_enum_cb, (LPARAM)&ctx);
+    qsort(out, (size_t)ctx.count, sizeof(out[0]), compare_monitor_entry);
+    return ctx.count;
+}
+
+// The monitor under the cursor is what the user means by "focused monitor".
+// Fall back to the foreground window, then the primary monitor.
+static HMONITOR monitor_under_cursor(void) {
+    POINT pt;
+    if (GetCursorPos(&pt)) {
+        HMONITOR hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+        if (hmon) return hmon;
+    }
+    HWND fg = GetForegroundWindow();
+    if (fg) return MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST);
+    return MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+}
+
+// Copy a rectangle out of a Grab. The returned Grab keeps the source format,
+// so an HDR crop stays FP16 scRGB instead of being flattened to SDR.
+static int crop_grab(const Grab *src, int x, int y, int w, int h, Grab *out) {
+    ZeroMemory(out, sizeof *out);
+    if (!src || !src->bits || w <= 0 || h <= 0) return 0;
+
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > src->w) w = src->w - x;
+    if (y + h > src->h) h = src->h - y;
+    if (w <= 0 || h <= 0) return 0;
+
+    size_t bpp = src->is_hdr ? 6 : 3;
+    out->bits = (uint8_t *)malloc((size_t)w * h * bpp);
+    if (!out->bits) return 0;
+
+    for (int row = 0; row < h; row++) {
+        memcpy(
+            out->bits + (size_t)row * w * bpp,
+            src->bits + ((size_t)(y + row) * src->w + x) * bpp,
+            (size_t)w * bpp
+        );
+    }
+
+    out->w = w;
+    out->h = h;
+    out->is_hdr = src->is_hdr;
+    out->size = (size_t)w * h * bpp;
+    return 1;
 }
 
 // JPEG XL encoding (Identity SDR/HDR passthrough)
