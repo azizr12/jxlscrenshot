@@ -128,7 +128,7 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDM_REGION       102
 #define IDM_SETPATH      104
 #define IDM_ABOUT        105
-#define IDM_RELOAD       106
+#define IDM_DEBUG        106
 #define IDM_EXIT         103
 #define IDM_OPENCONFIG   107
 #define IDM_CHECK_UPDATE 108
@@ -162,11 +162,24 @@ static void install_mouse_hook(void);
 static void uninstall_mouse_hook(void);
 static void execute_about(void);
 
-static void reload_config(void) {
-    init_config();
-    dbg("config reloaded: effort=%d lossless=%d distance=%.2f multimonitor=%s",
-        g_cfg.effort, g_cfg.lossless, g_cfg.distance,
-        g_cfg.multimonitor ? "separateimages" : "focusmonitor");
+// Toggle debug logging from the tray menu. The label always shows the current
+// state, and the choice is written back to the INI so it survives a restart.
+static void toggle_debug(void) {
+    g_cfg.debug_enabled = !g_cfg.debug_enabled;
+
+    wchar_t ini[MAX_PATH];
+    _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    ini[MAX_PATH - 1] = L'\0';
+    WritePrivateProfileStringW(L"Capture", L"Debug",
+        g_cfg.debug_enabled ? L"1" : L"0", ini);
+
+    if (g_cfg.debug_enabled && !g_dbg) {
+        dbg_init(); // open (and truncate) the log for this session
+        dbg("debug logging enabled from tray menu");
+    }
+    // When disabled, g_dbg is deliberately left open: encode/drain worker
+    // threads may be inside dbg() right now, and fclose() here would race
+    // them. dbg() checks debug_enabled, so nothing is written while OFF.
 }
 
 // Tray Icon & Context Menu
@@ -619,7 +632,9 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, L"Open Export Folder");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENCONFIG, L"Open Config File");
     AppendMenuW(hMenu, MF_STRING, IDM_HOTKEYS, L"Settings...");
-    AppendMenuW(hMenu, MF_STRING, IDM_RELOAD, L"Reload Configuration");
+    wchar_t debug_label[32];
+    _snwprintf(debug_label, 32, L"Debug: %s", g_cfg.debug_enabled ? L"ON" : L"OFF");
+    AppendMenuW(hMenu, MF_STRING, IDM_DEBUG, debug_label);
     AppendMenuW(hMenu, MF_STRING, IDM_CHECK_UPDATE, L"Open Releases Page");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, L"About...");
@@ -1711,7 +1726,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 case IDM_OPENEXPORT: execute_open_export_folder(); break;
                 case IDM_OPENCONFIG: execute_open_config(hwnd); break;
                 case IDM_HOTKEYS: execute_hotkey_settings(hwnd); break;
-                case IDM_RELOAD: reload_config(); break;
+                case IDM_DEBUG: toggle_debug(); break;
                 case IDM_CHECK_UPDATE: execute_open_releases(hwnd); break;
                 case IDM_ABOUT: execute_about(); break;
                 // DestroyWindow (not PostQuitMessage) so WM_DESTROY actually runs
