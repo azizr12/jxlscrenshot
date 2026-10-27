@@ -1365,6 +1365,8 @@ static volatile LONG g_activeEncodes = 0;
 // Block until every background encode has finished. Only the tray shutdown path
 // needs this (the CLI already joins its single worker); guarded so the CLI
 // translation unit does not warn about an unused static function.
+//
+// Do NOT put a timeout here. There is no way to cancel libjxl mid-frame
 static void drain_encodes(void) {
     while (InterlockedCompareExchange(&g_activeEncodes, 0, 0) > 0) Sleep(10);
 }

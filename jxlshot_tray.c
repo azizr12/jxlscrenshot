@@ -105,6 +105,17 @@ static HWND g_hwndMenuOwner = NULL;
 #define TIMER_TRAY_ICON        1
 #define TRAY_ICON_OK_MS        1500
 
+// Recovery timers. The notification area is owned by explorer.exe
+// it can be restarted (crash, update, logon transition) and every icon in it disappears
+// It can also not be ready yet when the Run key launches at logon
+// in which case the first NIM_ADD simply fails
+// Neither case may leave app running forever without an icon.
+// And the code also doesn't allow jxlshot to run two PID in same time
+#define TIMER_TRAY_RETRY       2
+#define TRAY_RETRY_MS          3000
+#define TIMER_TRAY_HEALTH      4
+#define TRAY_HEALTH_MS         60000
+
 #define ID_TRAY          1
 #define IDM_FULL         101
 #define IDM_REGION       102
@@ -121,6 +132,8 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDI_APP_ICON  1001
 
 static NOTIFYICONDATAW g_nid;
+static BOOL            g_trayIconAdded = FALSE;
+static UINT            g_msgTaskbarCreated = 0;
 static HICON           g_iconNormal = NULL; // shared module icon, never destroyed
 static HICON           g_iconOk = NULL;     // green-dot variant, owned by us
 static HWND            g_hwndTray = NULL;
@@ -1422,14 +1435,30 @@ static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lPara
 // own thread that does nothing but pump messages.
 static HANDLE g_hookThread = NULL;
 static DWORD  g_hookThreadId = 0;
+static volatile LONG g_hookStop = 0;
 
 static DWORD WINAPI HookThreadProc(LPVOID param) {
     (void)param;
-    g_hhkKeyboard = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(NULL), 0);
-    g_hhkMouse    = SetWindowsHookExW(WH_MOUSE_LL,    LowLevelMouseProc,    GetModuleHandle(NULL), 0);
+
+    // Retry instead of giving up on the first failure
+    // SetWindowsHookEx canfail while the desktop/shell is still coming up at logon
+    for (int tries = 0; !g_hhkKeyboard && !g_hookStop; tries++) {
+        g_hhkKeyboard = SetWindowsHookExW(WH_KEYBOARD_LL, LowLevelKeyboardProc, GetModuleHandle(NULL), 0);
+        if (!g_hhkKeyboard) {
+            if (tries == 0) dbg("hook: SetWindowsHookEx(WH_KEYBOARD_LL) failed (err=%lu), retrying", GetLastError());
+            Sleep(500);
+        }
+    }
+    for (int tries = 0; !g_hhkMouse && !g_hookStop; tries++) {
+        g_hhkMouse = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandle(NULL), 0);
+        if (!g_hhkMouse) {
+            if (tries == 0) dbg("hook: SetWindowsHookEx(WH_MOUSE_LL) failed (err=%lu), retrying", GetLastError());
+            Sleep(500);
+        }
+    }
 
     MSG msg;
-    while (GetMessage(&msg, NULL, 0, 0) > 0) {
+    while (!g_hookStop && GetMessage(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
@@ -1443,6 +1472,7 @@ static DWORD WINAPI HookThreadProc(LPVOID param) {
 // installing the hooks on the calling (UI) thread, exactly as before.
 static void install_keyboard_hook(void) {
     if (g_hookThread || g_hhkKeyboard) return;
+    InterlockedExchange(&g_hookStop, 0);
     g_hookThreadId = 0;
     g_hookThread = CreateThread(NULL, 0, HookThreadProc, NULL, 0, &g_hookThreadId);
     if (!g_hookThread) {
@@ -1453,11 +1483,12 @@ static void install_keyboard_hook(void) {
 
 // Unhook both hooks and join the hook thread. Safe to call more than once.
 static void uninstall_keyboard_hook(void) {
+    InterlockedExchange(&g_hookStop, 1);
     if (g_hhkKeyboard) { UnhookWindowsHookEx(g_hhkKeyboard); g_hhkKeyboard = NULL; }
     if (g_hhkMouse)    { UnhookWindowsHookEx(g_hhkMouse);    g_hhkMouse = NULL; }
     if (g_hookThread) {
         if (g_hookThreadId) PostThreadMessageW(g_hookThreadId, WM_QUIT, 0, 0);
-        WaitForSingleObject(g_hookThread, 2000);
+        WaitForSingleObject(g_hookThread, 3000);
         CloseHandle(g_hookThread);
         g_hookThread = NULL;
         g_hookThreadId = 0;
@@ -1573,6 +1604,40 @@ static void show_save_ok(HWND hwnd) {
     SetTimer(hwnd, TIMER_TRAY_ICON, TRAY_ICON_OK_MS, NULL);
 }
 
+// Tray icon (re-)registration
+
+// Adds the notification-area icon, or refreshes it if it is already there
+// (NIM_ADD on an existing hWnd/uID pair just updates it).
+static BOOL tray_icon_add(void) {
+    if (Shell_NotifyIconW(NIM_ADD, &g_nid)) {
+        g_trayIconAdded = TRUE;
+        return TRUE;
+    }
+    g_trayIconAdded = FALSE;
+    return FALSE;
+}
+
+// Puts the icon back. Called at startup, after "TaskbarCreated" and from the
+// health timer, so a lost icon heals itself instead of leaving a live process
+// with no UI. On failure a retry timer is armed: at logon the shell is often
+// not ready yet when the Run key starts us.
+static void tray_icon_ensure(HWND hwnd) {
+    if (tray_icon_add()) {
+        KillTimer(hwnd, TIMER_TRAY_RETRY);
+        SetTimer(hwnd, TIMER_TRAY_HEALTH, TRAY_HEALTH_MS, NULL);
+        return;
+    }
+
+    // Only the first failure is logged: a shell that is not up yet can fail
+    // this for a few seconds and would otherwise spam the log.
+    static BOOL logged = FALSE;
+    if (!logged) {
+        dbg("tray: Shell_NotifyIcon(NIM_ADD) failed, retrying every %d ms", TRAY_RETRY_MS);
+        logged = TRUE;
+    }
+    SetTimer(hwnd, TIMER_TRAY_RETRY, TRAY_RETRY_MS, NULL);
+}
+
 // Tray Window Procedure & Entry Point
 
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
@@ -1600,6 +1665,21 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 g_nid.uFlags = NIF_ICON;
                 Shell_NotifyIconW(NIM_MODIFY, &g_nid);
                 g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+                return 0;
+            }
+            if (wp == TIMER_TRAY_RETRY) {
+                KillTimer(hwnd, TIMER_TRAY_RETRY);
+                tray_icon_ensure(hwnd);
+                return 0;
+            }
+            if (wp == TIMER_TRAY_HEALTH) {
+                // NIM_MODIFY returns FALSE when the icon no longer exists
+                // example after an explorer restart Re-add it.
+                g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+                if (!Shell_NotifyIconW(NIM_MODIFY, &g_nid)) {
+                    dbg("tray: health check lost the icon, re-adding");
+                    tray_icon_ensure(hwnd);
+                }
                 return 0;
             }
             return DefWindowProcW(hwnd, msg, wp, lParam);
@@ -1630,17 +1710,30 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
             uninstall_mouse_hook();
             uninstall_keyboard_hook(); // joins the hook thread
             KillTimer(hwnd, TIMER_TRAY_ICON);
+            KillTimer(hwnd, TIMER_TRAY_RETRY);
+            KillTimer(hwnd, TIMER_TRAY_HEALTH);
             if (g_iconOk) {
                 DestroyIcon(g_iconOk);
                 g_iconOk = NULL;
             }
             g_nid.hIcon = g_iconNormal; // never leave a destroyed icon referenced
             Shell_NotifyIconW(NIM_DELETE, &g_nid);
+            g_trayIconAdded = FALSE;
             if (menuOwner) DestroyWindow(menuOwner);
             PostQuitMessage(0);
             break;
         }
-        default: return DefWindowProcW(hwnd, msg, wp, lParam);
+        default:
+            // explorer.exe broadcasts this after it (re)starts.
+            if (g_msgTaskbarCreated && msg == g_msgTaskbarCreated) {
+                if (hwnd == g_hwndTray) {
+                    dbg("tray: TaskbarCreated received, re-adding icon");
+                    g_trayIconAdded = FALSE;
+                    tray_icon_ensure(hwnd);
+                }
+                return 0;
+            }
+            return DefWindowProcW(hwnd, msg, wp, lParam);
     }
     return 0;
 }
@@ -1654,6 +1747,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     // Single instance: a second tray would install duplicate global hooks and a
     // second tray icon, and whichever exits first would tear the hooks down from
     // under the other. The handle is intentionally kept for the process lifetime.
+    SetLastError(0);
     HANDLE hInstanceLock = CreateMutexW(NULL, TRUE, L"JxlShotTray_SingleInstance_Mutex");
     if (hInstanceLock && GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(hInstanceLock);
@@ -1680,7 +1774,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
         return 1;
     }
 
-    g_hwndTray = CreateWindowExW(0, L"JxlShotTrayClass", L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, hInst, NULL);
+    g_hwndTray = CreateWindowExW(WS_EX_TOOLWINDOW, L"JxlShotTrayClass", L"", WS_POPUP,
+                                 0, 0, 0, 0, NULL, NULL, hInst, NULL);
     if (!g_hwndTray) {
         MessageBoxW(NULL, L"Failed to create the tray window.", L"jxlshot", MB_ICONERROR);
         CoUninitialize();
@@ -1713,9 +1808,14 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     g_iconNormal = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
     g_nid.hIcon = g_iconNormal;
     wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
-    if (!Shell_NotifyIconW(NIM_ADD, &g_nid)) {
-        dbg("WinMain: Shell_NotifyIcon(NIM_ADD) failed");
-    }
+
+    // Registered before the window exists: explorer.exe broadcasts this message
+    // to every top-level window after it starts, which is the only way to know
+    // that the notification area was recreated and every icon was lost.
+    g_msgTaskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+
+    tray_icon_ensure(g_hwndTray);
+    dbg("tray: startup complete (icon %s)", g_trayIconAdded ? "added" : "pending retry");
 
     install_keyboard_hook();
 
@@ -1727,6 +1827,13 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     while (GetMessage(&msg, NULL, 0, 0)) { 
         TranslateMessage(&msg); 
         DispatchMessage(&msg); 
+    }
+
+    // if the loop ended without WM_DESTROY (GetMessage error)
+    // do not leave a ghost icon in the notification area.
+    if (g_trayIconAdded) {
+        Shell_NotifyIconW(NIM_DELETE, &g_nid);
+        g_trayIconAdded = FALSE;
     }
 
     // Wait for any in-flight background save before returning: WinMain returning

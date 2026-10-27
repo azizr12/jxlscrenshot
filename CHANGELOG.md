@@ -1,3 +1,7 @@
+v2.3.8 - 27 October 2026
+- fix issues related to tray icon if explorer.exe restart the icon is added back instead of leaving a live process with no tray icon and acting like an alive decapitated head
+- add retry to SetWindowsHookEx
+
 v2.3.7 - 20 October 2026
 - region capture: the selection is cropped from the cached overlay frame that was actually displayed, instead of calling `grab_primary_monitor()` a second time after the overlay closes. Region output is SDR, matching the overlay image
 - region capture: HDR-aware. The monitor under the cursor is captured once; the overlay shows a converted SDR preview, while the saved crop keeps the original FP16 scRGB pixels (`.jxl` file gets the `_hdr` name).
