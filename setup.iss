@@ -1,5 +1,5 @@
 #define MyAppName "jxlshot"
-#define MyAppVersion "2.3.8"
+#define MyAppVersion "2.3.9"
 #define MyAppPublisher "azizr12"
 #define MyAppURL "https://github.com/azizr12/jxlscrenshot"
 #define MyAppExeName "jxlshot_tray.exe"
@@ -18,9 +18,22 @@ DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=Output
 OutputBaseFilename=jxlshot-setup-x64
+
+; Compression Settings
+; lzma2 is more modern than lzma. SolidCompression=no prevents 
+; heuristic flags on large compressed blocks.
+Compression=lzma2
 ; shitty Microsoft Defender flag the executable as threat if you enable solid compression
-Compression=lzma
 SolidCompression=no
+
+; Adding version info helps AV vendors identify the file as a known application
+; rather than an anonymous binary.
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription=jxlshot Screenshot Utility
+VersionInfoProductName={#MyAppName}
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoVersion={#MyAppVersion}
+
 WizardStyle=modern
 ; No admin rights required for AppData installation
 PrivilegesRequired=lowest
@@ -32,8 +45,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-; Enabled by default (no 'unchecked' flag)
-Name: "startup"; Description: "Launch on Windows Startup"; GroupDescription: "Additional options:"
+; Make startup optional by default to reduce "persistence" flags
+Name: "startup"; Description: "Launch on Windows Startup"; GroupDescription: "Additional options:"; Flags: unchecked
 
 [Files]
 Source: "dist\jxlshot_tray.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -45,8 +58,7 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Registry]
-; Natively adds the application to the current user's startup registry
-; Replicates your batch file behavior perfectly without needing to execute it
+; Only add to startup if the user checked the box
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "{#MyAppName}"; ValueData: "{app}\{#MyAppExeName}"; Flags: uninsdeletevalue; Tasks: startup
 
 [Run]
