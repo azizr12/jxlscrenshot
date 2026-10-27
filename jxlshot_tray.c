@@ -631,7 +631,8 @@ static void show_tray_menu(HWND hwnd) {
 // the frame was accepted (threaded or synchronous fallback).
 static int queue_grab_encode(Grab *g, const wchar_t *path) {
     if (!g || !g->bits || !path) return 0;
-
+    // OFFLOAD TO BACKGROUND THREAD
+    // Thread owns the buffer now
     EncodeTask *task = (EncodeTask *)malloc(sizeof(EncodeTask));
     if (task) {
         task->bits = g->bits;
@@ -935,7 +936,7 @@ static void region_dirty_rect(RECT *out) {
 static void crop_and_encode_region(RECT *r) {
     if (!g_regionFrame.bits || g_regionFrame.w <= 0 || g_regionFrame.h <= 0) {
         dbg("crop_and_encode_region: no captured frame");
-        return;
+        return;// Early exit is safe
     }
 
     dbg("crop_and_encode_region: using displayed frame (effort=%d, %dx%d, %s)",
@@ -963,7 +964,7 @@ static void crop_and_encode_region(RECT *r) {
     if (!queue_grab_encode(&crop, out_path)) {
         dbg("crop_and_encode_region: save failed");
     }
-    free_grab(&crop);
+    free_grab(&crop);// Guaranteed cleanup before early exit
 }
 
 LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {

@@ -71,6 +71,7 @@ typedef struct {
     float   distance;
     int     effort;
 // JXL encoder effort 1..10 (higher = smaller file, slower)
+// effort 11 is "expert" not safe to use i guess
     int     blank_check_mode; 
 // 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels
     int     multimonitor; // 0 = focusmonitor, 1 = separateimages
@@ -154,6 +155,7 @@ static void ensure_default_ini(void) {
         L";                    0.0 = True lossless (exact pixel match, larger file).\n"
         L";                    1.0 = Visually lossless (recommended for screenshots).\n"
         L";                    2.0+ = Higher compression, slight quality reduction.\n"
+// distance only work if the encoding is lossy
         L";   Lossless       : If set to 1, strictly forces true lossless (overrides Distance).\n"
         L";                    If set to 0, the encoder uses the 'Distance' value above.\n"
         L";   Effort         : Encoder effort 1-10 (default 8). Lower = faster capture/save,\n"
