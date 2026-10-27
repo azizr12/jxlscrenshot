@@ -116,6 +116,13 @@ static HWND g_hwndMenuOwner = NULL;
 #define TIMER_TRAY_HEALTH      4
 #define TRAY_HEALTH_MS         60000
 
+// Right-clicks are blocked for a short grace period after a region capture
+// ends, so the button release that finished the selection cannot leak to the
+// desktop. This is a WM_TIMER (see TrayWndProc), not a clock deadline, so the
+// low-level mouse hook contains no timing API calls.
+#define TIMER_MOUSE_GRACE      3
+#define MOUSE_GRACE_MS         500
+
 #define ID_TRAY          1
 #define IDM_FULL         101
 #define IDM_REGION       102
@@ -140,7 +147,14 @@ static HWND            g_hwndTray = NULL;
 static HHOOK           g_hhkKeyboard = NULL;
 static HHOOK           g_hhkMouse = NULL;
 static BOOL            g_isRegionCapturing = FALSE;
-static DWORD           g_regionCaptureEndTime = 0;
+static BOOL            g_blockRightClick = FALSE;
+
+// Arm the right-click grace period. Driven by a WM_TIMER on the tray window.
+static void begin_mouse_grace(void) {
+    if (!g_hwndTray) { g_blockRightClick = FALSE; return; }
+    g_blockRightClick = TRUE;
+    SetTimer(g_hwndTray, TIMER_MOUSE_GRACE, MOUSE_GRACE_MS, NULL);
+}
 
 // Forward declarations to fix implicit declaration errors
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
@@ -1149,7 +1163,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         
         case WM_DESTROY: {
             g_isRegionCapturing = FALSE;
-            g_regionCaptureEndTime = GetTickCount(); // Start the 500ms block grace period
+            begin_mouse_grace(); // Start the 500ms block grace period
 // DO NOT call uninstall_mouse_hook() here anymore!
             if (g_hdcBack)  { DeleteDC(g_hdcBack); g_hdcBack = NULL; }
             if (g_hbmBack)  { DeleteObject(g_hbmBack); g_hbmBack = NULL; }
@@ -1178,7 +1192,8 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 static void start_region_capture(void) {
     // Fallback safety: If the flag was somehow stuck, reset it before starting
     g_isRegionCapturing = TRUE; 
-    g_regionCaptureEndTime = 0;
+    g_blockRightClick = FALSE;
+    if (g_hwndTray) KillTimer(g_hwndTray, TIMER_MOUSE_GRACE);
 
     if (g_hwndRegion) return;
 
@@ -1194,7 +1209,7 @@ static void start_region_capture(void) {
     if (!GetMonitorInfoW(target_monitor, &mi)) {
         dbg("start_region_capture: GetMonitorInfo failed");
         g_isRegionCapturing = FALSE;
-        g_regionCaptureEndTime = GetTickCount();
+        begin_mouse_grace();
         return;
     }
 
@@ -1203,7 +1218,7 @@ static void start_region_capture(void) {
         dbg("start_region_capture: grab failed");
         free_grab(&g_regionFrame);
         g_isRegionCapturing = FALSE;
-        g_regionCaptureEndTime = GetTickCount();
+        begin_mouse_grace();
         return;
     }
 
@@ -1222,7 +1237,7 @@ static void start_region_capture(void) {
         free_grab(&g_regionFrame);
         ReleaseDC(NULL, hdcScreen);
         g_isRegionCapturing = FALSE;
-        g_regionCaptureEndTime = GetTickCount();
+        begin_mouse_grace();
         return;
     }
     SelectObject(g_hdcMem, g_hbmScreen);
@@ -1415,8 +1430,8 @@ static LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lP
 
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam) {
     if (nCode == HC_ACTION) {
-        // Block if currently capturing, OR within 500ms after capturing ended (catches the mouse release)
-        BOOL is_active = g_isRegionCapturing || (GetTickCount() - g_regionCaptureEndTime < 500);
+        // Block if currently capturing, OR during the post-capture grace period
+        BOOL is_active = g_isRegionCapturing || g_blockRightClick;
         
         if (is_active && (wParam == WM_RBUTTONDOWN || wParam == WM_RBUTTONUP)) {
             if (wParam == WM_RBUTTONDOWN && g_hwndRegion) {
@@ -1682,6 +1697,11 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 }
                 return 0;
             }
+            if (wp == TIMER_MOUSE_GRACE) {
+                KillTimer(hwnd, TIMER_MOUSE_GRACE);
+                g_blockRightClick = FALSE;
+                return 0;
+            }
             return DefWindowProcW(hwnd, msg, wp, lParam);
         case WM_COMMAND:
             switch (LOWORD(wp)) {
@@ -1712,6 +1732,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
             KillTimer(hwnd, TIMER_TRAY_ICON);
             KillTimer(hwnd, TIMER_TRAY_RETRY);
             KillTimer(hwnd, TIMER_TRAY_HEALTH);
+            KillTimer(hwnd, TIMER_MOUSE_GRACE);
             if (g_iconOk) {
                 DestroyIcon(g_iconOk);
                 g_iconOk = NULL;

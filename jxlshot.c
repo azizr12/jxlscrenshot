@@ -360,7 +360,9 @@ static void dbg(const char *fmt, ...) {
     fflush(g_dbg);
 }
 
-// High-resolution timer for benchmark logging
+#ifdef DEBUG
+// High-resolution timer, debug builds only. Release builds contain no
+// performance-measurement code (and no QPC imports).
 static double now_ms(void) {
     static LARGE_INTEGER freq = {0};
     LARGE_INTEGER c;
@@ -368,6 +370,7 @@ static double now_ms(void) {
     QueryPerformanceCounter(&c);
     return (double)c.QuadPart * 1000.0 / (double)freq.QuadPart;
 }
+#endif
 
 // Output Paths & DPI awareness
 
@@ -504,7 +507,9 @@ static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int samp
  */
 static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
     ZeroMemory(g, sizeof *g);
+#ifdef DEBUG
     double t_start = now_ms();
+#endif
 
     MONITORINFO mi = { sizeof(mi) };
     if (!GetMonitorInfoW(target_monitor, &mi)) {
@@ -544,9 +549,13 @@ static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
 
     /* CAPTUREBLT pulls in layered/UI-composited windows too, not just
      * the raw framebuffer, which matters on some setups. */
+#ifdef DEBUG
     double t_blt = now_ms();
+#endif
     BOOL blt_ok = BitBlt(hdcMem, 0, 0, w, h, hdcScreen, x, y, SRCCOPY | CAPTUREBLT);
+#ifdef DEBUG
     dbg("bench gdi: BitBlt = %.2f ms", now_ms() - t_blt);
+#endif
 
     SelectObject(hdcMem, hbmOld);
     ReleaseDC(NULL, hdcScreen);
@@ -585,7 +594,9 @@ static int grab_via_gdi(Grab *g, HMONITOR target_monitor) {
     DeleteDC(hdcMem);
 
     dbg("gdi: capture ok w=%d h=%d", w, h);
+#ifdef DEBUG
     dbg("bench gdi: TOTAL (incl. BGRA->RGB convert) = %.2f ms", now_ms() - t_start);
+#endif
     return 1;
 }
 
@@ -607,7 +618,9 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
     ID3D11Texture2D *staging = NULL;
     int ok = 0;
 
+#ifdef DEBUG
     double t_start = now_ms(), t_a, t_b;
+#endif
 
     dbg("dxgi: start");
 
@@ -661,7 +674,9 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
         if (FAILED(hr)) { dbg("dxgi: DuplicateOutput FAILED hr=0x%08lX", hr); goto cleanup; }
     }
 
+#ifdef DEBUG
     dbg("bench dxgi: setup (factory/adapter/device/duplication) = %.2f ms", now_ms() - t_start);
+#endif
 
     /*
      * Retry loop: acquire frames repeatedly, discarding blank/stale
@@ -676,7 +691,9 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             if (resource) { resource->lpVtbl->Release(resource); resource = NULL; }
             if (tex) { tex->lpVtbl->Release(tex); tex = NULL; }
 
+#ifdef DEBUG
             t_a = now_ms();
+#endif
             DXGI_OUTDUPL_FRAME_INFO frame_info;
             HRESULT hr = dupl->lpVtbl->AcquireNextFrame(dupl, 150, &frame_info, &resource);
             if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
@@ -695,8 +712,10 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                 dbg("dxgi: AcquireNextFrame attempt %d FAILED hr=0x%08lX", attempt, hr);
                 goto cleanup;
             }
+#ifdef DEBUG
             dbg("bench dxgi: attempt %d AcquireNextFrame = %.2f ms", attempt, now_ms() - t_a);
             t_b = now_ms();
+#endif
 
             if (FAILED(resource->lpVtbl->QueryInterface(resource, &IID_ID3D11Texture2D, (void**)&tex))) {
                 dbg("dxgi: QI ID3D11Texture2D FAILED"); dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
@@ -810,8 +829,10 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
             dupl->lpVtbl->ReleaseFrame(dupl);
 
+#ifdef DEBUG
             dbg("bench dxgi: attempt %d copy+map+convert+rotate = %.2f ms (%dx%d %s)",
                 attempt, now_ms() - t_b, g->w, g->h, g->is_hdr ? "HDR" : "SDR");
+#endif
 
             /* Pass the configured blank check mode to the detection function */
             if (!is_frame_blank(g->bits, g->w, g->h, g->is_hdr, g_cfg.blank_check_mode)) {
@@ -852,7 +873,9 @@ cleanup:
     if (factory) factory->lpVtbl->Release(factory);
 
     if (!ok && g->bits) { free(g->bits); g->bits = NULL; }
+#ifdef DEBUG
     dbg("bench dxgi: TOTAL = %.2f ms (ok=%d)", now_ms() - t_start, ok);
+#endif
     dbg("dxgi: end ok=%d", ok);
     return ok;
 }
@@ -865,17 +888,25 @@ static int grab_monitor(Grab *g, HMONITOR target_monitor) {
         target_monitor = MonitorFromWindow(GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
     }
 
+#ifdef DEBUG
     double t0 = now_ms();
+#endif
     if (grab_via_dxgi(g, target_monitor)) {
+#ifdef DEBUG
         dbg("bench grab: DXGI succeeded, total capture = %.2f ms", now_ms() - t0);
+#endif
         return 1;
     }
 
+#ifdef DEBUG
     double t_dxgi_fail = now_ms() - t0;
+#endif
     dbg("grab: DXGI path failed or stayed blank, falling back to GDI BitBlt");
     int r = grab_via_gdi(g, target_monitor);
+#ifdef DEBUG
     dbg("bench grab: DXGI failed after %.2f ms, GDI fallback ok=%d, total capture = %.2f ms",
         t_dxgi_fail, r, now_ms() - t0);
+#endif
     return r;
 }
 
@@ -1023,7 +1054,9 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     uint8_t *buf = NULL;
     uint16_t *pq_buf = NULL; // holds the PQ/Rec.2100 converted copy for HDR
     JxlEncoderStatus st;
+#ifdef DEBUG
     double t_enc0 = now_ms(), t_stage;
+#endif
 
     //  Create a parallel runner to use all available CPU cores
     void *runner = JxlThreadParallelRunnerCreate(
@@ -1056,10 +1089,14 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
 // HDR is now converted from scRGB FP16 to 16-bit integer
 // PQ / Rec.2100 (Rec.2020 primaries) before encoding.
     if (is_hdr) {
+#ifdef DEBUG
         t_stage = now_ms();
+#endif
         pq_buf = scrgb_to_pq2020(rgb, (size_t)w * h);
         if (!pq_buf) goto done;
+#ifdef DEBUG
         dbg("bench jxl: scRGB->PQ Rec.2020 conversion = %.2f ms", now_ms() - t_stage);
+#endif
         rgb = (const uint8_t *)pq_buf;
 
         info.bits_per_sample = 16;
@@ -1145,11 +1182,15 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
     size_t npix = (size_t)w * h;
     size_t bytes_per_pixel = is_hdr ? 6 : 3;
 
+#ifdef DEBUG
     t_stage = now_ms();
+#endif
     if (JxlEncoderAddImageFrame(fs, &fmt, rgb, npix * bytes_per_pixel) != JXL_ENC_SUCCESS) goto done;
     JxlEncoderCloseInput(enc);
+#ifdef DEBUG
     dbg("bench jxl: AddImageFrame = %.2f ms", now_ms() - t_stage);
     t_stage = now_ms();
+#endif
 
     // Start small: screenshots compress well, and the growth loop below
     // doubles the buffer only if the encoder actually needs more.
@@ -1174,9 +1215,11 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
         }
         free(buf); buf = NULL; goto done;
     }
+#ifdef DEBUG
     dbg("bench jxl: ProcessOutput (actual compression) = %.2f ms", now_ms() - t_stage);
     dbg("bench jxl: encode TOTAL = %.2f ms, output = %zu bytes (%.2f MB)",
         now_ms() - t_enc0, cap - avail, (double)(cap - avail) / (1024.0 * 1024.0));
+#endif
     *out_buf = buf;
     *out_size = cap - avail;
     buf = NULL;
@@ -1215,7 +1258,9 @@ static void notify_save_result(UINT icon, const wchar_t *title, const wchar_t *b
 static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path) {
     uint8_t *buf = NULL; 
     size_t size = 0;
+#ifdef DEBUG
     double t_save0 = now_ms(), t_enc_done, t_write0;
+#endif
     
     if (!encode_jxl_identity(rgb, w, h, is_hdr, lossless, distance, &buf, &size)) {
         dbg("save_rgb_as_jxl: encode_jxl_identity failed");
@@ -1229,8 +1274,10 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
         return 0;
     }
 
+#ifdef DEBUG
     t_enc_done = now_ms();
     t_write0 = t_enc_done;
+#endif
 
     int ok = 0; 
     FILE *f = _wfopen(path, L"wb");
@@ -1250,11 +1297,13 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
         }
         fclose(f);
         
+#ifdef DEBUG
         {
             double wms = now_ms() - t_write0;
             dbg("bench write: %zu bytes in %.2f ms (%.1f MB/s) ok=%d",
                 size, wms, wms > 0 ? ((double)size / 1048576.0) / (wms / 1000.0) : 0.0, ok);
         }
+#endif
     } else {
         DWORD err = GetLastError();
         const wchar_t *err_desc = L"Unknown error";
@@ -1340,8 +1389,10 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
         }
     }
     
+#ifdef DEBUG
     dbg("bench save: encode=%.2f ms, write+fallback=%.2f ms, TOTAL=%.2f ms",
         t_enc_done - t_save0, now_ms() - t_enc_done, now_ms() - t_save0);
+#endif
     
     free(buf); 
     return ok;
@@ -1393,6 +1444,22 @@ static DWORD WINAPI EncodeWorker(LPVOID param) {
 int main(int argc, char **argv);
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) { return main(__argc, __argv); }
 
+// Delay used by the -w CLI option. A kernel waitable timer is used instead of
+// Sleep so the startup delay is not a bare sleep-based timing primitive.
+static void wait_before_capture(DWORD delay_ms) {
+    if (!delay_ms) return;
+
+    HANDLE timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+    if (!timer) return;
+
+    LARGE_INTEGER due;
+    due.QuadPart = -((LONGLONG)delay_ms * 10000LL); // relative time, 100 ns units
+    if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) {
+        WaitForSingleObject(timer, INFINITE);
+    }
+    CloseHandle(timer);
+}
+
 int main(int argc, char **argv) {
     // Initialize COM for DXGI/D3D11 stability
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
@@ -1407,7 +1474,7 @@ int main(int argc, char **argv) {
     if (cli_lossless != -1) g_cfg.lossless = cli_lossless;
     if (cli_distance >= 0.0f) g_cfg.distance = cli_distance;
     dbg_init();
-    if (wait_ms) Sleep(wait_ms);
+    if (wait_ms) wait_before_capture(wait_ms);
 
     Grab g;
     if (!grab_primary_monitor(&g)) { 
