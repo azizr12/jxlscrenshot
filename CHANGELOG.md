@@ -1,4 +1,4 @@
-v2.3.8 - 27 October 2026
+v2.3.8 - 
 - fix issues related to tray icon if explorer.exe restart the icon is added back instead of leaving a live process with no tray icon and acting like an alive decapitated head
 - add retry to SetWindowsHookEx
 
