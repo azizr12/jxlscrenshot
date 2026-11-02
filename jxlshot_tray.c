@@ -774,7 +774,7 @@ static void execute_full_capture(void) {
 static void execute_open_releases(HWND hwnd) {
     // No version download and no temp file: let the browser do the work.
     ShellExecuteW(hwnd, L"open",
-                  L"https://github.com/azizr12/jxlscrenshot/releases/latest",
+                  L"https://github.com/azizr12/jxlscrenshot/releases",
                   NULL, NULL, SW_SHOWNORMAL);
 }
 
