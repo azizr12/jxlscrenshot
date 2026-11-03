@@ -1,10 +1,12 @@
-v2.4.1 - 
+v2.4.1 - 3 November 2026
 - fix issues related to tray icon if explorer.exe restart the icon is added back instead of leaving a live process with no tray icon and acting like an alive decapitated head
 - add retry to SetWindowsHookEx
 - benchmark/debug timing is now compiled only in DEBUG builds, so release binaries contain no performance measurement code and no QueryPerformanceCounter import (another ML false-positive magnet)
 - the -w startup delay now uses a kernel waitable timer CreateWaitableTimer + WaitForSingleObject, instead of Sleep
 - region capture right-click grace period now runs on a WM_TIMER instead of a GetTickCount deadline, so release binaries no longer import GetTickCount
 - the tray menu's **Reload Configuration** item is now a **Debug: ON/OFF** toggle that shows the current state, writes it to jxlshot.ini, and starts/stops logging immediately
+- add fix to enable or disable keyboard hook and use only tray
+
 
 v2.3.7 - 20 October 2026
 - region capture: the selection is cropped from the cached overlay frame that was actually displayed, instead of calling `grab_primary_monitor()` a second time after the overlay closes. Region output is SDR, matching the overlay image
