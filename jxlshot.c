@@ -49,7 +49,7 @@
 #include <jxl/thread_parallel_runner.h>
 #include <knownfolders.h> // Required for FOLDERID_Pictures
 #include <math.h> // DIAG: pow/fabs/ldexpf for pixel statistics
-
+#include "resource.h"
 
 // Forward Declarations
 
@@ -125,8 +125,15 @@ static void ensure_default_ini(void) {
     _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
     ini_path[MAX_PATH - 1] = 0;
 
-    // Case 1: file exists -> never rewrite it, only fill in missing keys.
+    int needs_refresh = 0;
+    wchar_t val_debug[64] = L"0", val_lossless[64] = L"1", val_distance[64] = L"1.0", val_effort[64] = L"8";
+    wchar_t val_export[MAX_PATH] = L"", val_hk_fvk[64] = L"44", val_hk_fmod[64] = L"0";
+    wchar_t val_hk_rvk[64] = L"44", val_hk_rmod[64] = L"2", val_blank[64] = L"2";
+    wchar_t val_multi[64] = L"focusmonitor", val_hook[64] = L"0";
+
+    // Case 1: file exists
     if (GetFileAttributesW(ini_path) != INVALID_FILE_ATTRIBUTES) {
+        // First, ensure legacy keys are migrated to [Capture] so we can safely back them up
         ini_ensure_key(ini_path, L"Debug",           L"0");
         ini_ensure_key(ini_path, L"Lossless",        L"1");
         ini_ensure_key(ini_path, L"Distance",        L"1.0");
@@ -138,11 +145,36 @@ static void ensure_default_ini(void) {
         ini_ensure_key(ini_path, L"HotkeyRegionMod", L"2");
         ini_ensure_key(ini_path, L"BlankCheckMode",  L"2");
         ini_ensure_key(ini_path, L"MultiMonitor",    L"focusmonitor");
-        ini_ensure_key(ini_path, L"DisableKeyboardHook",    L"0");
-        return;
+        ini_ensure_key(ini_path, L"DisableKeyboardHook", L"0");
+
+        // Check if the INI version is older than the current app version
+        wchar_t current_version[64];
+        GetPrivateProfileStringW(L"Metadata", L"IniVersion", L"0.0.0", current_version, 64, ini_path);
+        if (wcscmp(current_version, APP_VERSIONW) != 0) {
+            needs_refresh = 1;
+            // Save current user values from the now-normalized [Capture] section
+            GetPrivateProfileStringW(L"Capture", L"Debug", L"0", val_debug, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"Lossless", L"1", val_lossless, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"Distance", L"1.0", val_distance, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"Effort", L"8", val_effort, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"ExportPath", L"", val_export, MAX_PATH, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"HotkeyFullVK", L"44", val_hk_fvk, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"HotkeyFullMod", L"0", val_hk_fmod, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"HotkeyRegionVK", L"44", val_hk_rvk, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"HotkeyRegionMod", L"2", val_hk_rmod, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"BlankCheckMode", L"2", val_blank, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"MultiMonitor", L"focusmonitor", val_multi, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"DisableKeyboardHook", L"0", val_hook, 64, ini_path);
+            
+            // Delete the old file so it falls through to Case 2 to rewrite with new comments
+            DeleteFileW(ini_path);
+        } else {
+            // Up to date, nothing more to do
+            return;
+        }
     }
 
-    // Case 2 file missing -> write the template to a temp file, then rename.
+    // Case 2: file missing OR was just deleted because it was outdated.
     wchar_t tmp_path[MAX_PATH];
     _snwprintf(tmp_path, MAX_PATH, L"%s\\jxlshot.ini.tmp", g_exe_dir);
     tmp_path[MAX_PATH - 1] = 0;
@@ -182,6 +214,9 @@ static void ensure_default_ini(void) {
         L";\n"
         L"; ==============================================================================\n"
         L"\n"
+        L"[Metadata]\n"
+        L"IniVersion=" APP_VERSIONW L"\n"
+        L"\n"
         L"[Capture]\n"
         L"Debug=0\n"
         L"Lossless=1\n"
@@ -219,6 +254,23 @@ static void ensure_default_ini(void) {
 
     if (!ok || !MoveFileExW(tmp_path, ini_path, MOVEFILE_REPLACE_EXISTING)) {
         DeleteFileW(tmp_path);
+        return; // Prevent restoring values if file creation failed
+    }
+
+    // If we refreshed an outdated file, restore the user's saved values
+    if (needs_refresh) {
+        WritePrivateProfileStringW(L"Capture", L"Debug", val_debug, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"Lossless", val_lossless, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"Distance", val_distance, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"Effort", val_effort, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"ExportPath", val_export, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"HotkeyFullVK", val_hk_fvk, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"HotkeyFullMod", val_hk_fmod, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"HotkeyRegionVK", val_hk_rvk, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"HotkeyRegionMod", val_hk_rmod, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"BlankCheckMode", val_blank, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"MultiMonitor", val_multi, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"DisableKeyboardHook", val_hook, ini_path);
     }
 }
 
