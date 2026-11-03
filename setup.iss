@@ -1,5 +1,5 @@
 #define MyAppName "jxlshot"
-#define MyAppVersion "2.4.1"
+#define MyAppVersion "2.4.2"
 #define MyAppPublisher "azizr12"
 #define MyAppURL "https://github.com/azizr12/jxlscrenshot"
 #define MyAppExeName "jxlshot_tray.exe"
@@ -20,10 +20,10 @@ OutputDir=Output
 OutputBaseFilename=jxlshot-setup-x64
 
 ; Compression Settings
-; lzma2 is more modern than lzma. SolidCompression=no prevents 
-; heuristic flags on large compressed blocks.
-Compression=lzma2
 ; shitty Microsoft Defender flag the executable as threat if you enable solid compression
+Compression=zip
+; using lzma as a whole cause false positive, "Trojan:Win32/Wacatac.B!ml"
+; thanks to https://stackoverflow.com/questions/68834409/program-installed-with-inno-setup-seen-as-trojan-wacatac-bml
 SolidCompression=no
 
 ; Adding version info helps AV vendors identify the file as a known application

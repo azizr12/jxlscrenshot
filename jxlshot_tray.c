@@ -160,6 +160,8 @@ static void begin_mouse_grace(void) {
 static LRESULT CALLBACK LowLevelMouseProc(int nCode, WPARAM wParam, LPARAM lParam);
 static void install_mouse_hook(void);
 static void uninstall_mouse_hook(void);
+static void install_keyboard_hook(void);
+static void uninstall_keyboard_hook(void);
 static void execute_about(void);
 
 // Toggle debug logging from the tray menu. The label always shows the current
@@ -219,19 +221,22 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
 #define IDC_HK_REGION  102
 #define IDC_HK_CLOSE   103
 
-#define IDC_LOSSLESS   204
-#define IDC_DIST_DN    205
-#define IDC_DIST_UP    206
-#define IDC_EFF_DN     207
-#define IDC_EFF_UP     208
+#define IDC_LOSSLESS     204
+#define IDC_DIST_DN      205
+#define IDC_DIST_UP      206
+#define IDC_EFF_DN       207
+#define IDC_EFF_UP       208
+#define IDC_DISABLE_HOOK 209
 
 #define HK_W        300
-#define HK_H        360
+#define HK_H        420
 #define HK_TITLE_H  36
 #define HK_Y_HEAD   178
 #define HK_Y_LOSS   198
 #define HK_Y_DIST   240
 #define HK_Y_EFF    282
+#define HK_Y_SYS    324
+#define HK_Y_HOOK   344
 #define HK_ROW_H    34
 #define HK_STEP_W   34
 #define HK_VAL_W    64
@@ -289,6 +294,8 @@ static void jxl_save_settings(void) {
 
 static void hk_refresh_buttons(HWND hwnd) {
     wchar_t hk[128], txt[192];
+    
+    // Full Screen Hotkey
     if (g_catcher_target == 1) wcscpy_s(txt, 192, L"Full Screen:  press a key...");
     else {
         format_hotkey_string(g_cfg.hk_full_vk, g_cfg.hk_full_mod, hk, 128);
@@ -296,12 +303,14 @@ static void hk_refresh_buttons(HWND hwnd) {
     }
     SetWindowTextW(GetDlgItem(hwnd, IDC_HK_FULL), txt);
 
+    // Region Hotkey
     if (g_catcher_target == 2) wcscpy_s(txt, 192, L"Region:  press a key...");
     else {
         format_hotkey_string(g_cfg.hk_region_vk, g_cfg.hk_region_mod, hk, 128);
         _snwprintf(txt, 192, L"Region:  %s", hk); txt[191] = 0;
     }
     SetWindowTextW(GetDlgItem(hwnd, IDC_HK_REGION), txt);
+
 
     SetWindowTextW(GetDlgItem(hwnd, IDC_LOSSLESS),
                    g_cfg.lossless ? L"Lossless:  ON" : L"Lossless:  OFF (lossy)");
@@ -312,9 +321,16 @@ static void hk_refresh_buttons(HWND hwnd) {
     EnableWindow(GetDlgItem(hwnd, IDC_DIST_DN), !g_cfg.lossless);
     EnableWindow(GetDlgItem(hwnd, IDC_DIST_UP), !g_cfg.lossless);
     
+
+    SetWindowTextW(GetDlgItem(hwnd, IDC_DISABLE_HOOK),
+                   g_cfg.disable_keyboard_hook ? L"Keyboard Hook:  Disabled" : L"Keyboard Hook:  Enabled");
+
+
     {
-        int ids[] = { IDC_LOSSLESS, IDC_DIST_DN, IDC_DIST_UP, IDC_EFF_DN, IDC_EFF_UP };
-        for (int i = 0; i < 5; i++) InvalidateRect(GetDlgItem(hwnd, ids[i]), NULL, FALSE);
+        int ids[] = { IDC_LOSSLESS, IDC_DIST_DN, IDC_DIST_UP, IDC_EFF_DN, IDC_EFF_UP, IDC_DISABLE_HOOK };
+        for (int i = 0; i < 6; i++) {
+            InvalidateRect(GetDlgItem(hwnd, ids[i]), NULL, FALSE);
+        }
     }
 
     InvalidateRect(GetDlgItem(hwnd, IDC_HK_FULL), NULL, FALSE);
@@ -345,7 +361,8 @@ static void hk_draw_button(LPDRAWITEMSTRUCT di) {
     BOOL dis = (di->itemState & ODS_DISABLED) != 0;
     BOOL active = (id == IDC_HK_FULL && g_catcher_target == 1) ||
                   (id == IDC_HK_REGION && g_catcher_target == 2) ||
-                  (id == IDC_LOSSLESS && g_cfg.lossless);
+                  (id == IDC_LOSSLESS && g_cfg.lossless) ||
+                  (id == IDC_DISABLE_HOOK && g_cfg.disable_keyboard_hook == 0);
 
     COLORREF bg;
     if (id == IDC_HK_CLOSE) bg = hot ? HK_CLOSE_HOT : HK_BG;
@@ -432,6 +449,7 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 { IDC_DIST_UP,   HK_UP_X, HK_Y_DIST, HK_STEP_W, HK_ROW_H },
                 { IDC_EFF_DN,    HK_DN_X, HK_Y_EFF,  HK_STEP_W, HK_ROW_H },
                 { IDC_EFF_UP,    HK_UP_X, HK_Y_EFF,  HK_STEP_W, HK_ROW_H },
+                { IDC_DISABLE_HOOK,  16, HK_Y_HOOK, HK_W - 32, HK_ROW_H },
             };
             for (int i = 0; i < (int)(sizeof(b) / sizeof(b[0])); i++) {
                 HWND hb = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -487,22 +505,24 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             _snwprintf(vbuf, 32, L"%d", g_cfg.effort);
             DrawTextW(dc, vbuf, -1, &vr, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
 
+            SelectObject(dc, g_hkFontSmall);
+            SetTextColor(dc, HK_DIM);
+            RECT hs = { 16, HK_Y_SYS, HK_W - 16, HK_Y_SYS + 16 };
+            DrawTextW(dc, L"System", -1, &hs, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+
 
             RECT info = { 16, HK_H - 35, HK_W - 16, HK_H - 5 };
             SIZE sz;
-
 
             SetTextColor(dc, HK_DIM);
             DrawTextW(dc, L"Open ", -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
             GetTextExtentPoint32W(dc, L"Open ", 5, &sz);
             info.left += sz.cx;
 
-
             SetTextColor(dc, HK_ACCENT);
             DrawTextW(dc, L".ini", -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
             GetTextExtentPoint32W(dc, L".ini", 4, &sz);
             info.left += sz.cx;
-
 
             SetTextColor(dc, HK_DIM);
             DrawTextW(dc, L" file for more infos", -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
@@ -563,9 +583,28 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 case IDC_EFF_DN:
                     if (g_cfg.effort > 1)  g_cfg.effort--;
                     jxl_save_settings(); hk_refresh_buttons(hwnd); break;
+
                 case IDC_EFF_UP:
                     if (g_cfg.effort < 10) g_cfg.effort++;
                     jxl_save_settings(); hk_refresh_buttons(hwnd); break;
+
+                case IDC_DISABLE_HOOK:
+                    g_cfg.disable_keyboard_hook = !g_cfg.disable_keyboard_hook;
+                    {
+                        wchar_t ini[MAX_PATH], s[32];
+                        _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+                        _snwprintf(s, 32, L"%d", g_cfg.disable_keyboard_hook);
+                        WritePrivateProfileStringW(L"Capture", L"DisableKeyboardHook", s, ini);
+                        dbg("settings changed: disable_keyboard_hook=%d", g_cfg.disable_keyboard_hook);
+                    }
+                    // Dynamically apply the change immediately
+                    if (g_cfg.disable_keyboard_hook) {
+                        uninstall_keyboard_hook();
+                    } else {
+                        install_keyboard_hook();
+                    }
+                    hk_refresh_buttons(hwnd);
+                    break;
             }
             return 0;
         case WM_HOTKEY_CAPTURED: { // posted by the keyboard hook
@@ -1853,7 +1892,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     tray_icon_ensure(g_hwndTray);
     dbg("tray: startup complete (icon %s)", g_trayIconAdded ? "added" : "pending retry");
 
-    install_keyboard_hook();
+    // Only install the global keyboard/mouse hooks if not disabled in the INI
+    if (!g_cfg.disable_keyboard_hook) {
+        install_keyboard_hook();
+    } else {
+        dbg("tray: global keyboard hook disabled by config (DisableKeyboardHook=1)");
+    }
 
     // Route background save notifications to the UI thread from now on.
     g_saveNotify = show_save_notification_ui;

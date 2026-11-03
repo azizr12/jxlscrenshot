@@ -75,6 +75,7 @@ typedef struct {
     int     blank_check_mode; 
 // 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels
     int     multimonitor; // 0 = focusmonitor, 1 = separateimages
+    int     disable_keyboard_hook; // 1 = disable global keyboard hook, 0 = enable (default)
     wchar_t export_path[MAX_PATH];
     UINT    hk_full_mod;
     UINT    hk_full_vk;
@@ -137,6 +138,7 @@ static void ensure_default_ini(void) {
         ini_ensure_key(ini_path, L"HotkeyRegionMod", L"2");
         ini_ensure_key(ini_path, L"BlankCheckMode",  L"2");
         ini_ensure_key(ini_path, L"MultiMonitor",    L"focusmonitor");
+        ini_ensure_key(ini_path, L"DisableKeyboardHook",    L"0");
         return;
     }
 
@@ -169,6 +171,8 @@ static void ensure_default_ini(void) {
         L";   MultiMonitor   : focusmonitor   = full capture uses the monitor under the cursor.\n"
         L";                    separateimages = full capture writes every monitor as _m1, _m2, ...\n"
         L";                      (seperateimages is accepted as an alias)\n"
+        L";   DisableKeyboardHook : 1 = Disable global keyboard hooks (hotkeys).\n"
+        L";                         0 = Enable global keyboard hooks (default).\n"
         L";\n"
         L"; [Hotkey Settings] (Use the 'Hotkey Settings...' tray menu to configure these easily!)\n"
         L";   HotkeyFullVK    : Virtual Key code for Full Screen capture (e.g., 44 = PrintScreen).\n"
@@ -189,7 +193,8 @@ static void ensure_default_ini(void) {
         L"HotkeyRegionVK=44\n"
         L"HotkeyRegionMod=2\n"
         L"BlankCheckMode=2\n"
-        L"MultiMonitor=focusmonitor\n";
+        L"MultiMonitor=focusmonitor\n"
+        L"DisableKeyboardHook=0\n";
 
 // Lossless at distance 1.0 give small size compare to lossy 1.0
 // Changing effort in distance 1.0 when using lossy is not useful
@@ -266,6 +271,7 @@ static void init_config(void) {
     g_cfg.hk_full_vk = VK_SNAPSHOT;
     g_cfg.hk_region_mod = MOD_CONTROL; 
     g_cfg.hk_region_vk = VK_SNAPSHOT;
+    g_cfg.disable_keyboard_hook = 0;
     
     // Use Known Folders API to correctly resolve localized folder names
     PWSTR pszPicturesPath = NULL;
@@ -290,6 +296,10 @@ static void init_config(void) {
     g_cfg.distance = get_cfg_float(L"Distance", 1.0f, ini_path);
     if (g_cfg.distance < 0.0f) g_cfg.distance = 0.0f;
     if (g_cfg.distance > 25.0f) g_cfg.distance = 25.0f;
+
+    g_cfg.disable_keyboard_hook = get_cfg_int(L"DisableKeyboardHook", 0, ini_path);
+    if (g_cfg.disable_keyboard_hook < 0) g_cfg.disable_keyboard_hook = 0;
+    if (g_cfg.disable_keyboard_hook > 1) g_cfg.disable_keyboard_hook = 1;
 
     wchar_t path_buf[MAX_PATH];
     get_cfg_string(L"ExportPath", L"", path_buf, MAX_PATH, ini_path);
@@ -339,9 +349,10 @@ static void dbg_init(void) {
     SYSTEMTIME st; GetLocalTime(&st);
     fprintf(g_dbg, "\n===== jxlshot run started %04d-%02d-%02d %02d:%02d:%02d =====\n",
             st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-    fprintf(g_dbg, "[config] effort=%d lossless=%d distance=%.2f blank_check=%d multimonitor=%s\n",
+    fprintf(g_dbg, "[config] effort=%d lossless=%d distance=%.2f blank_check=%d multimonitor=%s disable_kbd_hook=%d\n",
             g_cfg.effort, g_cfg.lossless, g_cfg.distance, g_cfg.blank_check_mode,
-            g_cfg.multimonitor ? "separateimages" : "focusmonitor");
+            g_cfg.multimonitor ? "separateimages" : "focusmonitor", g_cfg.disable_keyboard_hook);
+
     fprintf(g_dbg, "[config] log file: %ls\n", log_path);
     fflush(g_dbg);
 }
