@@ -19,6 +19,10 @@ AllowNoIcons=yes
 OutputDir=Output
 OutputBaseFilename=jxlshot-setup-x64
 
+; Prevent Inno Setup from remembering previous task selections.
+; This forces the installer to respect the "unchecked" flags below.
+UsePreviousTasks=no
+
 ; Compression Settings
 ; shitty Microsoft Defender flag the executable as threat if you enable solid compression
 Compression=zip
