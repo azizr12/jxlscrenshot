@@ -134,6 +134,7 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDM_CHECK_UPDATE 108
 #define IDM_OPENEXPORT   109
 #define IDM_HOTKEYS      110
+#define IDM_GUI          111
 
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
 #define IDI_APP_ICON  1001
@@ -163,6 +164,9 @@ static void uninstall_mouse_hook(void);
 static void install_keyboard_hook(void);
 static void uninstall_keyboard_hook(void);
 static void execute_about(void);
+static void execute_gui(void);
+static void gui_refresh(void);
+static HWND gui_hwnd(void);
 
 // Toggle debug logging from the tray menu. The label always shows the current
 // state, and the choice is written back to the INI so it survives a restart.
@@ -290,6 +294,7 @@ static void jxl_save_settings(void) {
     WritePrivateProfileStringW(L"Capture", L"Effort", s, ini);
     dbg("settings changed: effort=%d lossless=%d distance=%.2f",
         g_cfg.effort, g_cfg.lossless, g_cfg.distance);
+    gui_refresh(); // repaint the main window's status line / capture hints
 }
 
 static void hk_refresh_buttons(HWND hwnd) {
@@ -430,6 +435,7 @@ static void hk_save(int target, UINT vk, UINT mod) {
     _snwprintf(mod_str, 32, L"%u", mod);
     WritePrivateProfileStringW(L"Capture", vk_key, vk_str, ini_path);
     WritePrivateProfileStringW(L"Capture", mod_key, mod_str, ini_path);
+    gui_refresh(); // the capture cards show the new hotkey
 }
 
 static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -631,9 +637,57 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+// Position the settings window beside the main strip like "PotPlayer style",
+// instead of covering it.
+// Falls back to the old centred position when the strip is closed (settings opened from the tray menu).
+static void position_settings_window(HWND h) {
+    if (!h) return;
+
+    int x, y;
+    BOOL placed = FALSE;
+
+    HWND anchor = gui_hwnd();
+    if (anchor && IsWindowVisible(anchor)) {
+        RECT ar;
+        GetWindowRect(anchor, &ar);
+
+        HMONITOR mon = MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = { sizeof(mi) };
+        if (GetMonitorInfoW(mon, &mi)) {
+            // Prefer the right-hand side, then the left, then clamp on-screen.
+            x = ar.right + 8;
+            if (x + HK_W > mi.rcWork.right) {
+                x = ar.left - HK_W - 8;
+                if (x < mi.rcWork.left) x = mi.rcWork.left + 8;
+                if (x + HK_W > mi.rcWork.right) x = mi.rcWork.right - HK_W;
+            }
+
+            y = ar.top;
+            if (y + HK_H > mi.rcWork.bottom) y = mi.rcWork.bottom - HK_H;
+            if (y < mi.rcWork.top) y = mi.rcWork.top;
+
+            placed = TRUE;
+        }
+    }
+
+    if (!placed) {
+        MONITORINFO mi = { sizeof(mi) };
+        GetMonitorInfoW(MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY), &mi);
+        x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - HK_W) / 2;
+        y = mi.rcWork.top  + ((mi.rcWork.bottom - mi.rcWork.top) - HK_H) / 2;
+    }
+
+    SetWindowPos(h, NULL, x, y, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 static void execute_hotkey_settings(HWND hwnd) {
     (void)hwnd; // message-only tray window can't be an owner
-    if (g_hwnd_catcher) { SetForegroundWindow(g_hwnd_catcher); return; }
+    if (g_hwnd_catcher) {
+        position_settings_window(g_hwnd_catcher);
+        SetForegroundWindow(g_hwnd_catcher);
+        return;
+    }
 
     static BOOL registered = FALSE;
     if (!registered) {
@@ -656,6 +710,8 @@ static void execute_hotkey_settings(HWND hwnd) {
         L"Settings", WS_POPUP, x, y, HK_W, HK_H, NULL, NULL, GetModuleHandle(NULL), NULL);
 
     if (g_hwnd_catcher) {
+        // PotPlayer style: open beside the main strip, never on top of it.
+        position_settings_window(g_hwnd_catcher);
         ShowWindow(g_hwnd_catcher, SW_SHOW);
         SetForegroundWindow(g_hwnd_catcher);
     }
@@ -664,6 +720,8 @@ static void execute_hotkey_settings(HWND hwnd) {
 static void show_tray_menu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
     HMENU hMenu = CreatePopupMenu();
+    AppendMenuW(hMenu, MF_STRING, IDM_GUI, L"Open Window...");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_FULL, L"Capture Full Screen");
     AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
@@ -2369,7 +2427,10 @@ static void tray_icon_ensure(HWND hwnd) {
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
     switch (msg) {
         case WM_TRAYICON:
-            if (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONUP) show_tray_menu(hwnd);
+            // Left click opens the main window (Snipping Tool style),
+            // Right click open the context menu.
+            if (lParam == WM_LBUTTONUP) execute_gui();
+            else if (lParam == WM_RBUTTONUP) show_tray_menu(hwnd);
             break;
         case WM_HOOK_FULL_CAPTURE: execute_full_capture(); break;
         case WM_HOOK_REGION_CAPTURE: start_region_capture(); break;
@@ -2416,6 +2477,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
             return DefWindowProcW(hwnd, msg, wp, lParam);
         case WM_COMMAND:
             switch (LOWORD(wp)) {
+                case IDM_GUI: execute_gui(); break;
                 case IDM_FULL: execute_full_capture(); break;
                 case IDM_REGION: start_region_capture(); break;
                 case IDM_SETPATH: execute_set_path(); break;
@@ -2471,6 +2533,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
 }
 
 #include "about_dialog.c" // Pulls in the custom About dialog implementation
+#include "gui.c"          // Snipping Tool style main window
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     // 1. Initialize COM for Shell APIs (SHBrowseForFolder), TaskDialog, and DXGI/D3D11 stability
