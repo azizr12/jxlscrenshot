@@ -2731,7 +2731,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
 
     g_iconNormal = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
     g_nid.hIcon = g_iconNormal;
-    wcscpy(g_nid.szTip, L"JXL Screenshot Tool");
+    wcscpy(g_nid.szTip, L"JXL Shot");
 
     // Registered before the window exists: explorer.exe broadcasts this message
     // to every top-level window after it starts, which is the only way to know
