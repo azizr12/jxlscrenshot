@@ -335,6 +335,7 @@ static void init_config(void) {
     g_cfg.hk_region_vk = VK_SNAPSHOT;
     g_cfg.disable_keyboard_hook = 0;
 
+    // UI defaults: dark theme (the look shipped since v2.4), no saved geometry.
     g_cfg.dark_mode = 1;
     g_cfg.gui_x = 0;
     g_cfg.gui_y = 0;
@@ -386,8 +387,8 @@ static void init_config(void) {
     g_cfg.hk_region_vk = get_cfg_int(L"HotkeyRegionVK", VK_SNAPSHOT, ini_path);
     g_cfg.hk_region_mod = get_cfg_int(L"HotkeyRegionMod", MOD_CONTROL, ini_path);
 
-    // The window geometry is written back by the GUI when it closes
-    // so the strip reopens exactly where it was left.
+    // UI state. DarkMode is user-facing; the window geometry is written back by
+    // the GUI when it closes so the strip reopens exactly where it was left.
     g_cfg.dark_mode = get_cfg_int(L"DarkMode", 1, ini_path) ? 1 : 0;
     g_cfg.gui_x = get_cfg_int(L"GuiX", 0, ini_path);
     g_cfg.gui_y = get_cfg_int(L"GuiY", 0, ini_path);

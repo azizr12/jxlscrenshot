@@ -9,7 +9,7 @@
 #define GUI_DEF_W        600
 #define GUI_DEF_H        190
 #define GUI_MIN_W        400
-#define GUI_MIN_H        80
+#define GUI_MIN_H        96
 #define GUI_MAX_W        2000
 #define GUI_MAX_H        400
 
@@ -59,14 +59,15 @@ typedef struct {
 } GuiLayout;
 
 static RECT gui_theme_rect(const GuiLayout *L, const RECT *closeRc) {
-    int size = L->titleH - 10;
-    if (size < 18) size = 18;
-    if (size > 32) size = 32;
+    int h = L->titleH - 8;
+    if (h < 18) h = 18;
+    if (h > 24) h = 24;
+
     RECT r;
-    r.right = closeRc->left - 6;
-    r.left = r.right - size;
-    r.top = (L->titleH - size) / 2;
-    r.bottom = r.top + size;
+    r.right = closeRc->left - 8;
+    r.left = r.right - 76;   // "Dark" | "Light" segmented toggle
+    r.top = (L->titleH - h) / 2;
+    r.bottom = r.top + h;
     return r;
 }
 
@@ -84,35 +85,18 @@ static const struct {
 
 static BOOL g_guiThemeHot = FALSE;
 
-// Sun glyph
-static void gui_draw_sun_icon(HDC dc, int cx, int cy, COLORREF col) {
-    HPEN pen = CreatePen(PS_SOLID, 2, col);
+// Close glyph drawn with lines instead of a Unicode character: the "\u2715"
+// codepoint rendered as an empty box in Consolas on some systems.
+static void gui_draw_close_icon(HDC dc, int cx, int cy, int extent, COLORREF col) {
+    HPEN pen = CreatePen(PS_SOLID, 1, col);
+    if (!pen) return;
     HPEN oldPen = (HPEN)SelectObject(dc, pen);
-    HBRUSH oldBrush = (HBRUSH)SelectObject(dc, GetStockObject(NULL_BRUSH));
-    Ellipse(dc, cx - 8, cy - 8, cx + 8, cy + 8);
-    MoveToEx(dc, cx, cy - 14, NULL); LineTo(dc, cx, cy - 10);
-    MoveToEx(dc, cx, cy + 10, NULL); LineTo(dc, cx, cy + 14);
-    MoveToEx(dc, cx - 14, cy, NULL); LineTo(dc, cx - 10, cy);
-    MoveToEx(dc, cx + 10, cy, NULL); LineTo(dc, cx + 14, cy);
-    MoveToEx(dc, cx - 10, cy - 10, NULL); LineTo(dc, cx - 7, cy - 7);
-    MoveToEx(dc, cx + 7, cy + 7, NULL); LineTo(dc, cx + 10, cy + 10);
-    MoveToEx(dc, cx + 10, cy - 10, NULL); LineTo(dc, cx + 7, cy - 7);
-    MoveToEx(dc, cx - 7, cy + 7, NULL); LineTo(dc, cx - 10, cy + 10);
-    SelectObject(dc, oldBrush);
+    MoveToEx(dc, cx - extent, cy - extent, NULL);
+    LineTo(dc, cx + extent + 1, cy + extent + 1);
+    MoveToEx(dc, cx + extent, cy - extent, NULL);
+    LineTo(dc, cx - extent - 1, cy + extent + 1);
     SelectObject(dc, oldPen);
     DeleteObject(pen);
-}
-
-// Moon glyph
-static void gui_draw_moon_icon(HDC dc, int cx, int cy, COLORREF col) {
-    HRGN rgn1 = CreateEllipticRgn(cx - 10, cy - 10, cx + 10, cy + 10);
-    HRGN rgn2 = CreateEllipticRgn(cx - 2, cy - 10, cx + 18, cy + 10); // "bite" shifted right
-    CombineRgn(rgn1, rgn1, rgn2, RGN_DIFF);
-    HBRUSH brush = CreateSolidBrush(col);
-    FillRgn(dc, rgn1, brush);
-    DeleteObject(brush);
-    DeleteObject(rgn1);
-    DeleteObject(rgn2);
 }
 
 
@@ -205,14 +189,18 @@ static void gui_get_layout(HWND hwnd, GuiLayout *L) {
     L->width = rc.right;
     L->height = rc.bottom;
 
-    L->footer = (L->height >= 150);
-    L->compact = (L->height < 150);
-    L->titleH = L->compact ? 24 : 44;
-    L->margin = (L->width >= 600) ? 16 : 8;
-    L->gap = (L->width >= 600) ? 8 : 4;
+    // One UI only: the compact strip with the small title bar and icons. It
+    // stays exactly like this at every window size, so expanding the window
+    // just gives the same four cards more room; nothing switches to a second,
+    // larger layout with a tall title bar or subtitles.
+    L->footer = FALSE;
+    L->compact = TRUE;
+    L->titleH = 24;
+    L->margin = 8;
+    L->gap = 4;
 
-    int topPad = L->compact ? 4 : 8;
-    int bottomPad = L->footer ? 46 : 4;
+    int topPad = 4;
+    int bottomPad = 4;
     L->btnTop = L->titleH + topPad;
     L->btnH = L->height - bottomPad - L->btnTop;
     if (L->btnH < 16) L->btnH = 16;
@@ -221,11 +209,11 @@ static void gui_get_layout(HWND hwnd, GuiLayout *L) {
     if (L->btnW < 10) L->btnW = 10;
 
     L->shortLabels = (L->btnW < 90);
-    L->subtitle = (L->btnH >= 84);
+    L->subtitle = FALSE;
 
-    L->iconScale = (float)L->btnH / 96.0f;
-    if (L->iconScale < 0.55f) L->iconScale = 0.55f;
-    if (L->iconScale > 1.80f) L->iconScale = 1.80f;
+    // Fixed glyph size: the icons are part of the compact UI and must not grow
+    // when the window is enlarged.
+    L->iconScale = 1.0f;
 }
 
 static RECT gui_close_rect(const GuiLayout *L) {
@@ -239,6 +227,46 @@ static RECT gui_close_rect(const GuiLayout *L) {
     r.top = (L->titleH - size) / 2;
     r.bottom = r.top + size;
     return r;
+}
+
+// Keeps the strip completely inside one physical monitor and inside the size
+// limits. Used while moving/resizing as well as before the window is created,
+// so the title bar can never be dragged past a screen edge and the window can
+// never grow taller than GUI_MAX_H.
+static void gui_clamp_to_monitor(RECT *r) {
+    HMONITOR mon = MonitorFromRect(r, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(mon, &mi)) return;
+
+    RECT m = mi.rcMonitor;
+    int availW = m.right - m.left;
+    int availH = m.bottom - m.top;
+
+    int w = r->right - r->left;
+    int h = r->bottom - r->top;
+
+    if (w > GUI_MAX_W) w = GUI_MAX_W;
+    if (h > GUI_MAX_H) h = GUI_MAX_H;
+    if (w > availW)    w = availW;
+    if (h > availH)    h = availH;
+    if (w < GUI_MIN_W) w = GUI_MIN_W;
+    if (h < GUI_MIN_H) h = GUI_MIN_H;
+    if (w > availW)    w = availW;   // monitor narrower than the minimum
+    if (h > availH)    h = availH;
+
+    int x = r->left;
+    int y = r->top;
+    if (x + w > m.right)  x = m.right - w;
+    if (y + h > m.bottom) y = m.bottom - h;
+    if (x < m.left) x = m.left;
+    if (y < m.top)  y = m.top;
+
+    r->left = x;
+    r->top = y;
+    r->right = x + w;
+    r->bottom = y + h;
 }
 
 static void gui_layout_children(HWND hwnd) {
@@ -388,8 +416,8 @@ static void gui_draw_icon_raw(HDC dc, int id, int cx, int cy, COLORREF col) {
     }
 }
 
-// Draw the fixed-size glyph scaled around (cx, cy), so small windows get
-// compact icons and large windows get larger ones.
+// Draw the fixed-size glyph scaled around (cx, cy). Scale is 1.0 in the one
+// UI the strip uses, so the icons never grow with the window.
 static void gui_draw_icon(HDC dc, int id, int cx, int cy, COLORREF col, float scale) {
     if (scale < 0.05f) scale = 1.0f;
 
@@ -636,9 +664,47 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
 
+        // Catch every programmatic move/size as well (snap, maximize, DPI
+        // change), not just mouse dragging.
+        case WM_WINDOWPOSCHANGING: {
+            WINDOWPOS *p = (WINDOWPOS *)lp;
+            RECT cur;
+            GetWindowRect(hwnd, &cur);
+
+            int w = (p->flags & SWP_NOSIZE) ? (cur.right - cur.left) : p->cx;
+            int h = (p->flags & SWP_NOSIZE) ? (cur.bottom - cur.top) : p->cy;
+            int x = (p->flags & SWP_NOMOVE) ? cur.left : p->x;
+            int y = (p->flags & SWP_NOMOVE) ? cur.top  : p->y;
+
+            RECT r = { x, y, x + w, y + h };
+            gui_clamp_to_monitor(&r);
+
+            p->x  = r.left;
+            p->y  = r.top;
+            p->cx = r.right - r.left;
+            p->cy = r.bottom - r.top;
+            p->flags &= ~(SWP_NOSIZE | SWP_NOMOVE);
+            return 0;
+        }
+
+        case WM_MOVING:
+            gui_clamp_to_monitor((RECT *)lp);
+            return TRUE;
+
+        case WM_SIZING:
+            gui_clamp_to_monitor((RECT *)lp);
+            return TRUE;
+
         case WM_SIZE:
             gui_layout_children(hwnd);
+            if (g_hwnd_catcher) position_settings_window(g_hwnd_catcher);
             InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+
+        case WM_MOVE:
+            // The Settings window is attached to the strip: it follows while the
+            // strip is dragged or resized, and is destroyed with it below.
+            if (g_hwnd_catcher) position_settings_window(g_hwnd_catcher);
             return 0;
 
         case WM_ERASEBKGND:
@@ -672,46 +738,54 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             DrawTextW(dc, L"JXL Shot", -1, &tr,
                       DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
-            // Theme toggle button
-            if (g_guiThemeHot) gui_round_rect(dc, &themeRc, 6, GUI_BTN_HOT, GUI_BORDER);
-            COLORREF themeCol = g_guiThemeHot ? GUI_ACCENT : GUI_TEXT;
-            int themeCx = (themeRc.left + themeRc.right) / 2;
-            int themeCy = (themeRc.top + themeRc.bottom) / 2;
-            
-            if (g_cfg.dark_mode) {
-                gui_draw_sun_icon(dc, themeCx, themeCy, themeCol);
-            } else {
-                gui_draw_moon_icon(dc, themeCx, themeCy, themeCol);
+            // Theme toggle: a two-segment Dark | Light switch.
+            gui_round_rect(dc, &themeRc, 6, GUI_BTN, g_guiThemeHot ? GUI_ACCENT : GUI_BORDER);
+            int themeMid = (themeRc.left + themeRc.right) / 2;
+
+            {
+                int savedDc = SaveDC(dc);
+                if (savedDc) {
+                    HRGN pill = CreateRoundRectRgn(themeRc.left, themeRc.top,
+                                                   themeRc.right + 1, themeRc.bottom + 1, 6, 6);
+                    if (pill) {
+                        SelectClipRgn(dc, pill);
+                        RECT half = g_cfg.dark_mode
+                            ? (RECT){ themeRc.left, themeRc.top, themeMid, themeRc.bottom }
+                            : (RECT){ themeMid, themeRc.top, themeRc.right, themeRc.bottom };
+                        HBRUSH ab = CreateSolidBrush(GUI_ACCENT);
+                        FillRect(dc, &half, ab);
+                        DeleteObject(ab);
+                        DeleteObject(pill);
+                    }
+                    RestoreDC(dc, savedDc);
+                }
             }
 
-            // Close button, mirroring the About dialog's painted X.
+            {
+                HFONT themeFont = L.compact ? g_guiSmallFontSm : g_guiSmallFont;
+                HFONT oldThemeFont = (HFONT)SelectObject(dc, themeFont);
+
+                RECT dl = { themeRc.left, themeRc.top, themeMid, themeRc.bottom };
+                RECT dr = { themeMid, themeRc.top, themeRc.right, themeRc.bottom };
+
+                SetTextColor(dc, g_cfg.dark_mode ? RGB(255, 255, 255) : GUI_TEXT);
+                DrawTextW(dc, L"Dark", -1, &dl,
+                          DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                SetTextColor(dc, g_cfg.dark_mode ? GUI_TEXT : RGB(255, 255, 255));
+                DrawTextW(dc, L"Light", -1, &dr,
+                          DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+
+                SelectObject(dc, oldThemeFont);
+            }
+
+            // Close button: drawn with lines, not a font glyph (the glyph
+            // rendered as a box with the stock fonts).
             if (g_guiCloseHot) gui_round_rect(dc, &closeRc, 6, GUI_CLOSE_HOT, GUI_CLOSE_HOT);
-            SetTextColor(dc, g_guiCloseHot ? RGB(255, 255, 255) : GUI_TEXT);
-            SelectObject(dc, L.compact ? g_guiXFontSm : g_guiXFont);
-            DrawTextW(dc, L"\u2715", -1, &closeRc,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-
-            // Footer rule and version. Quality (lossless/distance/effort) is no
-            // longer shown here; it lives in the Settings window.
-            if (L.footer) {
-                int lineY = L.height - 46;
-                int infoY = L.height - 38;
-
-                RECT line = { L.margin, lineY, L.width - L.margin, lineY + 1 };
-                HBRUSH lineBrush = CreateSolidBrush(GUI_BORDER);
-                FillRect(dc, &line, lineBrush);
-                DeleteObject(lineBrush);
-
-                HFONT oldSmall = (HFONT)SelectObject(dc,
-                    L.compact ? g_guiSmallFontSm : g_guiSmallFont);
-
-                RECT vr = { L.width - L.margin - 80, infoY, L.width - L.margin, infoY + 18 };
-                SetTextColor(dc, GUI_DIM);
-                DrawTextW(dc, L"v" APP_VERSIONW, -1, &vr,
-                          DT_SINGLELINE | DT_RIGHT | DT_VCENTER);
-
-                SelectObject(dc, oldSmall);
-            }
+            gui_draw_close_icon(dc,
+                (closeRc.left + closeRc.right) / 2,
+                (closeRc.top + closeRc.bottom) / 2,
+                5,
+                g_guiCloseHot ? RGB(255, 255, 255) : GUI_TEXT);
 
             SelectObject(dc, oldFont);
             EndPaint(hwnd, &ps);
@@ -843,7 +917,11 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 return 0;
             }
             if (PtInRect(&themeRc, pt)) {
-                g_cfg.dark_mode = !g_cfg.dark_mode;
+                int mid = (themeRc.left + themeRc.right) / 2;
+                BOOL wantDark = (pt.x < mid) ? TRUE : FALSE;
+                if (g_cfg.dark_mode == wantDark) return 0;
+
+                g_cfg.dark_mode = wantDark;
                 gui_update_theme();
                 ApplyDarkMode(hwnd);
                 // The settings window is a separate top-level popup, so it
@@ -905,6 +983,11 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_guiSmallFontSm) { DeleteObject(g_guiSmallFontSm); g_guiSmallFontSm = NULL; }
             if (g_guiXFontSm)     { DeleteObject(g_guiXFontSm);     g_guiXFontSm = NULL; }
 
+            // Closing the strip closes the attached Settings window too.
+            if (g_hwnd_catcher && IsWindow(g_hwnd_catcher)) {
+                DestroyWindow(g_hwnd_catcher);
+            }
+
             g_hwndGui = NULL;
             return 0;
     }
@@ -918,6 +1001,13 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 static HWND gui_hwnd(void) {
     return g_hwndGui;
+}
+
+// True when the strip is on screen. Captures started from the tray menu or a
+// hotkey use this to route through gui_start_capture(), which hides the window
+// for the shot and brings it back afterwards.
+static BOOL gui_is_visible(void) {
+    return (g_hwndGui && IsWindowVisible(g_hwndGui)) ? TRUE : FALSE;
 }
 
 static void execute_gui(void) {
@@ -957,30 +1047,42 @@ static void execute_gui(void) {
         registered = TRUE;
     }
 
-    RECT wa;
-    SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
-    
+    // Pick the monitor from the last known position (or the cursor when there
+    // is no saved geometry) and clamp the strip inside its physical bounds.
+    POINT anchor;
+    if (g_cfg.gui_w > 0 && g_cfg.gui_h > 0) {
+        anchor.x = g_cfg.gui_x;
+        anchor.y = g_cfg.gui_y;
+    } else {
+        GetCursorPos(&anchor);
+    }
+
+    HMONITOR mon = MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(mon, &mi);
+    RECT wa = mi.rcMonitor; // physical monitor pixels, taskbar included
+
     int x, y, w, h;
     if (g_cfg.gui_w > 0 && g_cfg.gui_h > 0) {
         w = g_cfg.gui_w;
         h = g_cfg.gui_h;
         x = g_cfg.gui_x;
         y = g_cfg.gui_y;
-        // Clamp to work area to prevent off-screen loss
-        if (x < wa.left) x = wa.left;
-        if (y < wa.top) y = wa.top;
-        if (x + w > wa.right) x = wa.right - w;
-        if (y + h > wa.bottom) y = wa.bottom - h;
-        if (w < GUI_MIN_W) w = GUI_MIN_W;
-        if (h < GUI_MIN_H) h = GUI_MIN_H;
-        if (w > GUI_MAX_W) w = GUI_MAX_W;
-        if (h > GUI_MAX_H) h = GUI_MAX_H;
     } else {
         w = GUI_DEF_W;
         h = GUI_DEF_H;
         x = wa.left + (wa.right - wa.left - w) / 2;
         y = wa.top + (wa.bottom - wa.top - h) / 2;
     }
+
+    RECT wr = { x, y, x + w, y + h };
+    gui_clamp_to_monitor(&wr);
+    x = wr.left;
+    y = wr.top;
+    w = wr.right - wr.left;
+    h = wr.bottom - wr.top;
 
     g_hwndGui = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,

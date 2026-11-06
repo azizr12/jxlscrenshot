@@ -57,26 +57,31 @@ typedef enum _PreferredAppMode {
 typedef PreferredAppMode (WINAPI *fnSetPreferredAppMode)(PreferredAppMode appMode);
 typedef BOOL (WINAPI *fnAllowDarkModeForWindow)(HWND hWnd, BOOL allow);
 typedef void (WINAPI *fnFlushMenuThemes)(void);
+typedef HRESULT (WINAPI *fnSetWindowTheme)(HWND hwnd, LPCWSTR app, LPCWSTR idList);
 
 // Global state to avoid reloading the DLL repeatedly
 static HMODULE g_hUxtheme = NULL;
 static fnSetPreferredAppMode g_pSetPreferredAppMode = NULL;
 static fnAllowDarkModeForWindow g_pAllowDarkModeForWindow = NULL;
 static fnFlushMenuThemes g_pFlushMenuThemes = NULL;
+static fnSetWindowTheme g_pSetWindowTheme = NULL;
 
 static void InitializeDarkMode(void) {
-    if (g_hUxtheme) return;
+    if (!g_hUxtheme) {
+        g_hUxtheme = LoadLibraryW(L"uxtheme.dll");
+        if (!g_hUxtheme) return;
 
-    g_hUxtheme = LoadLibraryW(L"uxtheme.dll");
-    if (!g_hUxtheme) return;
+        g_pSetPreferredAppMode = (fnSetPreferredAppMode)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(135));
+        g_pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(133));
+        g_pFlushMenuThemes = (fnFlushMenuThemes)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(136));
+        g_pSetWindowTheme = (fnSetWindowTheme)GetProcAddress(g_hUxtheme, "SetWindowTheme");
+    }
 
-    g_pSetPreferredAppMode = (fnSetPreferredAppMode)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(135));
-    g_pAllowDarkModeForWindow = (fnAllowDarkModeForWindow)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(133));
-    g_pFlushMenuThemes = (fnFlushMenuThemes)GetProcAddress(g_hUxtheme, MAKEINTRESOURCEA(136));
-
-    // ForceDark is required for TaskDialogs to reliably apply the theme
+    // The app mode and the menu theme are process-wide, so they must be
+    // re-applied every time the user flips the sun/moon button. Without this
+    // the tray menu and common dialogs kept the theme they were born with.
     if (g_pSetPreferredAppMode) {
-        g_pSetPreferredAppMode(ForceDark);
+        g_pSetPreferredAppMode(g_cfg.dark_mode ? ForceDark : ForceLight);
     }
     if (g_pFlushMenuThemes) {
         g_pFlushMenuThemes();
@@ -85,10 +90,19 @@ static void InitializeDarkMode(void) {
 
 static void ApplyDarkMode(HWND hwnd) {
     InitializeDarkMode();
-    if (!hwnd || !g_pAllowDarkModeForWindow) return;
+    if (!hwnd) return;
 
-    g_pAllowDarkModeForWindow(hwnd, TRUE);
-    
+    BOOL dark = g_cfg.dark_mode ? TRUE : FALSE;
+    if (g_pAllowDarkModeForWindow) {
+        g_pAllowDarkModeForWindow(hwnd, dark);
+    }
+    // Explorer is the light common-control theme; DarkMode_Explorer is its dark
+    // counterpart. Switching this (rather than only flipping the allow flag)
+    // makes an already-open window actually change theme.
+    if (g_pSetWindowTheme) {
+        g_pSetWindowTheme(hwnd, dark ? L"DarkMode_Explorer" : L"Explorer", NULL);
+    }
+
     // Crucial: Tell the window and its children to redraw with the new theme
     SendMessageW(hwnd, WM_THEMECHANGED, 0, 0);
     RedrawWindow(hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW | RDW_ALLCHILDREN);
@@ -165,8 +179,11 @@ static void install_keyboard_hook(void);
 static void uninstall_keyboard_hook(void);
 static void execute_about(void);
 static void execute_gui(void);
+static void execute_set_path(void);
 static void gui_refresh(void);
 static HWND gui_hwnd(void);
+static void gui_start_capture(int kind);
+static BOOL gui_is_visible(void);
 
 // Toggle debug logging from the tray menu. The label always shows the current
 // state, and the choice is written back to the INI so it survives a restart.
@@ -231,31 +248,62 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
 #define IDC_EFF_DN       207
 #define IDC_EFF_UP       208
 #define IDC_DISABLE_HOOK 209
+#define IDC_SETPATH      210
 
 #define HK_W        300
-#define HK_H        420
+#define HK_H        460
 #define HK_TITLE_H  36
 #define HK_Y_HEAD   178
 #define HK_Y_LOSS   198
 #define HK_Y_DIST   240
 #define HK_Y_EFF    282
 #define HK_Y_SYS    324
-#define HK_Y_HOOK   344
+#define HK_Y_EXPORT 344
+#define HK_Y_HOOK   386
 #define HK_ROW_H    34
 #define HK_STEP_W   34
 #define HK_VAL_W    64
 #define HK_DN_X     (HK_W - 16 - HK_STEP_W - HK_VAL_W - HK_STEP_W)
 #define HK_UP_X     (HK_W - 16 - HK_STEP_W)
 
-#define HK_BG        RGB(32, 32, 32)
-#define HK_BTN       RGB(51, 51, 51)
-#define HK_BTN_HOT   RGB(68, 68, 68)
-#define HK_BTN_DOWN  RGB(85, 85, 85)
-#define HK_BORDER    RGB(75, 75, 75)
-#define HK_ACCENT    RGB(0, 120, 215)
-#define HK_TEXT      RGB(240, 240, 240)
-#define HK_DIM       RGB(150, 150, 150)
-#define HK_CLOSE_HOT RGB(196, 43, 28)
+// Same idea as the GUI palette: variables so the settings window can follow the
+// sun/moon toggle instead of being permanently dark.
+static COLORREF g_hkBg, g_hkBtn, g_hkBtnHot, g_hkBtnDown, g_hkBorder;
+static COLORREF g_hkAccent, g_hkText, g_hkDim, g_hkCloseHot;
+
+#define HK_BG        (g_hkBg)
+#define HK_BTN       (g_hkBtn)
+#define HK_BTN_HOT   (g_hkBtnHot)
+#define HK_BTN_DOWN  (g_hkBtnDown)
+#define HK_BORDER    (g_hkBorder)
+#define HK_ACCENT    (g_hkAccent)
+#define HK_TEXT      (g_hkText)
+#define HK_DIM       (g_hkDim)
+#define HK_CLOSE_HOT (g_hkCloseHot)
+
+static void hk_update_theme(void) {
+    if (g_cfg.dark_mode) {
+        g_hkBg       = RGB(32, 32, 32);
+        g_hkBtn      = RGB(51, 51, 51);
+        g_hkBtnHot   = RGB(68, 68, 68);
+        g_hkBtnDown  = RGB(85, 85, 85);
+        g_hkBorder   = RGB(75, 75, 75);
+        g_hkAccent   = RGB(0, 120, 215);
+        g_hkText     = RGB(240, 240, 240);
+        g_hkDim      = RGB(150, 150, 150);
+        g_hkCloseHot = RGB(196, 43, 28);
+    } else {
+        g_hkBg       = RGB(248, 248, 248);
+        g_hkBtn      = RGB(255, 255, 255);
+        g_hkBtnHot   = RGB(229, 239, 251);
+        g_hkBtnDown  = RGB(204, 220, 240);
+        g_hkBorder   = RGB(205, 205, 205);
+        g_hkAccent   = RGB(0, 120, 215);
+        g_hkText     = RGB(26, 26, 26);
+        g_hkDim      = RGB(110, 110, 110);
+        g_hkCloseHot = RGB(196, 43, 28);
+    }
+}
 
 static HWND  g_hwnd_catcher = NULL;
 static int   g_catcher_target = 0; // 0 = idle, 1 = full, 2 = region
@@ -319,6 +367,7 @@ static void hk_refresh_buttons(HWND hwnd) {
 
     SetWindowTextW(GetDlgItem(hwnd, IDC_LOSSLESS),
                    g_cfg.lossless ? L"Lossless:  ON" : L"Lossless:  OFF (lossy)");
+    SetWindowTextW(GetDlgItem(hwnd, IDC_SETPATH), L"Set Export Folder...");
     SetWindowTextW(GetDlgItem(hwnd, IDC_DIST_DN), L"\u2212");
     SetWindowTextW(GetDlgItem(hwnd, IDC_DIST_UP), L"+");
     SetWindowTextW(GetDlgItem(hwnd, IDC_EFF_DN),  L"\u2212");
@@ -332,8 +381,8 @@ static void hk_refresh_buttons(HWND hwnd) {
 
 
     {
-        int ids[] = { IDC_LOSSLESS, IDC_DIST_DN, IDC_DIST_UP, IDC_EFF_DN, IDC_EFF_UP, IDC_DISABLE_HOOK };
-        for (int i = 0; i < 6; i++) {
+        int ids[] = { IDC_LOSSLESS, IDC_SETPATH, IDC_DIST_DN, IDC_DIST_UP, IDC_EFF_DN, IDC_EFF_UP, IDC_DISABLE_HOOK };
+        for (int i = 0; i < 7; i++) {
             InvalidateRect(GetDlgItem(hwnd, ids[i]), NULL, FALSE);
         }
     }
@@ -441,6 +490,7 @@ static void hk_save(int target, UINT vk, UINT mod) {
 static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
+            hk_update_theme();
             g_hkFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
                                    CLEARTYPE_QUALITY, 0, L"Segoe UI");
             g_hkFontSmall = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
@@ -455,6 +505,7 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 { IDC_DIST_UP,   HK_UP_X, HK_Y_DIST, HK_STEP_W, HK_ROW_H },
                 { IDC_EFF_DN,    HK_DN_X, HK_Y_EFF,  HK_STEP_W, HK_ROW_H },
                 { IDC_EFF_UP,    HK_UP_X, HK_Y_EFF,  HK_STEP_W, HK_ROW_H },
+                { IDC_SETPATH,       16, HK_Y_EXPORT, HK_W - 32, HK_ROW_H },
                 { IDC_DISABLE_HOOK,  16, HK_Y_HOOK, HK_W - 32, HK_ROW_H },
             };
             for (int i = 0; i < (int)(sizeof(b) / sizeof(b[0])); i++) {
@@ -515,6 +566,17 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             SetTextColor(dc, HK_DIM);
             RECT hs = { 16, HK_Y_SYS, HK_W - 16, HK_Y_SYS + 16 };
             DrawTextW(dc, L"System", -1, &hs, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+
+            // Current export folder, right-aligned in the section header.
+            {
+                const wchar_t *slash = wcsrchr(g_cfg.export_path, L'\\');
+                const wchar_t *name = (slash && slash[1]) ? slash + 1 : g_cfg.export_path;
+                if (name[0]) {
+                    RECT er = { HK_W / 2, HK_Y_SYS, HK_W - 16, HK_Y_SYS + 16 };
+                    DrawTextW(dc, name, -1, &er,
+                              DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_END_ELLIPSIS);
+                }
+            }
 
 
             RECT info = { 16, HK_H - 35, HK_W - 16, HK_H - 5 };
@@ -594,9 +656,15 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     if (g_cfg.effort < 10) g_cfg.effort++;
                     jxl_save_settings(); hk_refresh_buttons(hwnd); break;
 
+                case IDC_SETPATH:
+                    // Folder picker lives here now; the main strip only opens
+                    // the current export folder.
+                    execute_set_path();
+                    hk_refresh_buttons(hwnd);
+                    break;
+
                 case IDC_DISABLE_HOOK:
-                    g_cfg.disable_keyboard_hook = !g_cfg.disable_keyboard_hook;
-                    {
+                    g_cfg.disable_keyboard_hook = !g_cfg.disable_keyboard_hook;                    {
                         wchar_t ini[MAX_PATH], s[32];
                         _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
                         _snwprintf(s, 32, L"%d", g_cfg.disable_keyboard_hook);
@@ -712,6 +780,7 @@ static void execute_hotkey_settings(HWND hwnd) {
     if (g_hwnd_catcher) {
         // PotPlayer style: open beside the main strip, never on top of it.
         position_settings_window(g_hwnd_catcher);
+        ApplyDarkMode(g_hwnd_catcher);
         ShowWindow(g_hwnd_catcher, SW_SHOW);
         SetForegroundWindow(g_hwnd_catcher);
     }
@@ -876,7 +945,10 @@ static void execute_open_releases(HWND hwnd) {
 }
 
 static void execute_set_path(void) {
-    BROWSEINFOW bi = { 0 }; bi.hwndOwner = NULL;
+    BROWSEINFOW bi = { 0 };
+    // Own the picker by the Settings window when it is open: that window is
+    // topmost, so an ownerless dialog would open behind it.
+    bi.hwndOwner = g_hwnd_catcher;
     bi.lpszTitle = L"Select Export Folder for Screenshots";
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
@@ -886,7 +958,7 @@ static void execute_set_path(void) {
             wcsncpy(g_cfg.export_path, path, MAX_PATH - 1); g_cfg.export_path[MAX_PATH - 1] = L'\0';
             wchar_t ini_path[MAX_PATH]; _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
             WritePrivateProfileStringW(L"Capture", L"ExportPath", path, ini_path);
-            MessageBoxW(NULL, L"Export path updated.", L"jxlshot", MB_ICONINFORMATION);
+            MessageBoxW(g_hwnd_catcher, L"Export path updated.", L"jxlshot", MB_ICONINFORMATION);
         }
         CoTaskMemFree(pidl);
     }
@@ -2424,6 +2496,19 @@ static void tray_icon_ensure(HWND hwnd) {
 
 // Tray Window Procedure & Entry Point
 
+// A capture started from the tray or a hotkey must not include (or cover) the
+// main strip. When it is open, reuse the GUI's own hide-wait-capture-restore
+// flow instead of grabbing the screen immediately.
+static void request_full_capture(void) {
+    if (gui_is_visible()) gui_start_capture(1);
+    else                  execute_full_capture();
+}
+
+static void request_region_capture(void) {
+    if (gui_is_visible()) gui_start_capture(2);
+    else                  start_region_capture();
+}
+
 LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
     switch (msg) {
         case WM_TRAYICON:
@@ -2432,8 +2517,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
             if (lParam == WM_LBUTTONUP) execute_gui();
             else if (lParam == WM_RBUTTONUP) show_tray_menu(hwnd);
             break;
-        case WM_HOOK_FULL_CAPTURE: execute_full_capture(); break;
-        case WM_HOOK_REGION_CAPTURE: start_region_capture(); break;
+        case WM_HOOK_FULL_CAPTURE: request_full_capture(); break;
+        case WM_HOOK_REGION_CAPTURE: request_region_capture(); break;
         case WM_JXLSHOT_SAVE_NOTIFY: {
             SaveNotify *n = (SaveNotify *)lParam;
             if (n) {
@@ -2478,8 +2563,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
         case WM_COMMAND:
             switch (LOWORD(wp)) {
                 case IDM_GUI: execute_gui(); break;
-                case IDM_FULL: execute_full_capture(); break;
-                case IDM_REGION: start_region_capture(); break;
+                case IDM_FULL: request_full_capture(); break;
+                case IDM_REGION: request_region_capture(); break;
                 case IDM_SETPATH: execute_set_path(); break;
                 case IDM_OPENEXPORT: execute_open_export_folder(); break;
                 case IDM_OPENCONFIG: execute_open_config(hwnd); break;
