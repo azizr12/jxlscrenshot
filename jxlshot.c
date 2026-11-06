@@ -81,6 +81,11 @@ typedef struct {
     UINT    hk_full_vk;
     UINT    hk_region_mod;
     UINT    hk_region_vk;
+    int gui_x;
+    int gui_y;
+    int gui_w;
+    int gui_h;
+    BOOL dark_mode;
 } AppConfig;
 
 static AppConfig g_cfg;
