@@ -149,6 +149,7 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDM_OPENEXPORT   109
 #define IDM_HOTKEYS      110
 #define IDM_GUI          111
+#define IDM_CLOSEPREVIEW 112
 
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
 #define IDI_APP_ICON  1001
@@ -184,6 +185,10 @@ static void gui_refresh(void);
 static HWND gui_hwnd(void);
 static void gui_start_capture(int kind);
 static BOOL gui_is_visible(void);
+static void gui_preview_show(const Grab *g, const wchar_t *path);
+static BOOL preview_close_for_capture(void);
+static BOOL gui_preview_is_visible(void);
+static void gui_preview_close(void);
 
 // Toggle debug logging from the tray menu. The label always shows the current
 // state, and the choice is written back to the INI so it survives a restart.
@@ -249,9 +254,10 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
 #define IDC_EFF_UP       208
 #define IDC_DISABLE_HOOK 209
 #define IDC_SETPATH      210
+#define IDC_PREVIEW      211
 
 #define HK_W        300
-#define HK_H        460
+#define HK_H        500
 #define HK_TITLE_H  36
 #define HK_Y_HEAD   178
 #define HK_Y_LOSS   198
@@ -259,7 +265,8 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
 #define HK_Y_EFF    282
 #define HK_Y_SYS    324
 #define HK_Y_EXPORT 344
-#define HK_Y_HOOK   386
+#define HK_Y_PREVIEW 384
+#define HK_Y_HOOK   424
 #define HK_ROW_H    34
 #define HK_STEP_W   34
 #define HK_VAL_W    64
@@ -340,6 +347,7 @@ static void jxl_save_settings(void) {
     WritePrivateProfileStringW(L"Capture", L"Distance", s, ini);
     _snwprintf(s, 32, L"%d", g_cfg.effort);
     WritePrivateProfileStringW(L"Capture", L"Effort", s, ini);
+    WritePrivateProfileStringW(L"Capture", L"ShowPreview", g_cfg.show_preview ? L"1" : L"0", ini);
     dbg("settings changed: effort=%d lossless=%d distance=%.2f",
         g_cfg.effort, g_cfg.lossless, g_cfg.distance);
     gui_refresh(); // repaint the main window's status line / capture hints
@@ -368,6 +376,8 @@ static void hk_refresh_buttons(HWND hwnd) {
     SetWindowTextW(GetDlgItem(hwnd, IDC_LOSSLESS),
                    g_cfg.lossless ? L"Lossless:  ON" : L"Lossless:  OFF (lossy)");
     SetWindowTextW(GetDlgItem(hwnd, IDC_SETPATH), L"Set Export Folder...");
+    SetWindowTextW(GetDlgItem(hwnd, IDC_PREVIEW),
+                   g_cfg.show_preview ? L"Capture Preview:  ON" : L"Capture Preview:  OFF");
     SetWindowTextW(GetDlgItem(hwnd, IDC_DIST_DN), L"\u2212");
     SetWindowTextW(GetDlgItem(hwnd, IDC_DIST_UP), L"+");
     SetWindowTextW(GetDlgItem(hwnd, IDC_EFF_DN),  L"\u2212");
@@ -381,8 +391,8 @@ static void hk_refresh_buttons(HWND hwnd) {
 
 
     {
-        int ids[] = { IDC_LOSSLESS, IDC_SETPATH, IDC_DIST_DN, IDC_DIST_UP, IDC_EFF_DN, IDC_EFF_UP, IDC_DISABLE_HOOK };
-        for (int i = 0; i < 7; i++) {
+        int ids[] = { IDC_LOSSLESS, IDC_SETPATH, IDC_PREVIEW, IDC_DIST_DN, IDC_DIST_UP, IDC_EFF_DN, IDC_EFF_UP, IDC_DISABLE_HOOK };
+        for (int i = 0; i < 8; i++) {
             InvalidateRect(GetDlgItem(hwnd, ids[i]), NULL, FALSE);
         }
     }
@@ -416,6 +426,7 @@ static void hk_draw_button(LPDRAWITEMSTRUCT di) {
     BOOL active = (id == IDC_HK_FULL && g_catcher_target == 1) ||
                   (id == IDC_HK_REGION && g_catcher_target == 2) ||
                   (id == IDC_LOSSLESS && g_cfg.lossless) ||
+                  (id == IDC_PREVIEW && g_cfg.show_preview) ||
                   (id == IDC_DISABLE_HOOK && g_cfg.disable_keyboard_hook == 0);
 
     COLORREF bg;
@@ -506,6 +517,7 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 { IDC_EFF_DN,    HK_DN_X, HK_Y_EFF,  HK_STEP_W, HK_ROW_H },
                 { IDC_EFF_UP,    HK_UP_X, HK_Y_EFF,  HK_STEP_W, HK_ROW_H },
                 { IDC_SETPATH,       16, HK_Y_EXPORT, HK_W - 32, HK_ROW_H },
+                { IDC_PREVIEW,       16, HK_Y_PREVIEW, HK_W - 32, HK_ROW_H },
                 { IDC_DISABLE_HOOK,  16, HK_Y_HOOK, HK_W - 32, HK_ROW_H },
             };
             for (int i = 0; i < (int)(sizeof(b) / sizeof(b[0])); i++) {
@@ -663,6 +675,14 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     hk_refresh_buttons(hwnd);
                     break;
 
+                case IDC_PREVIEW:
+                    g_cfg.show_preview = !g_cfg.show_preview;
+                    jxl_save_settings();
+                    hk_refresh_buttons(hwnd);
+                    if (!g_cfg.show_preview) gui_preview_close();
+                    dbg("settings changed: show_preview=%d", g_cfg.show_preview);
+                    break;
+
                 case IDC_DISABLE_HOOK:
                     g_cfg.disable_keyboard_hook = !g_cfg.disable_keyboard_hook;                    {
                         wchar_t ini[MAX_PATH], s[32];
@@ -793,6 +813,9 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_FULL, L"Capture Full Screen");
     AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
+    if (gui_preview_is_visible()) {
+        AppendMenuW(hMenu, MF_STRING, IDM_CLOSEPREVIEW, L"Close Preview");
+    }
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, L"Open Export Folder");
@@ -877,6 +900,11 @@ static int queue_grab_encode(Grab *g, const wchar_t *path) {
 }
 
 static void execute_full_capture(void) {
+    // Never let the previous preview end up inside the new screenshot. When
+    // this was the only delay (tray/hotkey path, no GUI timer), give the
+    // compositor a moment to remove it before grabbing.
+    if (preview_close_for_capture()) Sleep(120);
+
     dbg("execute_full_capture: begin (effort=%d, multimonitor=%s)",
         g_cfg.effort, g_cfg.multimonitor ? "separateimages" : "focusmonitor");
 
@@ -907,6 +935,10 @@ static void execute_full_capture(void) {
             build_out_path_tag(out_path, MAX_PATH, g.is_hdr, tag);
             dbg("execute_full_capture: monitor %d -> %ls", i + 1, out_path);
 
+            // Show one preview (the first monitor that produced a frame).
+            // Separate-images mode still saves every monitor.
+            if (saved == 0) gui_preview_show(&g, out_path);
+
             if (queue_grab_encode(&g, out_path)) saved++;
             free_grab(&g);
         }
@@ -930,6 +962,10 @@ static void execute_full_capture(void) {
     wchar_t out_path[MAX_PATH];
     build_out_path(out_path, MAX_PATH, g.is_hdr);
     dbg("execute_full_capture: writing to %ls", out_path);
+
+    // Show the Snipping Tool style preview of the frame before handing the
+    // pixels to the background encoder.
+    gui_preview_show(&g, out_path);
 
     if (!queue_grab_encode(&g, out_path)) {
         MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
@@ -1801,6 +1837,10 @@ static void crop_and_encode_region(RECT *r) {
     wchar_t out_path[MAX_PATH];
     build_out_path(out_path, MAX_PATH, crop.is_hdr);
 
+    // Preview the exact crop the user selected, in the same HDR/SDR format
+    // that will be encoded.
+    gui_preview_show(&crop, out_path);
+
     if (!queue_grab_encode(&crop, out_path)) {
         dbg("crop_and_encode_region: save failed");
     }
@@ -2045,6 +2085,9 @@ static void show_region_overlay(void) {
 }
 
 static void start_region_capture(void) {
+    // The previous preview would otherwise be frozen into the overlay frame.
+    if (preview_close_for_capture()) Sleep(120);
+
     // Fallback safety: If the flag was somehow stuck, reset it before starting
     g_isRegionCapturing = TRUE; 
     g_blockRightClick = FALSE;
@@ -2565,6 +2608,7 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 case IDM_GUI: execute_gui(); break;
                 case IDM_FULL: request_full_capture(); break;
                 case IDM_REGION: request_region_capture(); break;
+                case IDM_CLOSEPREVIEW: gui_preview_close(); break;
                 case IDM_SETPATH: execute_set_path(); break;
                 case IDM_OPENEXPORT: execute_open_export_folder(); break;
                 case IDM_OPENCONFIG: execute_open_config(hwnd); break;

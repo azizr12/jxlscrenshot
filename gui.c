@@ -29,6 +29,25 @@
 #define GUI_CAPTURE_DELAY_MS  220
 #define GUI_REGION_POLL_MS    120
 
+// Capture preview window (Snipping Tool style). It is a separate top-level
+// window so the compact strip never has to grow into an editor.
+#define PREVIEW_DEF_W        900
+#define PREVIEW_DEF_H        620
+#define PREVIEW_MIN_W        420
+#define PREVIEW_MIN_H        300
+#define PREVIEW_MAX_TEX      4096   // cap the stored bitmap for huge monitors (4K stays 1:1)
+
+// Overlay close button and the idle timer that hides it again.
+#define PREVIEW_X_SIZE       30
+#define PREVIEW_X_MARGIN     10
+#define PREVIEW_IDLE_MS      1300
+#define PREVIEW_TIMER_X      1
+
+#define IDC_PREV_COPY        401
+#define IDC_PREV_FOLDER      402
+#define IDC_PREV_CLOSE       403
+#define IDC_PREV_OPENWITH    404
+
 
 // Palette. These are variables, not #defines, so the sun/moon button can swap
 // the whole window between the dark and light theme at runtime. gui_update_theme
@@ -116,6 +135,22 @@ static BOOL    g_guiCompact = FALSE;
 static BOOL    g_guiShortLabels = FALSE;
 static BOOL    g_guiShortLabelsSet = FALSE;
 static int     g_guiPendingCapture = 0; // 0 = idle, 1 = full, 2 = region
+
+// True while the strip is hidden for a capture it started itself. If a preview
+// opens, the strip stays hidden until the preview is closed instead of popping
+// back underneath it.
+static BOOL    g_guiRestorePending = FALSE;
+
+// Preview window state. The bitmap is a 32-bpp top-down DIB that both the
+// window and the clipboard code read from.
+static HWND      g_hwndPreview = NULL;
+static HBITMAP   g_prevBmp = NULL;
+static void     *g_prevBits = NULL;
+static int       g_prevW = 0, g_prevH = 0;      // stored bitmap dimensions
+static BITMAPINFO g_prevBmi;
+static wchar_t    g_prevPath[MAX_PATH];         // file the capture was saved to
+static BOOL       g_prevXShown = FALSE;         // overlay close button visible
+static BOOL       g_prevXHot = FALSE;           // mouse over the overlay close button
 
 
 // Theme
@@ -583,6 +618,769 @@ static LRESULT CALLBACK GuiBtnSubclass(HWND h, UINT m, WPARAM w, LPARAM l,
 // Capture flow
 
 
+// ---------------------------------------------------------------------------
+// Capture preview
+//
+// Just the captured image in a frameless window. Right-click for the file
+// actions; the close button is drawn inside the image and only appears while
+// the mouse is moving. The image itself is the drag surface, exactly like the
+// About dialog.
+// ---------------------------------------------------------------------------
+
+static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+
+// Rectangle the image is actually drawn into, keeping its aspect ratio and
+// centring it in the client area.
+static RECT preview_image_rect(HWND hwnd) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+
+    RECT img = rc;
+    if (g_prevW > 0 && g_prevH > 0 && rc.right > 0 && rc.bottom > 0) {
+        double sx = (double)rc.right / (double)g_prevW;
+        double sy = (double)rc.bottom / (double)g_prevH;
+        double s = (sx < sy) ? sx : sy;
+
+        int dw = (int)((double)g_prevW * s + 0.5);
+        int dh = (int)((double)g_prevH * s + 0.5);
+        if (dw < 1) dw = 1;
+        if (dh < 1) dh = 1;
+        if (dw > rc.right) dw = rc.right;
+        if (dh > rc.bottom) dh = rc.bottom;
+
+        img.left = (rc.right - dw) / 2;
+        img.top = (rc.bottom - dh) / 2;
+        img.right = img.left + dw;
+        img.bottom = img.top + dh;
+    }
+    return img;
+}
+
+// Overlay close button, anchored inside the top-right corner of the image.
+static RECT preview_x_rect(HWND hwnd) {
+    RECT img = preview_image_rect(hwnd);
+    int size = PREVIEW_X_SIZE;
+    int mx = PREVIEW_X_MARGIN;
+    int my = PREVIEW_X_MARGIN;
+
+    if (img.right - img.left < size + mx * 2) {
+        mx = (img.right - img.left - size) / 2;
+        if (mx < 2) mx = 2;
+    }
+    if (img.bottom - img.top < size + my * 2) {
+        my = (img.bottom - img.top - size) / 2;
+        if (my < 2) my = 2;
+    }
+
+    RECT r;
+    r.right = img.right - mx;
+    r.left = r.right - size;
+    r.top = img.top + my;
+    r.bottom = r.top + size;
+    return r;
+}
+
+// Linear scRGB -> 8-bit sRGB lookup. The capture is already linear when HDR,
+// so this is the only colour conversion the preview needs.
+static const uint8_t *preview_srgb_lut(void) {
+    static uint8_t lut[1025];
+    static BOOL built = FALSE;
+    if (!built) {
+        for (int i = 0; i <= 1024; i++) {
+            float c = (float)i / 1024.0f;
+            float s = (c <= 0.0031308f)
+                ? 12.92f * c
+                : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
+            int v = (int)(s * 255.0f + 0.5f);
+            if (v < 0) v = 0;
+            if (v > 255) v = 255;
+            lut[i] = (uint8_t)v;
+        }
+        built = TRUE;
+    }
+    return lut;
+}
+
+// Convert the captured Grab into a 32-bpp BGRA DIB. SDR is a direct channel
+// swizzle; HDR takes the FP16 scRGB half floats through the sRGB LUT. Very
+// large frames are point-sampled down to PREVIEW_MAX_TEX so the preview bitmap
+// stays bounded even on 6K/8K displays.
+static BOOL preview_make_bitmap(const Grab *g) {
+    if (!g || !g->bits || g->w <= 0 || g->h <= 0) return FALSE;
+
+    int sw = g->w, sh = g->h;
+    int dw = sw, dh = sh;
+    if (sw > PREVIEW_MAX_TEX || sh > PREVIEW_MAX_TEX) {
+        int big = (sw > sh) ? sw : sh;
+        double sc = (double)PREVIEW_MAX_TEX / (double)big;
+        dw = (int)(sw * sc);
+        dh = (int)(sh * sc);
+        if (dw < 1) dw = 1;
+        if (dh < 1) dh = 1;
+    }
+
+    BITMAPINFO bi;
+    ZeroMemory(&bi, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = dw;
+    bi.bmiHeader.biHeight = -dh; // top-down
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void *bits = NULL;
+    HBITMAP bmp = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!bmp || !bits) {
+        if (bmp) DeleteObject(bmp);
+        return FALSE;
+    }
+
+    size_t bpp = g->is_hdr ? 6 : 3;
+    const uint8_t *lut = g->is_hdr ? preview_srgb_lut() : NULL;
+    const uint8_t *src = g->bits;
+    uint8_t *dst = (uint8_t *)bits;
+
+    for (int y = 0; y < dh; y++) {
+        int sy = (dw == sw && dh == sh) ? y : (int)((long long)y * sh / dh);
+        if (sy >= sh) sy = sh - 1;
+
+        const uint8_t *srow = src + (size_t)sy * sw * bpp;
+        uint8_t *drow = dst + (size_t)y * dw * 4;
+
+        for (int x = 0; x < dw; x++) {
+            int sx = (dw == sw && dh == sh) ? x : (int)((long long)x * sw / dw);
+            if (sx >= sw) sx = sw - 1;
+
+            const uint8_t *sp = srow + (size_t)sx * bpp;
+            uint8_t *dp = drow + (size_t)x * 4;
+
+            if (g->is_hdr) {
+                float r = half_to_float((uint16_t)(sp[0] | (sp[1] << 8)));
+                float gg = half_to_float((uint16_t)(sp[2] | (sp[3] << 8)));
+                float b = half_to_float((uint16_t)(sp[4] | (sp[5] << 8)));
+
+                int ir = !(r > 0.0f) ? 0 : (r >= 1.0f ? 1024 : (int)(r * 1024.0f));
+                int ig = !(gg > 0.0f) ? 0 : (gg >= 1.0f ? 1024 : (int)(gg * 1024.0f));
+                int ib = !(b > 0.0f) ? 0 : (b >= 1.0f ? 1024 : (int)(b * 1024.0f));
+
+                dp[0] = lut[ib]; // B
+                dp[1] = lut[ig]; // G
+                dp[2] = lut[ir]; // R
+                dp[3] = 255;
+            } else {
+                dp[0] = sp[2]; // B
+                dp[1] = sp[1]; // G
+                dp[2] = sp[0]; // R
+                dp[3] = 255;
+            }
+        }
+    }
+
+    if (g_prevBmp) DeleteObject(g_prevBmp);
+    g_prevBmp = bmp;
+    g_prevBits = bits;
+    g_prevW = dw;
+    g_prevH = dh;
+    g_prevBmi = bi;
+    return TRUE;
+}
+
+static void preview_copy_to_clipboard(void) {
+    if (!g_prevBits || g_prevW <= 0 || g_prevH <= 0) return;
+
+    DWORD pixels = (DWORD)g_prevW * (DWORD)g_prevH * 4;
+    HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, sizeof(BITMAPINFOHEADER) + pixels);
+    if (!mem) return;
+
+    BITMAPINFOHEADER *bi = (BITMAPINFOHEADER *)GlobalLock(mem);
+    if (!bi) {
+        GlobalFree(mem);
+        return;
+    }
+
+    bi->biSize = sizeof(BITMAPINFOHEADER);
+    bi->biWidth = g_prevW;
+    bi->biHeight = g_prevH; // clipboard DIBs are bottom-up
+    bi->biPlanes = 1;
+    bi->biBitCount = 32;
+    bi->biCompression = BI_RGB;
+    bi->biSizeImage = pixels;
+
+    uint8_t *dst = (uint8_t *)(bi + 1);
+    const uint8_t *src = (const uint8_t *)g_prevBits;
+    for (int y = 0; y < g_prevH; y++) {
+        memcpy(dst + (size_t)y * g_prevW * 4,
+               src + (size_t)(g_prevH - 1 - y) * g_prevW * 4,
+               (size_t)g_prevW * 4);
+    }
+    GlobalUnlock(mem);
+
+    if (OpenClipboard(g_hwndPreview)) {
+        EmptyClipboard();
+        if (!SetClipboardData(CF_DIB, mem)) GlobalFree(mem);
+        CloseClipboard();
+    } else {
+        GlobalFree(mem);
+    }
+}
+
+static void preview_open_folder(void) {
+    if (g_prevPath[0] && GetFileAttributesW(g_prevPath) != INVALID_FILE_ATTRIBUTES) {
+        wchar_t args[MAX_PATH + 32];
+        _snwprintf(args, MAX_PATH + 32, L"/select,\"%s\"", g_prevPath);
+        args[MAX_PATH + 31] = L'\0';
+        ShellExecuteW(NULL, L"open", L"explorer.exe", args, NULL, SW_SHOWNORMAL);
+    } else {
+        // Encoding may still be running; the export folder is the next best
+        // destination until the file exists.
+        execute_open_export_folder();
+    }
+}
+
+static void preview_open_with(void) {
+    if (!g_prevPath[0]) return;
+    if (GetFileAttributesW(g_prevPath) == INVALID_FILE_ATTRIBUTES) return;
+    ShellExecuteW(NULL, L"openas", g_prevPath, NULL, NULL, SW_SHOWNORMAL);
+}
+
+// Right-click menu, using the same hidden owner window as the tray menu so it
+// picks up the Dark/Light theme.
+static void preview_show_menu(HWND hwnd, POINT pt) {
+    HMENU menu = CreatePopupMenu();
+    if (!menu) return;
+
+    BOOL exists = g_prevPath[0] &&
+                  GetFileAttributesW(g_prevPath) != INVALID_FILE_ATTRIBUTES;
+
+    AppendMenuW(menu, MF_STRING, IDC_PREV_FOLDER, L"Open File in Folder");
+    AppendMenuW(menu, MF_STRING, IDC_PREV_COPY,   L"Copy Image");
+    AppendMenuW(menu, MF_STRING | (exists ? 0 : MF_GRAYED),
+                IDC_PREV_OPENWITH, L"Open With...");
+    AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
+    AppendMenuW(menu, MF_STRING, IDC_PREV_CLOSE, L"Close Preview");
+
+    HWND owner = g_hwndMenuOwner ? g_hwndMenuOwner : hwnd;
+    HWND prevFg = GetForegroundWindow();
+    if (g_hwndMenuOwner) {
+        ApplyDarkMode(g_hwndMenuOwner);
+        SetForegroundWindow(g_hwndMenuOwner);
+    }
+
+    UINT cmd = (UINT)TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD,
+                                    pt.x, pt.y, 0, owner, NULL);
+    DestroyMenu(menu);
+
+    if (prevFg && prevFg != owner && IsWindow(prevFg)) SetForegroundWindow(prevFg);
+
+    if (cmd) PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(cmd, 0), 0);
+}
+
+// Keep the preview inside one physical monitor, without the strip's 400 px
+// height cap (the preview is allowed to be a real window).
+static void preview_clamp_to_monitor(RECT *r) {
+    HMONITOR mon = MonitorFromRect(r, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(mon, &mi)) return;
+
+    RECT m = mi.rcMonitor;
+    int availW = m.right - m.left;
+    int availH = m.bottom - m.top;
+
+    int w = r->right - r->left;
+    int h = r->bottom - r->top;
+
+    if (w > availW) w = availW;
+    if (h > availH) h = availH;
+    if (w < PREVIEW_MIN_W) w = (availW < PREVIEW_MIN_W) ? availW : PREVIEW_MIN_W;
+    if (h < PREVIEW_MIN_H) h = (availH < PREVIEW_MIN_H) ? availH : PREVIEW_MIN_H;
+    if (w > availW) w = availW;
+    if (h > availH) h = availH;
+
+    int x = r->left;
+    int y = r->top;
+    if (x + w > m.right)  x = m.right - w;
+    if (y + h > m.bottom) y = m.bottom - h;
+    if (x < m.left) x = m.left;
+    if (y < m.top)  y = m.top;
+
+    r->left = x;
+    r->top = y;
+    r->right = x + w;
+    r->bottom = y + h;
+}
+
+static void preview_register_class(void) {
+    static BOOL registered = FALSE;
+    if (registered) return;
+
+    WNDCLASSEXW wc;
+    ZeroMemory(&wc, sizeof(wc));
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_DROPSHADOW;
+    wc.lpfnWndProc = PreviewWndProc;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+    wc.hIcon = LoadIconW(wc.hInstance, MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm = wc.hIcon;
+    wc.lpszClassName = L"JxlShotPreviewClass";
+
+    if (RegisterClassExW(&wc)) registered = TRUE;
+}
+
+// Close button visibility helpers. The button follows mouse movement and is
+// hidden after a short idle period or when the cursor leaves the window.
+static void preview_reset_idle(HWND hwnd) {
+    KillTimer(hwnd, PREVIEW_TIMER_X);
+    SetTimer(hwnd, PREVIEW_TIMER_X, PREVIEW_IDLE_MS, NULL);
+}
+
+static void preview_show_x(HWND hwnd) {
+    if (!g_prevXShown) {
+        g_prevXShown = TRUE;
+        RECT xr = preview_x_rect(hwnd);
+        InflateRect(&xr, 4, 4);
+        InvalidateRect(hwnd, &xr, FALSE);
+    }
+    preview_reset_idle(hwnd);
+}
+
+static void preview_hide_x(HWND hwnd) {
+    if (!g_prevXShown && !g_prevXHot) return;
+    g_prevXShown = FALSE;
+    g_prevXHot = FALSE;
+    KillTimer(hwnd, PREVIEW_TIMER_X);
+    RECT xr = preview_x_rect(hwnd);
+    InflateRect(&xr, 4, 4);
+    InvalidateRect(hwnd, &xr, FALSE);
+}
+
+// Mouse left the client (X) or the whole non-client image. Staying inside just
+// clears the hover state; the idle timer then hides the X as usual.
+static void preview_on_mouse_leave(HWND hwnd) {
+    POINT pt;
+    GetCursorPos(&pt);
+    RECT wr;
+    GetWindowRect(hwnd, &wr);
+
+    if (PtInRect(&wr, pt)) {
+        if (g_prevXHot) {
+            g_prevXHot = FALSE;
+            RECT xr = preview_x_rect(hwnd);
+            InflateRect(&xr, 4, 4);
+            InvalidateRect(hwnd, &xr, FALSE);
+        }
+        return;
+    }
+    preview_hide_x(hwnd);
+}
+
+static void preview_paint(HWND hwnd, HDC dc) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+
+    HBRUSH bg = CreateSolidBrush(RGB(18, 18, 18));
+    FillRect(dc, &rc, bg);
+    DeleteObject(bg);
+
+    if (g_prevBmp && g_prevBits && g_prevW > 0 && g_prevH > 0) {
+        RECT img = preview_image_rect(hwnd);
+        SetStretchBltMode(dc, HALFTONE);
+        SetBrushOrgEx(dc, 0, 0, NULL);
+        StretchDIBits(dc,
+                      img.left, img.top,
+                      img.right - img.left, img.bottom - img.top,
+                      0, 0, g_prevW, g_prevH,
+                      g_prevBits, &g_prevBmi,
+                      DIB_RGB_COLORS, SRCCOPY);
+    }
+
+    if (g_prevXShown) {
+        RECT xr = preview_x_rect(hwnd);
+
+        // Soft dark backing so the glyph stays readable on bright captures.
+        RECT sh = xr;
+        OffsetRect(&sh, 1, 1);
+        HBRUSH sb = CreateSolidBrush(RGB(0, 0, 0));
+        HRGN sr = CreateRoundRectRgn(sh.left, sh.top, sh.right + 1, sh.bottom + 1, 9, 9);
+        if (sr) {
+            FillRgn(dc, sr, sb);
+            DeleteObject(sr);
+        }
+        DeleteObject(sb);
+
+        if (g_prevXHot) {
+            gui_round_rect(dc, &xr, 8, RGB(196, 43, 28), RGB(196, 43, 28));
+        } else {
+            gui_round_rect(dc, &xr, 8, RGB(40, 40, 40), RGB(120, 120, 120));
+        }
+
+        gui_draw_close_icon(dc,
+                            (xr.left + xr.right) / 2,
+                            (xr.top + xr.bottom) / 2,
+                            5, RGB(255, 255, 255));
+    }
+}
+
+// Public entry point used by the capture paths. Safe to call repeatedly: an
+// already open preview simply gets the new frame and is brought forward.
+static void gui_preview_show(const Grab *g, const wchar_t *path) {
+    if (!g_cfg.show_preview) return;
+    if (!g || !g->bits || g->w <= 0 || g->h <= 0) return;
+    if (!preview_make_bitmap(g)) return;
+
+    if (path && path[0]) {
+        wcsncpy_s(g_prevPath, MAX_PATH, path, _TRUNCATE);
+    } else {
+        g_prevPath[0] = L'\0';
+    }
+
+    if (!g_guiBgBrush) gui_update_theme();
+    preview_register_class();
+
+    if (!g_hwndPreview || !IsWindow(g_hwndPreview)) {
+        POINT anchor;
+        if (g_hwndGui && IsWindowVisible(g_hwndGui)) {
+            RECT gr;
+            GetWindowRect(g_hwndGui, &gr);
+            anchor.x = (gr.left + gr.right) / 2;
+            anchor.y = (gr.top + gr.bottom) / 2;
+        } else {
+            GetCursorPos(&anchor);
+        }
+
+        MONITORINFO mi;
+        ZeroMemory(&mi, sizeof(mi));
+        mi.cbSize = sizeof(mi);
+        GetMonitorInfoW(MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST), &mi);
+
+        RECT m = mi.rcMonitor;
+        int availW = m.right - m.left;
+        int availH = m.bottom - m.top;
+
+        // Start at the captured aspect ratio instead of a fixed rectangle, so
+        // the image is not letterboxed on the first frame.
+        int w = PREVIEW_DEF_W;
+        int h = PREVIEW_DEF_H;
+        if (g_prevW > 0 && g_prevH > 0) {
+            double s = (double)PREVIEW_DEF_W / (double)g_prevW;
+            double sy = (double)PREVIEW_DEF_H / (double)g_prevH;
+            if (sy < s) s = sy;
+            if (s > 1.0) s = 1.0;
+            w = (int)((double)g_prevW * s + 0.5);
+            h = (int)((double)g_prevH * s + 0.5);
+        }
+
+        if (w > availW - 40) w = availW - 40;
+        if (h > availH - 40) h = availH - 40;
+        if (w < PREVIEW_MIN_W) w = PREVIEW_MIN_W;
+        if (h < PREVIEW_MIN_H) h = PREVIEW_MIN_H;
+        if (w > availW) w = availW;
+        if (h > availH) h = availH;
+        if (w < 1) w = 1;
+        if (h < 1) h = 1;
+
+        int x = m.left + (availW - w) / 2;
+        int y = m.top + (availH - h) / 2;
+
+        g_prevXShown = FALSE;
+        g_prevXHot = FALSE;
+
+        g_hwndPreview = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            L"JxlShotPreviewClass", L"",
+            WS_POPUP | WS_THICKFRAME,
+            x, y, w, h,
+            NULL, NULL, GetModuleHandleW(NULL), NULL);
+        if (!g_hwndPreview) return;
+    } else {
+        InvalidateRect(g_hwndPreview, NULL, FALSE);
+    }
+
+    ShowWindow(g_hwndPreview, SW_SHOW);
+    AllowSetForegroundWindow(GetCurrentProcessId());
+    SetForegroundWindow(g_hwndPreview);
+
+    // Flash the X once so it is discoverable, then let the idle timer hide it.
+    preview_show_x(g_hwndPreview);
+}
+
+static BOOL gui_preview_is_visible(void) {
+    return (g_hwndPreview && IsWindowVisible(g_hwndPreview)) ? TRUE : FALSE;
+}
+
+// Used by the tray menu item and by the Settings toggle when previews are
+// switched off. The normal WM_DESTROY path restores the strip if needed.
+static void gui_preview_close(void) {
+    if (g_hwndPreview && IsWindow(g_hwndPreview)) {
+        DestroyWindow(g_hwndPreview);
+    }
+}
+
+// A new capture must not include the previous preview. Close it first; the
+// close handler is told not to bring the strip back, because every caller is
+// either already hiding the strip or about to grab the screen. If the strip
+// was waiting for this preview, that wait is handed to the next preview.
+static BOOL preview_close_for_capture(void) {
+    if (g_hwndPreview && IsWindow(g_hwndPreview)) {
+        BOOL wasPending = g_guiRestorePending;
+        g_guiRestorePending = FALSE;
+        DestroyWindow(g_hwndPreview);
+        g_guiRestorePending = wasPending;
+        return TRUE;
+    }
+    return FALSE;
+}
+
+// The image is theme independent, so a Dark/Light flip only has to repaint the
+// overlay button.
+static void preview_refresh_theme(void) {
+    if (!g_hwndPreview) return;
+    InvalidateRect(g_hwndPreview, NULL, TRUE);
+}
+
+static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    switch (msg) {
+        case WM_NCCALCSIZE:
+            // Remove the standard frame completely: the client area covers the
+            // whole window, while WS_THICKFRAME still gives us real resizing.
+            if (wp) return 0;
+            break;
+
+        case WM_GETMINMAXINFO: {
+            MINMAXINFO *mmi = (MINMAXINFO *)lp;
+            mmi->ptMinTrackSize.x = PREVIEW_MIN_W;
+            mmi->ptMinTrackSize.y = PREVIEW_MIN_H;
+            return 0;
+        }
+
+        case WM_WINDOWPOSCHANGING: {
+            WINDOWPOS *p = (WINDOWPOS *)lp;
+            RECT cur;
+            GetWindowRect(hwnd, &cur);
+
+            int w = (p->flags & SWP_NOSIZE) ? (cur.right - cur.left) : p->cx;
+            int h = (p->flags & SWP_NOSIZE) ? (cur.bottom - cur.top) : p->cy;
+            int x = (p->flags & SWP_NOMOVE) ? cur.left : p->x;
+            int y = (p->flags & SWP_NOMOVE) ? cur.top  : p->y;
+
+            RECT r = { x, y, x + w, y + h };
+            preview_clamp_to_monitor(&r);
+
+            p->x = r.left;
+            p->y = r.top;
+            p->cx = r.right - r.left;
+            p->cy = r.bottom - r.top;
+            p->flags &= ~(SWP_NOSIZE | SWP_NOMOVE);
+            return 0;
+        }
+
+        case WM_MOVING:
+            preview_clamp_to_monitor((RECT *)lp);
+            return TRUE;
+
+        case WM_SIZING:
+            preview_clamp_to_monitor((RECT *)lp);
+            return TRUE;
+
+        case WM_SIZE:
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+
+        case WM_ERASEBKGND:
+            return 1;
+
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC dc = BeginPaint(hwnd, &ps);
+            preview_paint(hwnd, dc);
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+
+        case WM_NCHITTEST: {
+            POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            ScreenToClient(hwnd, &pt);
+
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+
+            const int border = 6;
+            BOOL left   = pt.x < border;
+            BOOL right  = pt.x >= rc.right - border;
+            BOOL top    = pt.y < border;
+            BOOL bottom = pt.y >= rc.bottom - border;
+
+            if (left)  return top ? HTTOPLEFT    : (bottom ? HTBOTTOMLEFT  : HTLEFT);
+            if (right) return top ? HTTOPRIGHT   : (bottom ? HTBOTTOMRIGHT : HTRIGHT);
+            if (top)    return HTTOP;
+            if (bottom) return HTBOTTOM;
+
+            RECT xr = preview_x_rect(hwnd);
+            if (g_prevXShown && PtInRect(&xr, pt)) return HTCLIENT;
+
+            // Everything else is the drag surface, like the About dialog.
+            return HTCAPTION;
+        }
+
+        case WM_NCMOUSEMOVE: {
+            preview_show_x(hwnd);
+
+            // The X may have just appeared under a stationary cursor. Track
+            // that here as well, because the hit test only switches this spot
+            // to HTCLIENT on the next mouse message.
+            POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            ScreenToClient(hwnd, &pt);
+            RECT xr = preview_x_rect(hwnd);
+            BOOL hot = PtInRect(&xr, pt);
+            if (hot != g_prevXHot) {
+                g_prevXHot = hot;
+                InvalidateRect(hwnd, &xr, FALSE);
+            }
+
+            TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE | TME_NONCLIENT, hwnd, 0 };
+            TrackMouseEvent(&t);
+            return 0;
+        }
+
+        case WM_NCMOUSELEAVE:
+            preview_on_mouse_leave(hwnd);
+            return 0;
+
+        case WM_MOUSEMOVE: {
+            POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            RECT xr = preview_x_rect(hwnd);
+            BOOL hot = PtInRect(&xr, pt);
+
+            if (hot != g_prevXHot) {
+                g_prevXHot = hot;
+                InvalidateRect(hwnd, &xr, FALSE);
+            }
+
+            preview_show_x(hwnd);
+            TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, hwnd, 0 };
+            TrackMouseEvent(&t);
+            return 0;
+        }
+
+        case WM_MOUSELEAVE:
+            preview_on_mouse_leave(hwnd);
+            return 0;
+
+        case WM_TIMER:
+            if (wp == PREVIEW_TIMER_X) {
+                // The X only disappears when the pointer has genuinely left
+                // it; parking the cursor on the button keeps it usable.
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd, &pt);
+                RECT xr = preview_x_rect(hwnd);
+
+                if (PtInRect(&xr, pt)) {
+                    if (!g_prevXHot) {
+                        g_prevXHot = TRUE;
+                        InvalidateRect(hwnd, &xr, FALSE);
+                    }
+                    return 0;
+                }
+
+                preview_hide_x(hwnd);
+                return 0;
+            }
+            break;
+
+        case WM_SETCURSOR:
+            if (LOWORD(lp) == HTCLIENT) {
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd, &pt);
+                RECT xr = preview_x_rect(hwnd);
+                if (g_prevXShown && PtInRect(&xr, pt)) {
+                    SetCursor(LoadCursorW(NULL, IDC_HAND));
+                    return TRUE;
+                }
+            }
+            break;
+
+        case WM_RBUTTONUP: {
+            POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            ClientToScreen(hwnd, &pt);
+            preview_show_menu(hwnd, pt);
+            return 0;
+        }
+
+        case WM_NCRBUTTONUP: {
+            POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            preview_show_menu(hwnd, pt);
+            return 0;
+        }
+
+        case WM_LBUTTONDOWN: {
+            POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            RECT xr = preview_x_rect(hwnd);
+            if (g_prevXShown && PtInRect(&xr, pt)) {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            break;
+        }
+
+        case WM_COMMAND:
+            switch (LOWORD(wp)) {
+                case IDC_PREV_COPY:     preview_copy_to_clipboard(); break;
+                case IDC_PREV_FOLDER:   preview_open_folder(); break;
+                case IDC_PREV_OPENWITH: preview_open_with(); break;
+                case IDC_PREV_CLOSE:    DestroyWindow(hwnd); break;
+            }
+            return 0;
+
+        case WM_KEYDOWN:
+            if (wp == VK_ESCAPE) {
+                DestroyWindow(hwnd);
+                return 0;
+            }
+            if (wp == 'C' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+                preview_copy_to_clipboard();
+                return 0;
+            }
+            break;
+
+        case WM_DESTROY: {
+            KillTimer(hwnd, PREVIEW_TIMER_X);
+            g_hwndPreview = NULL;
+            g_prevXShown = FALSE;
+            g_prevXHot = FALSE;
+            g_prevPath[0] = L'\0';
+
+            if (g_prevBmp) {
+                DeleteObject(g_prevBmp);
+                g_prevBmp = NULL;
+            }
+            g_prevBits = NULL;
+            g_prevW = g_prevH = 0;
+
+            // If the strip hid itself for this capture, bring it back now that
+            // the preview is gone.
+            if (g_guiRestorePending) {
+                g_guiRestorePending = FALSE;
+                if (g_hwndGui && IsWindow(g_hwndGui)) {
+                    ShowWindow(g_hwndGui, SW_SHOW);
+                    SetForegroundWindow(g_hwndGui);
+                    SetFocus(g_hwndGui);
+                }
+            }
+            return 0;
+        }
+
+        case WM_CLOSE:
+            DestroyWindow(hwnd);
+            return 0;
+    }
+
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
 // Called by the settings/hotkey code whenever g_cfg changes. This window has
 // no child text controls, so a repaint is all it takes for the status line and
 // the capture-card hotkey hints to show the new values.
@@ -595,7 +1393,11 @@ static void gui_refresh(void) {
 static void gui_start_capture(int kind) {
     if (!g_hwndGui || g_guiPendingCapture) return;
 
+    // A previous preview must not be part of the new capture.
+    preview_close_for_capture();
+
     g_guiPendingCapture = kind;
+    g_guiRestorePending = TRUE; // the strip returns after the capture/preview
     ShowWindow(g_hwndGui, SW_HIDE);
     SetTimer(g_hwndGui, TIMER_GUI_CAPTURE, GUI_CAPTURE_DELAY_MS, NULL);
 }
@@ -816,8 +1618,16 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
                 if (kind == 1) {
                     execute_full_capture();
-                    ShowWindow(hwnd, SW_SHOW);
-                    SetForegroundWindow(hwnd);
+                    if (gui_preview_is_visible()) {
+                        // Keep the strip hidden: the preview is the window the
+                        // user is looking at now. It restores the strip when
+                        // it closes.
+                        g_guiRestorePending = TRUE;
+                    } else {
+                        g_guiRestorePending = FALSE;
+                        ShowWindow(hwnd, SW_SHOW);
+                        SetForegroundWindow(hwnd);
+                    }
                 } else if (kind == 2) {
                     start_region_capture();
                     // The overlay is topmost and owns the screen; wait until it
@@ -830,9 +1640,16 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (wp == TIMER_GUI_REGION_DONE) {
                 if (g_hwndRegion) return 0; // selection still in progress
                 KillTimer(hwnd, TIMER_GUI_REGION_DONE);
-                ShowWindow(hwnd, SW_SHOW);
-                SetForegroundWindow(hwnd);
-                SetFocus(hwnd);
+                if (gui_preview_is_visible()) {
+                    // A crop was made and the preview opened; let it close
+                    // first, then show the strip.
+                    g_guiRestorePending = TRUE;
+                } else {
+                    g_guiRestorePending = FALSE;
+                    ShowWindow(hwnd, SW_SHOW);
+                    SetForegroundWindow(hwnd);
+                    SetFocus(hwnd);
+                }
                 return 0;
             }
             return DefWindowProcW(hwnd, msg, wp, lp);
@@ -936,6 +1753,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     HWND hb = GetDlgItem(hwnd, kGuiButtons[i].id);
                     if (hb) InvalidateRect(hb, NULL, TRUE);
                 }
+                preview_refresh_theme();
                 InvalidateRect(hwnd, NULL, TRUE);
                 return 0;
             }
@@ -968,6 +1786,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             KillTimer(hwnd, TIMER_GUI_CAPTURE);
             KillTimer(hwnd, TIMER_GUI_REGION_DONE);
             g_guiPendingCapture = 0;
+            g_guiRestorePending = FALSE;
             g_guiHoverBtn = NULL;
             g_guiCloseHot = FALSE;
             g_guiThemeHot = FALSE;

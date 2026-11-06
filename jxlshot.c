@@ -76,6 +76,7 @@ typedef struct {
 // 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels
     int     multimonitor; // 0 = focusmonitor, 1 = separateimages
     int     disable_keyboard_hook; // 1 = disable global keyboard hook, 0 = enable (default)
+    int     show_preview; // 1 = open the capture preview window after a capture
     wchar_t export_path[MAX_PATH];
     UINT    hk_full_mod;
     UINT    hk_full_vk;
@@ -135,6 +136,7 @@ static void ensure_default_ini(void) {
     wchar_t val_export[MAX_PATH] = L"", val_hk_fvk[64] = L"44", val_hk_fmod[64] = L"0";
     wchar_t val_hk_rvk[64] = L"44", val_hk_rmod[64] = L"2", val_blank[64] = L"2";
     wchar_t val_multi[64] = L"focusmonitor", val_hook[64] = L"0", val_dark[64] = L"1";
+    wchar_t val_preview[64] = L"1";
 
     // Case 1: file exists
     if (GetFileAttributesW(ini_path) != INVALID_FILE_ATTRIBUTES) {
@@ -151,6 +153,7 @@ static void ensure_default_ini(void) {
         ini_ensure_key(ini_path, L"BlankCheckMode",  L"2");
         ini_ensure_key(ini_path, L"MultiMonitor",    L"focusmonitor");
         ini_ensure_key(ini_path, L"DisableKeyboardHook", L"0");
+        ini_ensure_key(ini_path, L"ShowPreview", L"1");
         ini_ensure_key(ini_path, L"DarkMode", L"1");
 
         // Check if the INI version is older than the current app version
@@ -171,6 +174,7 @@ static void ensure_default_ini(void) {
             GetPrivateProfileStringW(L"Capture", L"BlankCheckMode", L"2", val_blank, 64, ini_path);
             GetPrivateProfileStringW(L"Capture", L"MultiMonitor", L"focusmonitor", val_multi, 64, ini_path);
             GetPrivateProfileStringW(L"Capture", L"DisableKeyboardHook", L"0", val_hook, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"ShowPreview", L"1", val_preview, 64, ini_path);
             GetPrivateProfileStringW(L"Capture", L"DarkMode", L"1", val_dark, 64, ini_path);
             
             // Delete the old file so it falls through to Case 2 to rewrite with new comments
@@ -212,6 +216,8 @@ static void ensure_default_ini(void) {
         L";                      (seperateimages is accepted as an alias)\n"
         L";   DisableKeyboardHook : 1 = Disable global keyboard hooks (hotkeys).\n"
         L";                         0 = Enable global keyboard hooks (default).\n"
+        L";   ShowPreview    : 1 = Show the capture preview window after a capture (default).\n"
+        L";                    0 = Save silently and keep the compact strip only.\n"
         L";   DarkMode       : 1 = Dark window/menu theme, 0 = Light theme.\n"
         L";\n"
         L"; [Hotkey Settings] (Use the 'Hotkey Settings...' tray menu to configure these easily!)\n"
@@ -238,6 +244,7 @@ static void ensure_default_ini(void) {
         L"BlankCheckMode=2\n"
         L"MultiMonitor=focusmonitor\n"
         L"DisableKeyboardHook=0\n"
+        L"ShowPreview=1\n"
         L"DarkMode=1\n";
 
 // Lossless at distance 1.0 give small size compare to lossy 1.0
@@ -280,6 +287,7 @@ static void ensure_default_ini(void) {
         WritePrivateProfileStringW(L"Capture", L"BlankCheckMode", val_blank, ini_path);
         WritePrivateProfileStringW(L"Capture", L"MultiMonitor", val_multi, ini_path);
         WritePrivateProfileStringW(L"Capture", L"DisableKeyboardHook", val_hook, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"ShowPreview", val_preview, ini_path);
         WritePrivateProfileStringW(L"Capture", L"DarkMode", val_dark, ini_path);
     }
 }
@@ -334,6 +342,7 @@ static void init_config(void) {
     g_cfg.hk_region_mod = MOD_CONTROL; 
     g_cfg.hk_region_vk = VK_SNAPSHOT;
     g_cfg.disable_keyboard_hook = 0;
+    g_cfg.show_preview = 1;
 
     // UI defaults: dark theme (the look shipped since v2.4), no saved geometry.
     g_cfg.dark_mode = 1;
@@ -367,6 +376,7 @@ static void init_config(void) {
     if (g_cfg.distance > 25.0f) g_cfg.distance = 25.0f;
 
     g_cfg.disable_keyboard_hook = get_cfg_int(L"DisableKeyboardHook", 0, ini_path);
+    g_cfg.show_preview = get_cfg_int(L"ShowPreview", 1, ini_path) ? 1 : 0;
     if (g_cfg.disable_keyboard_hook < 0) g_cfg.disable_keyboard_hook = 0;
     if (g_cfg.disable_keyboard_hook > 1) g_cfg.disable_keyboard_hook = 1;
 
