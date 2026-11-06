@@ -14,6 +14,11 @@
 #define GUI_MAX_H        400
 
 #define GUI_BTN_COUNT    4
+
+// Close button shared by the strip and the preview: flat red rectangle.
+#define GUI_CLOSE_W      34
+#define GUI_CLOSE_H      24
+#define GUI_CLOSE_GLYPH  4
 #define GUI_BTN_GAP      4
 
 #define IDC_GUI_FULL     301
@@ -29,18 +34,13 @@
 #define GUI_CAPTURE_DELAY_MS  220
 #define GUI_REGION_POLL_MS    120
 
-// Capture preview window (Snipping Tool style). It is a separate top-level
-// window so the compact strip never has to grow into an editor.
-#define PREVIEW_DEF_W        900
-#define PREVIEW_DEF_H        620
-#define PREVIEW_MIN_W        420
-#define PREVIEW_MIN_H        300
-#define PREVIEW_MAX_TEX      4096   // cap the stored bitmap for huge monitors (4K stays 1:1)
+// Capture preview window.
 
-// Overlay close button and the idle timer that hides it again.
-#define PREVIEW_X_SIZE       30
-#define PREVIEW_X_MARGIN     10
-#define PREVIEW_IDLE_MS      1300
+#define PREVIEW_MAX_TEX      4096 // cap the stored bitmap for huge monitors (4K stays 1:1)
+#define PREVIEW_X_W          GUI_CLOSE_W   // same button as the strip, flush in the corner
+#define PREVIEW_X_H          GUI_CLOSE_H
+#define PREVIEW_FULL_BORDER  4    // white frame for full-screen captures
+#define PREVIEW_IDLE_MS      1300 // idle time before the close button hides again
 #define PREVIEW_TIMER_X      1
 
 #define IDC_PREV_COPY        401
@@ -49,9 +49,9 @@
 #define IDC_PREV_OPENWITH    404
 
 
-// Palette. These are variables, not #defines, so the sun/moon button can swap
-// the whole window between the dark and light theme at runtime. gui_update_theme
-// fills them from g_cfg.dark_mode before any painting happens.
+// Palette. These are variables, not #defines, so the Dark/Light toggle can swap
+// the whole window between themes at runtime. gui_update_theme fills them from
+// g_cfg.dark_mode before any painting happens.
 static COLORREF g_guiBg, g_guiBtn, g_guiBtnHot, g_guiBtnDown, g_guiBorder;
 static COLORREF g_guiAccent, g_guiText, g_guiDim, g_guiCloseBg;
 
@@ -78,15 +78,11 @@ typedef struct {
 } GuiLayout;
 
 static RECT gui_theme_rect(const GuiLayout *L, const RECT *closeRc) {
-    int h = L->titleH - 8;
-    if (h < 18) h = 18;
-    if (h > 24) h = 24;
-
     RECT r;
-    r.right = closeRc->left - 8;
-    r.left = r.right - 76;   // "Dark" | "Light" segmented toggle
-    r.top = (L->titleH - h) / 2;
-    r.bottom = r.top + h;
+    r.right = closeRc->left - 6;
+    r.left = r.right - 84;   // "Dark" | "Light" selection bar
+    r.top = 0;
+    r.bottom = L->titleH;
     return r;
 }
 
@@ -102,20 +98,38 @@ static const struct {
     { IDC_GUI_EXPORT,   L"Open Folder", L"Open"     },
 };
 
-static BOOL g_guiThemeHot = FALSE;
+static int  g_guiThemeHot = 0;   // 0 none, 1 Dark segment, 2 Light segment
 
-// Close glyph drawn with lines instead of a Unicode character: the "\u2715"
-// codepoint rendered as an empty box in Consolas on some systems.
+// Win8.1/10 style close glyph
+
 static void gui_draw_close_icon(HDC dc, int cx, int cy, int extent, COLORREF col) {
     HPEN pen = CreatePen(PS_SOLID, 1, col);
     if (!pen) return;
     HPEN oldPen = (HPEN)SelectObject(dc, pen);
-    MoveToEx(dc, cx - extent, cy - extent, NULL);
-    LineTo(dc, cx + extent + 1, cy + extent + 1);
-    MoveToEx(dc, cx + extent, cy - extent, NULL);
-    LineTo(dc, cx - extent - 1, cy + extent + 1);
+
+    int s = extent * 2;
+    int l = cx - extent;
+    int t = cy - extent;
+
+    MoveToEx(dc, l, t, NULL);
+    LineTo(dc, l + s, t + s);
+    MoveToEx(dc, l + s - 1, t, NULL);
+    LineTo(dc, l - 1, t + s);
+
     SelectObject(dc, oldPen);
     DeleteObject(pen);
+}
+
+// Flat close button used by both windows
+static void gui_draw_close_button(HDC dc, const RECT *rc, BOOL hot, BOOL fillIdle,
+                                  COLORREF idleBg, COLORREF idleFg, int extent) {
+    if (hot || fillIdle) {
+        HBRUSH b = CreateSolidBrush(hot ? RGB(232, 17, 35) : idleBg);
+        FillRect(dc, rc, b);
+        DeleteObject(b);
+    }
+    gui_draw_close_icon(dc, (rc->left + rc->right) / 2, (rc->top + rc->bottom) / 2,
+                        extent, hot ? RGB(255, 255, 255) : idleFg);
 }
 
 
@@ -151,12 +165,13 @@ static BITMAPINFO g_prevBmi;
 static wchar_t    g_prevPath[MAX_PATH];         // file the capture was saved to
 static BOOL       g_prevXShown = FALSE;         // overlay close button visible
 static BOOL       g_prevXHot = FALSE;           // mouse over the overlay close button
+static int        g_prevBorder = 0;             // white frame width (full-screen captures)
 
 
 // Theme
 
 // Picks the palette for the current g_cfg.dark_mode and rebuilds the window
-// background brush. Called on create and whenever the sun/moon button is hit.
+// background brush. Called on create and whenever the toggle is hit.
 static void gui_update_theme(void) {
     if (g_cfg.dark_mode) {
         g_guiBg       = RGB(30, 30, 30);
@@ -167,7 +182,7 @@ static void gui_update_theme(void) {
         g_guiAccent   = RGB(0, 120, 215);
         g_guiText     = RGB(240, 240, 240);
         g_guiDim      = RGB(150, 150, 150);
-        g_guiCloseBg = RGB(196, 43, 28);
+        g_guiCloseBg  = RGB(232, 17, 35);
     } else {
         g_guiBg       = RGB(246, 246, 246);
         g_guiBtn      = RGB(255, 255, 255);
@@ -177,7 +192,7 @@ static void gui_update_theme(void) {
         g_guiAccent   = RGB(0, 120, 215);
         g_guiText     = RGB(26, 26, 26);
         g_guiDim      = RGB(110, 110, 110);
-        g_guiCloseBg = RGB(196, 43, 28);
+        g_guiCloseBg  = RGB(232, 17, 35);
     }
 
     if (g_guiBgBrush) {
@@ -187,7 +202,7 @@ static void gui_update_theme(void) {
     g_guiBgBrush = CreateSolidBrush(g_guiBg);
 }
 
-// Persist just the theme choice; used by the sun/moon toggle.
+// Persist just the theme choice; used by the Dark/Light toggle.
 static void gui_save_theme(void) {
     wchar_t ini[MAX_PATH];
     _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
@@ -226,8 +241,7 @@ static void gui_get_layout(HWND hwnd, GuiLayout *L) {
 
     // One UI only: the compact strip with the small title bar and icons. It
     // stays exactly like this at every window size, so expanding the window
-    // just gives the same four cards more room; nothing switches to a second,
-    // larger layout with a tall title bar or subtitles.
+    // just gives the same four cards more room.
     L->footer = FALSE;
     L->compact = TRUE;
     L->titleH = 24;
@@ -246,21 +260,17 @@ static void gui_get_layout(HWND hwnd, GuiLayout *L) {
     L->shortLabels = (L->btnW < 90);
     L->subtitle = FALSE;
 
-    // Fixed glyph size: the icons are part of the compact UI and must not grow
-    // when the window is enlarged.
+    // Fixed glyph size: the icons must not grow when the window is enlarged.
     L->iconScale = 1.0f;
 }
 
+// Close button: a flush rectangle in the top-right corner, no rounding, no gap.
 static RECT gui_close_rect(const GuiLayout *L) {
-    int size = L->titleH - 10;
-    if (size < 18) size = 18;
-    if (size > 32) size = 32;
-
     RECT r;
-    r.right = L->width - 10;
-    r.left = r.right - size;
-    r.top = (L->titleH - size) / 2;
-    r.bottom = r.top + size;
+    r.right  = L->width;          // touches the right edge
+    r.left   = r.right - GUI_CLOSE_W;
+    r.top    = 0;                 // touches the top edge
+    r.bottom = L->titleH;
     return r;
 }
 
@@ -615,68 +625,29 @@ static LRESULT CALLBACK GuiBtnSubclass(HWND h, UINT m, WPARAM w, LPARAM l,
 }
 
 
-// Capture flow
 
-
-// ---------------------------------------------------------------------------
 // Capture preview
-//
-// Just the captured image in a frameless window. Right-click for the file
-// actions; the close button is drawn inside the image and only appears while
-// the mouse is moving. The image itself is the drag surface, exactly like the
-// About dialog.
-// ---------------------------------------------------------------------------
+
+// in a frameless, shadowless window
+// The image itself is the drag surface.
+
 
 static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
-// Rectangle the image is actually drawn into, keeping its aspect ratio and
-// centring it in the client area.
+// The window is exactly the image (plus the white frame for full-screen shots).
 static RECT preview_image_rect(HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
-
-    RECT img = rc;
-    if (g_prevW > 0 && g_prevH > 0 && rc.right > 0 && rc.bottom > 0) {
-        double sx = (double)rc.right / (double)g_prevW;
-        double sy = (double)rc.bottom / (double)g_prevH;
-        double s = (sx < sy) ? sx : sy;
-
-        int dw = (int)((double)g_prevW * s + 0.5);
-        int dh = (int)((double)g_prevH * s + 0.5);
-        if (dw < 1) dw = 1;
-        if (dh < 1) dh = 1;
-        if (dw > rc.right) dw = rc.right;
-        if (dh > rc.bottom) dh = rc.bottom;
-
-        img.left = (rc.right - dw) / 2;
-        img.top = (rc.bottom - dh) / 2;
-        img.right = img.left + dw;
-        img.bottom = img.top + dh;
-    }
-    return img;
+    InflateRect(&rc, -g_prevBorder, -g_prevBorder);
+    return rc;
 }
 
-// Overlay close button, anchored inside the top-right corner of the image.
+// Close button: flush in the top-right corner, 46x30, no margin.
 static RECT preview_x_rect(HWND hwnd) {
-    RECT img = preview_image_rect(hwnd);
-    int size = PREVIEW_X_SIZE;
-    int mx = PREVIEW_X_MARGIN;
-    int my = PREVIEW_X_MARGIN;
-
-    if (img.right - img.left < size + mx * 2) {
-        mx = (img.right - img.left - size) / 2;
-        if (mx < 2) mx = 2;
-    }
-    if (img.bottom - img.top < size + my * 2) {
-        my = (img.bottom - img.top - size) / 2;
-        if (my < 2) my = 2;
-    }
-
-    RECT r;
-    r.right = img.right - mx;
-    r.left = r.right - size;
-    r.top = img.top + my;
-    r.bottom = r.top + size;
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    RECT r = { rc.right - PREVIEW_X_W, 0, rc.right, PREVIEW_X_H };
+    if (r.left < 0) r.left = 0;
     return r;
 }
 
@@ -837,10 +808,57 @@ static void preview_open_folder(void) {
     }
 }
 
+// Win10/11 "Open with" chooser. SHOpenWithDialog is the real API behind it
+// (the "openas" verb and OpenAs_RunDLL are unreliable on current Windows), so
+// it is called first. It is looked up at runtime so no extra header or import
+// library is needed.
+typedef struct {
+    LPCWSTR pcszFile;
+    LPCWSTR pcszClass;
+    DWORD   oaifInFlags;
+} JxlOpenAsInfo;
+
 static void preview_open_with(void) {
     if (!g_prevPath[0]) return;
     if (GetFileAttributesW(g_prevPath) == INVALID_FILE_ATTRIBUTES) return;
-    ShellExecuteW(NULL, L"openas", g_prevPath, NULL, NULL, SW_SHOWNORMAL);
+
+    HWND owner = g_hwndPreview;
+    wchar_t file[MAX_PATH];
+    wcsncpy_s(file, MAX_PATH, g_prevPath, _TRUNCATE);   // preview may close while the dialog is up
+
+    // The preview is TOPMOST; drop that so the chooser is not hidden behind it.
+    if (owner) {
+        SetWindowPos(owner, HWND_NOTOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        SetForegroundWindow(owner);
+    }
+
+    HRESULT com = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
+    BOOL done = FALSE;
+    typedef HRESULT (WINAPI *SHOpenWithDialog_t)(HWND, const JxlOpenAsInfo *);
+    HMODULE sh = LoadLibraryW(L"shell32.dll");
+    SHOpenWithDialog_t fn = sh ? (SHOpenWithDialog_t)GetProcAddress(sh, "SHOpenWithDialog") : NULL;
+    if (fn) {
+        JxlOpenAsInfo oi;
+        oi.pcszFile = file;
+        oi.pcszClass = NULL;
+        oi.oaifInFlags = 0x1 /*OAIF_ALLOW_REGISTRATION*/ | 0x4 /*OAIF_EXEC*/;
+        HRESULT hr = fn(owner, &oi);
+        // Success, or the user cancelled: either way nothing more to do.
+        if (SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) done = TRUE;
+    }
+    if (sh) FreeLibrary(sh);
+    if (SUCCEEDED(com)) CoUninitialize();
+    if (done) return;
+
+    // Fallbacks for odd systems.
+    wchar_t args[MAX_PATH + 64];
+    _snwprintf(args, MAX_PATH + 64, L"shell32.dll,OpenAs_RunDLL %s", file);
+    args[MAX_PATH + 63] = L'\0';
+    HINSTANCE r = ShellExecuteW(NULL, L"open", L"rundll32.exe", args, NULL, SW_SHOWNORMAL);
+    if ((INT_PTR)r <= 32)
+        ShellExecuteW(NULL, L"openas", file, NULL, NULL, SW_SHOWNORMAL);
 }
 
 // Right-click menu, using the same hidden owner window as the tray menu so it
@@ -875,8 +893,7 @@ static void preview_show_menu(HWND hwnd, POINT pt) {
     if (cmd) PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(cmd, 0), 0);
 }
 
-// Keep the preview inside one physical monitor, without the strip's 400 px
-// height cap (the preview is allowed to be a real window).
+// Only keeps the window on its monitor while dragging; never changes the size.
 static void preview_clamp_to_monitor(RECT *r) {
     HMONITOR mon = MonitorFromRect(r, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi;
@@ -885,30 +902,19 @@ static void preview_clamp_to_monitor(RECT *r) {
     if (!GetMonitorInfoW(mon, &mi)) return;
 
     RECT m = mi.rcMonitor;
-    int availW = m.right - m.left;
-    int availH = m.bottom - m.top;
-
     int w = r->right - r->left;
     int h = r->bottom - r->top;
+    int x = r->left, y = r->top;
 
-    if (w > availW) w = availW;
-    if (h > availH) h = availH;
-    if (w < PREVIEW_MIN_W) w = (availW < PREVIEW_MIN_W) ? availW : PREVIEW_MIN_W;
-    if (h < PREVIEW_MIN_H) h = (availH < PREVIEW_MIN_H) ? availH : PREVIEW_MIN_H;
-    if (w > availW) w = availW;
-    if (h > availH) h = availH;
-
-    int x = r->left;
-    int y = r->top;
-    if (x + w > m.right)  x = m.right - w;
-    if (y + h > m.bottom) y = m.bottom - h;
-    if (x < m.left) x = m.left;
-    if (y < m.top)  y = m.top;
-
-    r->left = x;
-    r->top = y;
-    r->right = x + w;
-    r->bottom = y + h;
+    if (w <= m.right - m.left) {
+        if (x + w > m.right) x = m.right - w;
+        if (x < m.left) x = m.left;
+    }
+    if (h <= m.bottom - m.top) {
+        if (y + h > m.bottom) y = m.bottom - h;
+        if (y < m.top) y = m.top;
+    }
+    r->left = x; r->top = y; r->right = x + w; r->bottom = y + h;
 }
 
 static void preview_register_class(void) {
@@ -918,7 +924,7 @@ static void preview_register_class(void) {
     WNDCLASSEXW wc;
     ZeroMemory(&wc, sizeof(wc));
     wc.cbSize = sizeof(wc);
-    wc.style = CS_DROPSHADOW;
+    wc.style = 0;                       // no CS_DROPSHADOW
     wc.lpfnWndProc = PreviewWndProc;
     wc.hInstance = GetModuleHandleW(NULL);
     wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
@@ -927,6 +933,28 @@ static void preview_register_class(void) {
     wc.lpszClassName = L"JxlShotPreviewClass";
 
     if (RegisterClassExW(&wc)) registered = TRUE;
+}
+
+// Remove every DWM decoration: shadow, border line, Win11 rounded corners.
+static void preview_flatten_frame(HWND hwnd) {
+    typedef HRESULT (WINAPI *DwmSetWindowAttribute_t)(HWND, DWORD, LPCVOID, DWORD);
+
+    HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+    if (!dwm) return;
+
+    DwmSetWindowAttribute_t fn =
+        (DwmSetWindowAttribute_t)GetProcAddress(dwm, "DwmSetWindowAttribute");
+    if (fn) {
+        int policy = 1;                 // DWMNCRP_DISABLED -> no NC rendering / shadow
+        fn(hwnd, 2 /*DWMWA_NCRENDERING_POLICY*/, &policy, sizeof(policy));
+
+        int corner = 1;                 // DWMWCP_DONOTROUND
+        fn(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &corner, sizeof(corner));
+
+        DWORD none = 0xFFFFFFFE;        // DWMWA_COLOR_NONE
+        fn(hwnd, 34 /*DWMWA_BORDER_COLOR*/, &none, sizeof(none));
+    }
+    FreeLibrary(dwm);
 }
 
 // Close button visibility helpers. The button follows mouse movement and is
@@ -940,7 +968,6 @@ static void preview_show_x(HWND hwnd) {
     if (!g_prevXShown) {
         g_prevXShown = TRUE;
         RECT xr = preview_x_rect(hwnd);
-        InflateRect(&xr, 4, 4);
         InvalidateRect(hwnd, &xr, FALSE);
     }
     preview_reset_idle(hwnd);
@@ -952,7 +979,6 @@ static void preview_hide_x(HWND hwnd) {
     g_prevXHot = FALSE;
     KillTimer(hwnd, PREVIEW_TIMER_X);
     RECT xr = preview_x_rect(hwnd);
-    InflateRect(&xr, 4, 4);
     InvalidateRect(hwnd, &xr, FALSE);
 }
 
@@ -968,7 +994,6 @@ static void preview_on_mouse_leave(HWND hwnd) {
         if (g_prevXHot) {
             g_prevXHot = FALSE;
             RECT xr = preview_x_rect(hwnd);
-            InflateRect(&xr, 4, 4);
             InvalidateRect(hwnd, &xr, FALSE);
         }
         return;
@@ -980,121 +1005,97 @@ static void preview_paint(HWND hwnd, HDC dc) {
     RECT rc;
     GetClientRect(hwnd, &rc);
 
-    HBRUSH bg = CreateSolidBrush(RGB(18, 18, 18));
-    FillRect(dc, &rc, bg);
-    DeleteObject(bg);
+    if (g_prevBorder > 0)
+        FillRect(dc, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));   // frame
+
+    RECT img = preview_image_rect(hwnd);
+    int iw = img.right - img.left;
+    int ih = img.bottom - img.top;
 
     if (g_prevBmp && g_prevBits && g_prevW > 0 && g_prevH > 0) {
-        RECT img = preview_image_rect(hwnd);
-        SetStretchBltMode(dc, HALFTONE);
-        SetBrushOrgEx(dc, 0, 0, NULL);
-        StretchDIBits(dc,
-                      img.left, img.top,
-                      img.right - img.left, img.bottom - img.top,
-                      0, 0, g_prevW, g_prevH,
-                      g_prevBits, &g_prevBmi,
-                      DIB_RGB_COLORS, SRCCOPY);
+        if (g_prevW == iw && g_prevH == ih) {
+            SetDIBitsToDevice(dc, img.left, img.top, g_prevW, g_prevH, 0, 0, 0, g_prevH,
+                              g_prevBits, &g_prevBmi, DIB_RGB_COLORS);   // 1:1, no resampling
+        } else {
+            SetStretchBltMode(dc, HALFTONE);
+            SetBrushOrgEx(dc, 0, 0, NULL);
+            StretchDIBits(dc, img.left, img.top, iw, ih,
+                          0, 0, g_prevW, g_prevH,
+                          g_prevBits, &g_prevBmi, DIB_RGB_COLORS, SRCCOPY);
+        }
+    } else if (g_prevBorder == 0) {
+        HBRUSH bg = CreateSolidBrush(RGB(18, 18, 18));
+        FillRect(dc, &rc, bg);
+        DeleteObject(bg);
     }
 
     if (g_prevXShown) {
         RECT xr = preview_x_rect(hwnd);
-
-        // Soft dark backing so the glyph stays readable on bright captures.
-        RECT sh = xr;
-        OffsetRect(&sh, 1, 1);
-        HBRUSH sb = CreateSolidBrush(RGB(0, 0, 0));
-        HRGN sr = CreateRoundRectRgn(sh.left, sh.top, sh.right + 1, sh.bottom + 1, 9, 9);
-        if (sr) {
-            FillRgn(dc, sr, sb);
-            DeleteObject(sr);
-        }
-        DeleteObject(sb);
-
-        if (g_prevXHot) {
-            gui_round_rect(dc, &xr, 8, RGB(196, 43, 28), RGB(196, 43, 28));
-        } else {
-            gui_round_rect(dc, &xr, 8, RGB(40, 40, 40), RGB(120, 120, 120));
-        }
-
-        gui_draw_close_icon(dc,
-                            (xr.left + xr.right) / 2,
-                            (xr.top + xr.bottom) / 2,
-                            5, RGB(255, 255, 255));
+        gui_draw_close_button(dc, &xr, g_prevXHot, TRUE,
+                              RGB(32, 32, 32), RGB(255, 255, 255), GUI_CLOSE_GLYPH);
     }
 }
 
-// Public entry point used by the capture paths. Safe to call repeatedly: an
-// already open preview simply gets the new frame and is brought forward.
+// Public entry point used by the capture paths. The preview opens centred on
+// the monitor under the cursor, at exactly the capture's size. A capture that
+// fills the monitor (full screen) would cover everything and look like nothing
+// happened, so it is shown smaller, still centred, inside a white frame.
+// Safe to call repeatedly: an open preview gets the new frame and is resized.
 static void gui_preview_show(const Grab *g, const wchar_t *path) {
     if (!g_cfg.show_preview) return;
     if (!g || !g->bits || g->w <= 0 || g->h <= 0) return;
     if (!preview_make_bitmap(g)) return;
 
-    if (path && path[0]) {
-        wcsncpy_s(g_prevPath, MAX_PATH, path, _TRUNCATE);
-    } else {
-        g_prevPath[0] = L'\0';
-    }
+    if (path && path[0]) wcsncpy_s(g_prevPath, MAX_PATH, path, _TRUNCATE);
+    else g_prevPath[0] = L'\0';
 
     if (!g_guiBgBrush) gui_update_theme();
     preview_register_class();
 
+    POINT cur;
+    GetCursorPos(&cur);
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST), &mi);
+    RECT m = mi.rcMonitor;
+    int availW = m.right - m.left;
+    int availH = m.bottom - m.top;
+
+    int w = g->w, h = g->h;
+    int border = 0;
+
+    if (availW > 0 && availH > 0 &&
+        (g->w >= availW * 95 / 100 || g->h >= availH * 95 / 100)) {
+        border = PREVIEW_FULL_BORDER;
+        double s1 = (double)availW * 0.85 / g->w;
+        double s2 = (double)availH * 0.85 / g->h;
+        double sc = (s1 < s2) ? s1 : s2;
+        if (sc > 1.0) sc = 1.0;
+        w = (int)(g->w * sc) + 2 * border;
+        h = (int)(g->h * sc) + 2 * border;
+    }
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+
+    int x = m.left + (availW - w) / 2;
+    int y = m.top + (availH - h) / 2;
+
+    g_prevBorder = border;
+    g_prevXShown = FALSE;
+    g_prevXHot = FALSE;
+
     if (!g_hwndPreview || !IsWindow(g_hwndPreview)) {
-        POINT anchor;
-        if (g_hwndGui && IsWindowVisible(g_hwndGui)) {
-            RECT gr;
-            GetWindowRect(g_hwndGui, &gr);
-            anchor.x = (gr.left + gr.right) / 2;
-            anchor.y = (gr.top + gr.bottom) / 2;
-        } else {
-            GetCursorPos(&anchor);
-        }
-
-        MONITORINFO mi;
-        ZeroMemory(&mi, sizeof(mi));
-        mi.cbSize = sizeof(mi);
-        GetMonitorInfoW(MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST), &mi);
-
-        RECT m = mi.rcMonitor;
-        int availW = m.right - m.left;
-        int availH = m.bottom - m.top;
-
-        // Start at the captured aspect ratio instead of a fixed rectangle, so
-        // the image is not letterboxed on the first frame.
-        int w = PREVIEW_DEF_W;
-        int h = PREVIEW_DEF_H;
-        if (g_prevW > 0 && g_prevH > 0) {
-            double s = (double)PREVIEW_DEF_W / (double)g_prevW;
-            double sy = (double)PREVIEW_DEF_H / (double)g_prevH;
-            if (sy < s) s = sy;
-            if (s > 1.0) s = 1.0;
-            w = (int)((double)g_prevW * s + 0.5);
-            h = (int)((double)g_prevH * s + 0.5);
-        }
-
-        if (w > availW - 40) w = availW - 40;
-        if (h > availH - 40) h = availH - 40;
-        if (w < PREVIEW_MIN_W) w = PREVIEW_MIN_W;
-        if (h < PREVIEW_MIN_H) h = PREVIEW_MIN_H;
-        if (w > availW) w = availW;
-        if (h > availH) h = availH;
-        if (w < 1) w = 1;
-        if (h < 1) h = 1;
-
-        int x = m.left + (availW - w) / 2;
-        int y = m.top + (availH - h) / 2;
-
-        g_prevXShown = FALSE;
-        g_prevXHot = FALSE;
-
         g_hwndPreview = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             L"JxlShotPreviewClass", L"",
-            WS_POPUP | WS_THICKFRAME,
+            WS_POPUP,                       // no frame, no thick border
             x, y, w, h,
             NULL, NULL, GetModuleHandleW(NULL), NULL);
         if (!g_hwndPreview) return;
+        preview_flatten_frame(g_hwndPreview);
     } else {
+        SetWindowPos(g_hwndPreview, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
         InvalidateRect(g_hwndPreview, NULL, FALSE);
     }
 
@@ -1142,47 +1143,12 @@ static void preview_refresh_theme(void) {
 
 static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
-        case WM_NCCALCSIZE:
-            // Remove the standard frame completely: the client area covers the
-            // whole window, while WS_THICKFRAME still gives us real resizing.
-            if (wp) return 0;
-            break;
-
-        case WM_GETMINMAXINFO: {
-            MINMAXINFO *mmi = (MINMAXINFO *)lp;
-            mmi->ptMinTrackSize.x = PREVIEW_MIN_W;
-            mmi->ptMinTrackSize.y = PREVIEW_MIN_H;
-            return 0;
-        }
-
-        case WM_WINDOWPOSCHANGING: {
-            WINDOWPOS *p = (WINDOWPOS *)lp;
-            RECT cur;
-            GetWindowRect(hwnd, &cur);
-
-            int w = (p->flags & SWP_NOSIZE) ? (cur.right - cur.left) : p->cx;
-            int h = (p->flags & SWP_NOSIZE) ? (cur.bottom - cur.top) : p->cy;
-            int x = (p->flags & SWP_NOMOVE) ? cur.left : p->x;
-            int y = (p->flags & SWP_NOMOVE) ? cur.top  : p->y;
-
-            RECT r = { x, y, x + w, y + h };
-            preview_clamp_to_monitor(&r);
-
-            p->x = r.left;
-            p->y = r.top;
-            p->cx = r.right - r.left;
-            p->cy = r.bottom - r.top;
-            p->flags &= ~(SWP_NOSIZE | SWP_NOMOVE);
-            return 0;
-        }
-
         case WM_MOVING:
             preview_clamp_to_monitor((RECT *)lp);
             return TRUE;
 
-        case WM_SIZING:
-            preview_clamp_to_monitor((RECT *)lp);
-            return TRUE;
+        case WM_NCLBUTTONDBLCLK:
+            return 0; // no maximize on double click
 
         case WM_SIZE:
             InvalidateRect(hwnd, NULL, FALSE);
@@ -1203,25 +1169,10 @@ static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             ScreenToClient(hwnd, &pt);
 
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-
-            const int border = 6;
-            BOOL left   = pt.x < border;
-            BOOL right  = pt.x >= rc.right - border;
-            BOOL top    = pt.y < border;
-            BOOL bottom = pt.y >= rc.bottom - border;
-
-            if (left)  return top ? HTTOPLEFT    : (bottom ? HTBOTTOMLEFT  : HTLEFT);
-            if (right) return top ? HTTOPRIGHT   : (bottom ? HTBOTTOMRIGHT : HTRIGHT);
-            if (top)    return HTTOP;
-            if (bottom) return HTBOTTOM;
-
             RECT xr = preview_x_rect(hwnd);
             if (g_prevXShown && PtInRect(&xr, pt)) return HTCLIENT;
 
-            // Everything else is the drag surface, like the About dialog.
-            return HTCAPTION;
+            return HTCAPTION;   // the whole image is the drag surface; no resize borders
         }
 
         case WM_NCMOUSEMOVE: {
@@ -1352,6 +1303,7 @@ static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             g_prevXShown = FALSE;
             g_prevXHot = FALSE;
             g_prevPath[0] = L'\0';
+            g_prevBorder = 0;
 
             if (g_prevBmp) {
                 DeleteObject(g_prevBmp);
@@ -1540,54 +1492,40 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             DrawTextW(dc, L"JXL Shot", -1, &tr,
                       DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
-            // Theme toggle: a two-segment Dark | Light switch.
-            gui_round_rect(dc, &themeRc, 6, GUI_BTN, g_guiThemeHot ? GUI_ACCENT : GUI_BORDER);
-            int themeMid = (themeRc.left + themeRc.right) / 2;
-
+            // Theme selection bar: flat Dark | Light segments. The active one
+            // is bright with an accent bar underneath, the other is dimmed;
+            // the hovered segment gets a light fill.
             {
-                int savedDc = SaveDC(dc);
-                if (savedDc) {
-                    HRGN pill = CreateRoundRectRgn(themeRc.left, themeRc.top,
-                                                   themeRc.right + 1, themeRc.bottom + 1, 6, 6);
-                    if (pill) {
-                        SelectClipRgn(dc, pill);
-                        RECT half = g_cfg.dark_mode
-                            ? (RECT){ themeRc.left, themeRc.top, themeMid, themeRc.bottom }
-                            : (RECT){ themeMid, themeRc.top, themeRc.right, themeRc.bottom };
-                        HBRUSH ab = CreateSolidBrush(GUI_ACCENT);
-                        FillRect(dc, &half, ab);
-                        DeleteObject(ab);
-                        DeleteObject(pill);
-                    }
-                    RestoreDC(dc, savedDc);
-                }
-            }
-
-            {
-                HFONT themeFont = L.compact ? g_guiSmallFontSm : g_guiSmallFont;
-                HFONT oldThemeFont = (HFONT)SelectObject(dc, themeFont);
-
+                int themeMid = (themeRc.left + themeRc.right) / 2;
                 RECT dl = { themeRc.left, themeRc.top, themeMid, themeRc.bottom };
                 RECT dr = { themeMid, themeRc.top, themeRc.right, themeRc.bottom };
 
-                SetTextColor(dc, g_cfg.dark_mode ? RGB(255, 255, 255) : GUI_TEXT);
-                DrawTextW(dc, L"Dark", -1, &dl,
-                          DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-                SetTextColor(dc, g_cfg.dark_mode ? GUI_TEXT : RGB(255, 255, 255));
-                DrawTextW(dc, L"Light", -1, &dr,
-                          DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                if (g_guiThemeHot) {
+                    HBRUSH hb = CreateSolidBrush(GUI_BTN_HOT);
+                    FillRect(dc, (g_guiThemeHot == 1) ? &dl : &dr, hb);
+                    DeleteObject(hb);
+                }
 
+                RECT bar = g_cfg.dark_mode ? dl : dr;
+                bar.top = bar.bottom - 3;
+                bar.left += 8;
+                bar.right -= 8;
+                HBRUSH ab = CreateSolidBrush(GUI_ACCENT);
+                FillRect(dc, &bar, ab);
+                DeleteObject(ab);
+
+                HFONT oldThemeFont = (HFONT)SelectObject(dc,
+                    L.compact ? g_guiCardFontSm : g_guiCardFont);
+                SetTextColor(dc, g_cfg.dark_mode ? GUI_TEXT : GUI_DIM);
+                DrawTextW(dc, L"Dark", -1, &dl, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                SetTextColor(dc, g_cfg.dark_mode ? GUI_DIM : GUI_TEXT);
+                DrawTextW(dc, L"Light", -1, &dr, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
                 SelectObject(dc, oldThemeFont);
             }
 
-            // Close button: drawn with lines, not a font glyph (the glyph
-            // rendered as a box with the stock fonts).
-            if (g_guiCloseHot) gui_round_rect(dc, &closeRc, 6, GUI_CLOSE_HOT, GUI_CLOSE_HOT);
-            gui_draw_close_icon(dc,
-                (closeRc.left + closeRc.right) / 2,
-                (closeRc.top + closeRc.bottom) / 2,
-                5,
-                g_guiCloseHot ? RGB(255, 255, 255) : GUI_TEXT);
+            // Close button: same flat red rectangle as the preview's.
+            gui_draw_close_button(dc, &closeRc, g_guiCloseHot, FALSE,
+                                  0, GUI_TEXT, GUI_CLOSE_GLYPH);
 
             SelectObject(dc, oldFont);
             EndPaint(hwnd, &ps);
@@ -1661,6 +1599,12 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             GuiLayout L;
             gui_get_layout(hwnd, &L);
 
+            // The close button sits in the corner, so test it (and the theme
+            // toggle) before the resize borders.
+            RECT closeRc = gui_close_rect(&L);
+            RECT themeRc = gui_theme_rect(&L, &closeRc);
+            if (PtInRect(&closeRc, pt) || PtInRect(&themeRc, pt)) return HTCLIENT;
+
             const int border = 6;
             BOOL left   = pt.x < border;
             BOOL right  = pt.x >= L.width - border;
@@ -1670,10 +1614,6 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             if (left)  return top ? HTTOPLEFT    : (bottom ? HTBOTTOMLEFT  : HTLEFT);
             if (right) return top ? HTTOPRIGHT   : (bottom ? HTBOTTOMRIGHT : HTRIGHT);
             if (bottom) return HTBOTTOM;
-
-            RECT closeRc = gui_close_rect(&L);
-            RECT themeRc = gui_theme_rect(&L, &closeRc);
-            if (PtInRect(&closeRc, pt) || PtInRect(&themeRc, pt)) return HTCLIENT;
             if (top && pt.y >= 0) return HTTOP;
             if (pt.y >= 0 && pt.y < L.titleH) return HTCAPTION;
             return HTCLIENT;
@@ -1701,8 +1641,10 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 g_guiCloseHot = overClose;
                 InvalidateRect(hwnd, &closeRc, FALSE);
             }
-            if (g_guiThemeHot != overTheme) {
-                g_guiThemeHot = overTheme;
+            int themeSeg = !overTheme ? 0
+                         : (pt.x < (themeRc.left + themeRc.right) / 2 ? 1 : 2);
+            if (g_guiThemeHot != themeSeg) {
+                g_guiThemeHot = themeSeg;
                 InvalidateRect(hwnd, &themeRc, FALSE);
             }
             return 0;
@@ -1716,7 +1658,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 RECT closeRc = gui_close_rect(&L);
                 RECT themeRc = gui_theme_rect(&L, &closeRc);
                 g_guiCloseHot = FALSE;
-                g_guiThemeHot = FALSE;
+                g_guiThemeHot = 0;
                 InvalidateRect(hwnd, &closeRc, FALSE);
                 InvalidateRect(hwnd, &themeRc, FALSE);
             }
@@ -1728,7 +1670,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             gui_get_layout(hwnd, &L);
             RECT closeRc = gui_close_rect(&L);
             RECT themeRc = gui_theme_rect(&L, &closeRc);
-            
+
             if (PtInRect(&closeRc, pt)) {
                 DestroyWindow(hwnd);
                 return 0;
@@ -1771,7 +1713,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             DestroyWindow(hwnd);
             return 0;
 
-        case WM_DESTROY:
+        case WM_DESTROY: {
             // Save position and size before destroying
             RECT r;
             GetWindowRect(hwnd, &r);
@@ -1789,7 +1731,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_guiRestorePending = FALSE;
             g_guiHoverBtn = NULL;
             g_guiCloseHot = FALSE;
-            g_guiThemeHot = FALSE;
+            g_guiThemeHot = 0;
             g_guiShortLabelsSet = FALSE;
 
             if (g_guiBgBrush)   { DeleteObject(g_guiBgBrush);   g_guiBgBrush = NULL; }
@@ -1809,6 +1751,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             g_hwndGui = NULL;
             return 0;
+        }
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
@@ -1881,7 +1824,7 @@ static void execute_gui(void) {
     ZeroMemory(&mi, sizeof(mi));
     mi.cbSize = sizeof(mi);
     GetMonitorInfoW(mon, &mi);
-    RECT wa = mi.rcMonitor; // physical monitor pixels, taskbar included
+    RECT wa = mi.rcMonitor; // physical monitor pixels
 
     int x, y, w, h;
     if (g_cfg.gui_w > 0 && g_cfg.gui_h > 0) {
