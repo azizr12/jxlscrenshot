@@ -344,7 +344,7 @@ static void init_config(void) {
     g_cfg.disable_keyboard_hook = 0;
     g_cfg.show_preview = 1;
 
-    // UI defaults: dark theme (the look shipped since v2.4), no saved geometry.
+
     g_cfg.dark_mode = 1;
     g_cfg.gui_x = 0;
     g_cfg.gui_y = 0;
@@ -402,8 +402,8 @@ static void init_config(void) {
     g_cfg.dark_mode = get_cfg_int(L"DarkMode", 1, ini_path) ? 1 : 0;
     g_cfg.gui_x = get_cfg_int(L"GuiX", 0, ini_path);
     g_cfg.gui_y = get_cfg_int(L"GuiY", 0, ini_path);
-    g_cfg.gui_w = get_cfg_int(L"GuiW", 0, ini_path);
-    g_cfg.gui_h = get_cfg_int(L"GuiH", 0, ini_path);
+    g_cfg.gui_w = get_cfg_int(L"GuiW", 400, ini_path);
+    g_cfg.gui_h = get_cfg_int(L"GuiH", 96, ini_path);
 }
 
 // Unified Debug logging
