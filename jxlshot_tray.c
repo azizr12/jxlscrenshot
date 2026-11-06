@@ -1019,17 +1019,20 @@ static void region_dirty_rect(RECT *out) {
 // GPU region overlay (D3D11 flip-model swap chain, HDR and SDR)
 
 // GDI windows are 8-bit SDR.
-// therefore flattened the captured scRGB FP16 frame into sRGB, so the preview
-// looked SDR even though the saved crop was still HDR (issue #7). The frame is
-// now presented through a real swap chain instead: scRGB FP16 on HDR monitors,
-// and B8G8R8A8 on SDR monitors. The dim layer, selection border and size label
-// are drawn by a tiny shader, so the HDR path keeps highlights above SDR white.
+// therefore flattened the captured scRGB FP16 frame into sRGB,
+// so the preview looked SDR even though the saved crop was still HDR.
+// The frame is now presented through a real swap chain instead
+// scRGB FP16 on HDR monitors,
+// and B8G8R8A8 on SDR monitors.
+// The dim layer, selection border and size label are drawn by a tiny shader,
+// so the HDR path keeps highlights above SDR white.
 
 // The same renderer is used on SDR monitors on purpose
-// it makes the GPU path testable on any display, and SDR output is bit-identical in intent to the old
-// GDI preview. Any machine where the D3D setup fails keeps using the original
-// GDI overlay. The saved region always comes from g_regionFrame, so the file is
-// unaffected by which preview path is used.
+// it makes the GPU path testable on any display,
+// and SDR output is bit-identical in intent to the old GDI preview.
+// Any machine where the D3D setup fails keeps using the original GDI overlay.
+// The saved region always comes from g_regionFrame,
+// so the file is unaffected by which preview path is used.
 
 #include <d3dcompiler.h>
 // pD3DCompile typedef; the DLL is loaded at runtime
@@ -1038,7 +1041,7 @@ static void region_dirty_rect(RECT *out) {
 #define GPU_OVERLAY_BORDER     2.0f    // accent border width, in physical pixels
 
 typedef struct {
-    float sel[4];         // left, top, right, bottom (pixels)
+    float sel[4]; // left, top, right, bottom (pixels)
     float screen[2];
     float dim;
     float border;
@@ -1169,9 +1172,9 @@ static void gpu_overlay_destroy(void) {
     ZeroMemory(&g_gpu, sizeof g_gpu);
 }
 
-// Upload the captured frame as a 4-channel texture. HDR is RGB16F scRGB
-// (6 bytes/px) and becomes RGBA16F with A = 1.0h; SDR is RGB24 and becomes
-// BGRA8 with A = 255.
+// Upload the captured frame as a 4-channel texture.
+// HDR is RGB16F scRGB (6 bytes/px) and becomes RGBA16F with A = 1.0h;
+// SDR is RGB24 and becomes BGRA8 with A = 255.
 static int gpu_overlay_upload_source(void) {
     if (!g_gpu.device || !g_gpu.ctx || !g_regionFrame.bits ||
         g_regionFrame.w <= 0 || g_regionFrame.h <= 0) {
@@ -1284,9 +1287,10 @@ static int gpu_overlay_create_label_texture(int w, int h, const void *bits) {
     return 1;
 }
 
-// Render the "W x H" readout into a small BGRA DIB (dark box + white text) and
-// upload it. GDI leaves the alpha bytes alone, so the box alpha can be seeded
-// in memory before TextOutW draws into it.
+// Render the "W x H" readout into a small BGRA DIB (dark box + white text)
+// and upload it.
+// GDI leaves the alpha bytes alone,
+// so the box alpha can be seeded in memory before TextOutW draws into it.
 static void gpu_overlay_update_label(const RECT *sel) {
     if (!g_gpu.device || !g_gpu.ctx || !sel) return;
 
@@ -1359,10 +1363,11 @@ static void gpu_overlay_update_label(const RECT *sel) {
     SetTextColor(g_gpu.label_dc, RGB(255, 255, 255));
     TextOutW(g_gpu.label_dc, pad, pad, text, len);
 
-    // GDI writes the glyph RGB but leaves the alpha bytes undefined, so the
-    // readout came out hollow/haloed once the texture was blended. Keep the box
-    // translucent and make every inked pixel fully opaque; antialiased edges
-    // keep their grey in RGB, so they still blend smoothly against the frame.
+    // GDI writes the glyph RGB but leaves the alpha bytes undefined,
+    // so the readout came out hollow/haloed once the texture was blended.
+    // Keep the box translucent and make every inked pixel fully opaque;
+    // antialiased edges keep their grey in RGB,
+    // so they still blend smoothly against the frame.
     px = (uint8_t *)g_gpu.label_bits;
     for (size_t i = 0; i < npix; i++, px += 4) {
         int ink = px[0] + px[1] + px[2];
