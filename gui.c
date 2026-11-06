@@ -13,14 +13,13 @@
 #define GUI_MAX_W        2000
 #define GUI_MAX_H        400
 
-#define GUI_BTN_COUNT    5
+#define GUI_BTN_COUNT    4
 #define GUI_BTN_GAP      4
 
 #define IDC_GUI_FULL     301
 #define IDC_GUI_REGION   302
 #define IDC_GUI_SETTINGS 303
 #define IDC_GUI_EXPORT   304
-#define IDC_GUI_SETPATH  305
 #define IDC_GUI_ABOUT    306
 #define IDC_GUI_CLOSE    307
 
@@ -31,15 +30,21 @@
 #define GUI_REGION_POLL_MS    120
 
 
-#define GUI_BG        RGB(30, 30, 30)
-#define GUI_BTN       RGB(48, 48, 48)
-#define GUI_BTN_HOT   RGB(62, 62, 62)
-#define GUI_BTN_DOWN  RGB(76, 76, 76)
-#define GUI_BORDER    RGB(64, 64, 64)
-#define GUI_ACCENT    RGB(0, 120, 215)
-#define GUI_TEXT      RGB(240, 240, 240)
-#define GUI_DIM       RGB(150, 150, 150)
-#define GUI_CLOSE_HOT RGB(196, 43, 28)
+// Palette. These are variables, not #defines, so the sun/moon button can swap
+// the whole window between the dark and light theme at runtime. gui_update_theme
+// fills them from g_cfg.dark_mode before any painting happens.
+static COLORREF g_guiBg, g_guiBtn, g_guiBtnHot, g_guiBtnDown, g_guiBorder;
+static COLORREF g_guiAccent, g_guiText, g_guiDim, g_guiCloseBg;
+
+#define GUI_BG        (g_guiBg)
+#define GUI_BTN       (g_guiBtn)
+#define GUI_BTN_HOT   (g_guiBtnHot)
+#define GUI_BTN_DOWN  (g_guiBtnDown)
+#define GUI_BORDER    (g_guiBorder)
+#define GUI_ACCENT    (g_guiAccent)
+#define GUI_TEXT      (g_guiText)
+#define GUI_DIM       (g_guiDim)
+#define GUI_CLOSE_HOT (g_guiCloseBg)
 
 typedef struct {
     int   width, height;
@@ -75,7 +80,6 @@ static const struct {
     { IDC_GUI_REGION,   L"Region",      L"Region"   },
     { IDC_GUI_SETTINGS, L"Settings",    L"Settings" },
     { IDC_GUI_EXPORT,   L"Open Folder", L"Open"     },
-    { IDC_GUI_SETPATH,  L"Set Folder",  L"Set"      },
 };
 
 static BOOL g_guiThemeHot = FALSE;
@@ -128,6 +132,66 @@ static BOOL    g_guiCompact = FALSE;
 static BOOL    g_guiShortLabels = FALSE;
 static BOOL    g_guiShortLabelsSet = FALSE;
 static int     g_guiPendingCapture = 0; // 0 = idle, 1 = full, 2 = region
+
+
+// Theme
+
+// Picks the palette for the current g_cfg.dark_mode and rebuilds the window
+// background brush. Called on create and whenever the sun/moon button is hit.
+static void gui_update_theme(void) {
+    if (g_cfg.dark_mode) {
+        g_guiBg       = RGB(30, 30, 30);
+        g_guiBtn      = RGB(48, 48, 48);
+        g_guiBtnHot   = RGB(62, 62, 62);
+        g_guiBtnDown  = RGB(76, 76, 76);
+        g_guiBorder   = RGB(64, 64, 64);
+        g_guiAccent   = RGB(0, 120, 215);
+        g_guiText     = RGB(240, 240, 240);
+        g_guiDim      = RGB(150, 150, 150);
+        g_guiCloseBg = RGB(196, 43, 28);
+    } else {
+        g_guiBg       = RGB(246, 246, 246);
+        g_guiBtn      = RGB(255, 255, 255);
+        g_guiBtnHot   = RGB(229, 239, 251);
+        g_guiBtnDown  = RGB(204, 220, 240);
+        g_guiBorder   = RGB(205, 205, 205);
+        g_guiAccent   = RGB(0, 120, 215);
+        g_guiText     = RGB(26, 26, 26);
+        g_guiDim      = RGB(110, 110, 110);
+        g_guiCloseBg = RGB(196, 43, 28);
+    }
+
+    if (g_guiBgBrush) {
+        DeleteObject(g_guiBgBrush);
+        g_guiBgBrush = NULL;
+    }
+    g_guiBgBrush = CreateSolidBrush(g_guiBg);
+}
+
+// Persist just the theme choice; used by the sun/moon toggle.
+static void gui_save_theme(void) {
+    wchar_t ini[MAX_PATH];
+    _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    ini[MAX_PATH - 1] = L'\0';
+    WritePrivateProfileStringW(L"Capture", L"DarkMode",
+        g_cfg.dark_mode ? L"1" : L"0", ini);
+}
+
+// Persist the theme together with the strip's geometry when the window closes,
+// so both survive a restart.
+static void gui_save_window_state(void) {
+    wchar_t ini[MAX_PATH], s[32];
+    _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    ini[MAX_PATH - 1] = L'\0';
+
+    WritePrivateProfileStringW(L"Capture", L"DarkMode",
+        g_cfg.dark_mode ? L"1" : L"0", ini);
+
+    _snwprintf(s, 32, L"%d", g_cfg.gui_x); WritePrivateProfileStringW(L"Capture", L"GuiX", s, ini);
+    _snwprintf(s, 32, L"%d", g_cfg.gui_y); WritePrivateProfileStringW(L"Capture", L"GuiY", s, ini);
+    _snwprintf(s, 32, L"%d", g_cfg.gui_w); WritePrivateProfileStringW(L"Capture", L"GuiW", s, ini);
+    _snwprintf(s, 32, L"%d", g_cfg.gui_h); WritePrivateProfileStringW(L"Capture", L"GuiH", s, ini);
+}
 
 
 // Layout
@@ -293,114 +357,21 @@ static void gui_draw_sliders_icon(HDC dc, int cx, int cy, COLORREF col) {
     DeleteObject(pen);
 }
 
-#include <math.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-// Builds the gear outline points (flat-topped trapezoid teeth).
-// R = tooth tip radius, r = root radius. Returns the point count (closed).
-static int gui_gear_points(POINT *pts, int gx, int gy, int R, int r, int teeth) {
-    int n = 0;
-    const double pitch = 2.0 * M_PI / teeth;
-    const double start = -M_PI / 2.0;           // first tooth points up
-
-    for (int i = 0; i < teeth; i++) {
-        double a = start + i * pitch;
-        const double ang[4] = { a - 0.30 * pitch, a - 0.20 * pitch,
-                                a + 0.20 * pitch, a + 0.30 * pitch };
-        const double rad[4] = { r, R, R, r };
-        for (int k = 0; k < 4; k++) {
-            pts[n].x = gx + (int)floor(cos(ang[k]) * rad[k] + 0.5);
-            pts[n].y = gy + (int)floor(sin(ang[k]) * rad[k] + 0.5);
-            n++;
-        }
-    }
-    pts[n++] = pts[0]; // close the outline
-    return n;
-}
-
-// Draws the part of segment (x0,y0)-(x1,y1) that lies OUTSIDE the circle
-// (gx, gy, rad). Uses only logical coordinates, so it is safe under a world
-// transform (unlike clip regions, which are in device pixels).
-static void gui_line_outside_circle(HDC dc, int x0, int y0, int x1, int y1,
-                                    int gx, int gy, double rad) {
-    double dx = x1 - x0, dy = y1 - y0;
-    double fx = x0 - gx, fy = y0 - gy;
-    double a = dx * dx + dy * dy;
-    double b = 2.0 * (fx * dx + fy * dy);
-    double c = fx * fx + fy * fy - rad * rad;
-    double disc = b * b - 4.0 * a * c;
-
-    if (a == 0.0) return;
-
-    if (disc <= 0.0) { // never enters the circle
-        MoveToEx(dc, x0, y0, NULL);
-        LineTo(dc, x1, y1);
-        return;
-    }
-
-    double s  = sqrt(disc);
-    double t1 = (-b - s) / (2.0 * a); // enter circle
-    double t2 = (-b + s) / (2.0 * a); // leave circle
-
-    if (t1 >= 1.0 || t2 <= 0.0) { // circle is off the segment
-        MoveToEx(dc, x0, y0, NULL);
-        LineTo(dc, x1, y1);
-        return;
-    }
-    if (t1 > 0.0) { // piece before the circle
-        MoveToEx(dc, x0, y0, NULL);
-        LineTo(dc, x0 + (int)floor(dx * t1 + 0.5), y0 + (int)floor(dy * t1 + 0.5));
-    }
-    if (t2 < 1.0) { // piece after the circle
-        MoveToEx(dc, x0 + (int)floor(dx * t2 + 0.5), y0 + (int)floor(dy * t2 + 0.5), NULL);
-        LineTo(dc, x1, y1);
-    }
-}
-
-static void gui_draw_folder_icon(HDC dc, int cx, int cy, COLORREF col, BOOL edit) {
-    const int gx = cx + 7, gy = cy + 4;
-    const int R = 11, r = 7, hole = 3, teeth = 6;
-    const int BORDER_W = 1;
-    const double CLEAR = R + 3.0;// no folder lines inside this radius
+static void gui_draw_folder_icon(HDC dc, int cx, int cy, COLORREF col) {
     HPEN pen = CreatePen(PS_SOLID, 2, col);
     if (!pen) return;
 
     HPEN oldPen = (HPEN)SelectObject(dc, pen);
     HBRUSH oldBrush = (HBRUSH)SelectObject(dc, GetStockObject(NULL_BRUSH));
 
-    // 1. Folder outline as segments
     const POINT f[7] = {
         { cx - 15, cy - 8 }, { cx - 5, cy - 8 }, { cx - 1, cy - 4 },
         { cx + 14, cy - 4 }, { cx + 14, cy + 10 }, { cx - 15, cy + 10 },
         { cx - 15, cy - 8 }
     };
     for (int i = 0; i < 6; i++) {
-        if (edit)
-            gui_line_outside_circle(dc, f[i].x, f[i].y, f[i + 1].x, f[i + 1].y,
-                                    gx, gy, CLEAR);
-        else {
-            MoveToEx(dc, f[i].x, f[i].y, NULL);
-            LineTo(dc, f[i + 1].x, f[i + 1].y);
-        }
-    }
-
-    // 2. Gear on top: 5 teeth, 1px line
-    if (edit) {
-        HPEN gearPen = CreatePen(PS_SOLID, BORDER_W, col);
-        if (gearPen) {
-            POINT pts[64];
-            int n = gui_gear_points(pts, gx, gy, R, r, teeth);
-
-            SelectObject(dc, gearPen);
-            Polyline(dc, pts, n);
-            Ellipse(dc, gx - hole, gy - hole, gx + hole + 1, gy + hole + 1);
-
-            SelectObject(dc, pen); // detach before deleting
-            DeleteObject(gearPen);
-        }
+        MoveToEx(dc, f[i].x, f[i].y, NULL);
+        LineTo(dc, f[i + 1].x, f[i + 1].y);
     }
 
     SelectObject(dc, oldBrush);
@@ -413,8 +384,7 @@ static void gui_draw_icon_raw(HDC dc, int id, int cx, int cy, COLORREF col) {
         case IDC_GUI_FULL:     gui_draw_monitor_icon(dc, cx, cy, col); break;
         case IDC_GUI_REGION:   gui_draw_region_icon(dc, cx, cy, col); break;
         case IDC_GUI_SETTINGS: gui_draw_sliders_icon(dc, cx, cy, col); break;
-        case IDC_GUI_EXPORT:   gui_draw_folder_icon(dc, cx, cy, col, FALSE); break;
-        case IDC_GUI_SETPATH:  gui_draw_folder_icon(dc, cx, cy, col, TRUE); break;
+        case IDC_GUI_EXPORT:   gui_draw_folder_icon(dc, cx, cy, col); break;
     }
 }
 
@@ -465,9 +435,6 @@ static void gui_button_subtitle(int id, wchar_t *out, size_t n) {
             break;
         case IDC_GUI_EXPORT:
             wcsncpy_s(out, n, L"Show exports", _TRUNCATE);
-            break;
-        case IDC_GUI_SETPATH:
-            wcsncpy_s(out, n, L"Choose path", _TRUNCATE);
             break;
         default:
             out[0] = L'\0';
@@ -612,9 +579,8 @@ static void gui_start_capture(int kind) {
 static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE: {
+            gui_update_theme();
             ApplyDarkMode(hwnd);
-
-            g_guiBgBrush = CreateSolidBrush(GUI_BG);
 
             g_guiTitleFont = CreateFontW(-22, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -643,8 +609,8 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
 
             // Buttons are created in left-to-right order: Full Screen, Region,
-            // Settings, Open Folder, Set Folder. About stays reachable from the
-            // tray menu, which keeps the strip to the five requested actions.
+            // Settings, Open Folder. Export path and quality live in the
+            // Settings window, so the strip stays at four buttons.
             HINSTANCE hi = GetModuleHandleW(NULL);
             int x = 8;
             for (int i = 0; i < GUI_BTN_COUNT; i++) {
@@ -720,12 +686,13 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             // Close button, mirroring the About dialog's painted X.
             if (g_guiCloseHot) gui_round_rect(dc, &closeRc, 6, GUI_CLOSE_HOT, GUI_CLOSE_HOT);
-            SetTextColor(dc, g_guiCloseHot ? RGB(255, 255, 255) : RGB(200, 200, 200));
+            SetTextColor(dc, g_guiCloseHot ? RGB(255, 255, 255) : GUI_TEXT);
             SelectObject(dc, L.compact ? g_guiXFontSm : g_guiXFont);
             DrawTextW(dc, L"\u2715", -1, &closeRc,
                       DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-            // Footer rule and status.
+            // Footer rule and version. Quality (lossless/distance/effort) is no
+            // longer shown here; it lives in the Settings window.
             if (L.footer) {
                 int lineY = L.height - 46;
                 int infoY = L.height - 38;
@@ -735,21 +702,8 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 FillRect(dc, &line, lineBrush);
                 DeleteObject(lineBrush);
 
-                wchar_t status[192];
-                if (g_cfg.lossless) {
-                    _snwprintf(status, 192, L"Lossless  \u00b7  Effort %d", g_cfg.effort);
-                } else {
-                    _snwprintf(status, 192, L"Lossy %.1f  \u00b7  Effort %d",
-                               g_cfg.distance, g_cfg.effort);
-                }
-                status[191] = L'\0';
-
                 HFONT oldSmall = (HFONT)SelectObject(dc,
                     L.compact ? g_guiSmallFontSm : g_guiSmallFont);
-
-                RECT sr = { L.margin, infoY, L.width - L.margin - 80, infoY + 18 };
-                SetTextColor(dc, GUI_TEXT);
-                DrawTextW(dc, status, -1, &sr, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
 
                 RECT vr = { L.width - L.margin - 80, infoY, L.width - L.margin, infoY + 18 };
                 SetTextColor(dc, GUI_DIM);
@@ -774,7 +728,6 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 case IDC_GUI_REGION:   gui_start_capture(2); break;
                 case IDC_GUI_SETTINGS: execute_hotkey_settings(NULL); break;
                 case IDC_GUI_EXPORT:   execute_open_export_folder(); break;
-                case IDC_GUI_SETPATH:  execute_set_path(); break;
                 case IDC_GUI_ABOUT:    execute_about(); break;
                 case IDC_GUI_CLOSE:    DestroyWindow(hwnd); break;
             }
@@ -891,8 +844,21 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             }
             if (PtInRect(&themeRc, pt)) {
                 g_cfg.dark_mode = !g_cfg.dark_mode;
+                gui_update_theme();
                 ApplyDarkMode(hwnd);
-                gui_refresh();
+                // The settings window is a separate top-level popup, so it
+                // needs the new palette as well as the new DWM theme.
+                if (g_hwnd_catcher) {
+                    hk_update_theme();
+                    ApplyDarkMode(g_hwnd_catcher);
+                    InvalidateRect(g_hwnd_catcher, NULL, TRUE);
+                }
+                gui_save_theme();
+                for (int i = 0; i < GUI_BTN_COUNT; i++) {
+                    HWND hb = GetDlgItem(hwnd, kGuiButtons[i].id);
+                    if (hb) InvalidateRect(hb, NULL, TRUE);
+                }
+                InvalidateRect(hwnd, NULL, TRUE);
                 return 0;
             }
             return 0;
@@ -917,6 +883,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             g_cfg.gui_y = r.top;
             g_cfg.gui_w = r.right - r.left;
             g_cfg.gui_h = r.bottom - r.top;
+            gui_save_window_state();
 
             // Never PostQuitMessage here: the tray application owns this
             // window and must keep running after it is closed.
