@@ -1015,33 +1015,38 @@ static void region_dirty_rect(RECT *out) {
 }
 
 
-// HDR region overlay (D3D11 scRGB flip-model swap chain)
+// GPU region overlay (D3D11 flip-model swap chain, HDR and SDR)
 
-// GDI windows are 8-bit SDR. 
-// On an HDR monitor the frame is now presented untouched through an scRGB swap chain:
-// the dim layer, selection border and size label are drawn by a tiny shader in
-// the same linear scRGB space, so highlights above SDR stay HDR.
-//
-// SDR monitors, and any machine where the D3D setup fails, keep using the
-// original GDI overlay below. The saved region always comes from g_regionFrame,
-// so the file is unaffected by which preview path is used.
+// GDI windows are 8-bit SDR.
+// therefore flattened the captured scRGB FP16 frame into sRGB, so the preview
+// looked SDR even though the saved crop was still HDR (issue #7). The frame is
+// now presented through a real swap chain instead: scRGB FP16 on HDR monitors,
+// and B8G8R8A8 on SDR monitors. The dim layer, selection border and size label
+// are drawn by a tiny shader, so the HDR path keeps highlights above SDR white.
 
-#include <d3dcompiler.h>   // pD3DCompile typedef;
+// The same renderer is used on SDR monitors on purpose
+// it makes the GPU path testable on any display, and SDR output is bit-identical in intent to the old
+// GDI preview. Any machine where the D3D setup fails keeps using the original
+// GDI overlay. The saved region always comes from g_regionFrame, so the file is
+// unaffected by which preview path is used.
 
-#define HDR_OVERLAY_DIM      0.53f   // dim factor outside the selection
-#define HDR_OVERLAY_BORDER   2.0f    // accent border width, in physical pixels
-#define HDR_OVERLAY_UI_SCALE 2.5f    // sRGB UI colours -> linear scRGB
+#include <d3dcompiler.h>
+// pD3DCompile typedef; the DLL is loaded at runtime
+
+#define GPU_OVERLAY_DIM        0.53f   // dim factor outside the selection
+#define GPU_OVERLAY_BORDER     2.0f    // accent border width, in physical pixels
 
 typedef struct {
-    float sel[4]; // left, top, right, bottom (pixels)
+    float sel[4];         // left, top, right, bottom (pixels)
     float screen[2];
     float dim;
     float border;
     float label_pos[2];
     float label_size[2];
-    float ui_scale;
-    float pad[3]; // keep the constant buffer 16-byte aligned
-} HdrOverlayCB;
+    // border colour in the render target's colour space, plus the exponent
+    // used to lift the 8-bit sRGB label into that space (1.0 for SDR).
+    float border_color[4]; // r, g, b, label gamma
+} GpuOverlayCB;
 
 typedef struct {
     ID3D11Device             *device;
@@ -1057,20 +1062,21 @@ typedef struct {
     ID3D11Buffer             *cb;
     ID3D11SamplerState       *samp;
     int w, h;
+    int is_hdr;
     int label_w, label_h;
     int label_x, label_y;
     HDC label_dc;
     HBITMAP label_bmp;
     void *label_bits;
-} HdrOverlay;
+} GpuOverlay;
 
-static HdrOverlay g_hdr;
-static BOOL       g_hdrOverlayActive = FALSE;
+static GpuOverlay g_gpu;
+static BOOL       g_gpuOverlayActive = FALSE;
 
-static const char k_hdr_overlay_shader[] =
+static const char k_gpu_overlay_shader[] =
     "cbuffer P : register(b0) {\n"
     "  float4 sel; float2 scr; float dim; float bw;\n"
-    "  float2 lpos; float2 lsize; float ui; float3 pad0;\n"
+    "  float2 lpos; float2 lsize; float4 bc;\n"
     "};\n"
     "Texture2D<float4> Src : register(t0);\n"
     "Texture2D<float4> Lbl : register(t1);\n"
@@ -1078,11 +1084,16 @@ static const char k_hdr_overlay_shader[] =
     "struct V { float4 pos : SV_Position; };\n"
     "V VS(uint id : SV_VertexID) {\n"
     "  V o;\n"
-    "  o.pos = float4((id == 1) ? 3.0 : -1.0, (id == 2) ? 3.0 : -1.0, 0.0, 1.0);\n"
+    // Covers the viewport and must stay clockwise on the render target
+    // the default rasterizer state culls counter-clockwise faces,
+    // and a mirrored triangle is silently dropped, leaving the whole overlay black.
+    "  o.pos = float4((id == 1) ? 3.0 : -1.0, (id == 2) ? -3.0 : 1.0, 0.0, 1.0);\n"
     "  return o;\n"
     "}\n"
     "float4 PS(V i) : SV_Target {\n"
     "  float2 p = i.pos.xy;\n"
+    // SV_Position is already the pixel centre, so p/scr and (p-lpos)/lsize hit
+    // texel centres exactly for a 1:1 blit; no half-pixel correction needed.
     "  float3 c = Src.SampleLevel(Samp, p / scr, 0.0).rgb;\n"
     "  bool inside = (p.x >= sel.x && p.x < sel.z && p.y >= sel.y && p.y < sel.w);\n"
     "  if (!inside) c *= dim;\n"
@@ -1090,18 +1101,19 @@ static const char k_hdr_overlay_shader[] =
     "    float2 uv = (p - lpos) / lsize;\n"
     "    if (uv.x >= 0.0 && uv.x < 1.0 && uv.y >= 0.0 && uv.y < 1.0) {\n"
     "      float4 t = Lbl.SampleLevel(Samp, uv, 0.0);\n"
-    "      c = c * (1.0 - t.a) + (t.rgb * ui) * t.a;\n"
+    "      t.rgb = pow(max(t.rgb, 0.0), bc.w);\n"
+    "      c = c * (1.0 - t.a) + t.rgb * t.a;\n"
     "    }\n"
     "  }\n"
     "  if (inside && bw > 0.0) {\n"
     "    if (p.y < sel.y + bw || p.y >= sel.w - bw ||\n"
     "        p.x < sel.x + bw || p.x >= sel.z - bw)\n"
-    "      c = float3(0.0, 0.187, 0.673) * ui;\n"
+    "      c = bc.rgb;\n"
     "  }\n"
     "  return float4(c, 1.0);\n"
     "}\n";
 
-static ID3DBlob *hdr_overlay_compile(const char *entry, const char *target) {
+static ID3DBlob *gpu_overlay_compile(const char *entry, const char *target) {
     static HMODULE       compiler = NULL;
     static pD3DCompile   compile_fn = NULL;
     static int           tried = 0;
@@ -1114,16 +1126,16 @@ static ID3DBlob *hdr_overlay_compile(const char *entry, const char *target) {
         }
     }
     if (!compile_fn) {
-        dbg("hdr overlay: D3DCompile unavailable, keeping SDR preview");
+        dbg("gpu overlay: D3DCompile unavailable, keeping SDR preview");
         return NULL;
     }
 
     ID3DBlob *code = NULL;
     ID3DBlob *err = NULL;
-    HRESULT hr = compile_fn(k_hdr_overlay_shader, sizeof k_hdr_overlay_shader - 1,
+    HRESULT hr = compile_fn(k_gpu_overlay_shader, sizeof k_gpu_overlay_shader - 1,
                             NULL, NULL, NULL, entry, target, 0, 0, &code, &err);
     if (FAILED(hr)) {
-        dbg("hdr overlay: shader %s compile failed (0x%08lX) %s", entry, hr,
+        dbg("gpu overlay: shader %s compile failed (0x%08lX) %s", entry, hr,
             err ? (const char *)err->lpVtbl->GetBufferPointer(err) : "");
         if (err) err->lpVtbl->Release(err);
         if (code) code->lpVtbl->Release(code);
@@ -1133,34 +1145,35 @@ static ID3DBlob *hdr_overlay_compile(const char *entry, const char *target) {
     return code;
 }
 
-static void hdr_overlay_destroy(void) {
-    g_hdrOverlayActive = FALSE;
+static void gpu_overlay_destroy(void) {
+    g_gpuOverlayActive = FALSE;
 
-    if (g_hdr.ctx) g_hdr.ctx->lpVtbl->ClearState(g_hdr.ctx);
-    if (g_hdr.rtv)       g_hdr.rtv->lpVtbl->Release(g_hdr.rtv);
-    if (g_hdr.src_srv)   g_hdr.src_srv->lpVtbl->Release(g_hdr.src_srv);
-    if (g_hdr.src_tex)   g_hdr.src_tex->lpVtbl->Release(g_hdr.src_tex);
-    if (g_hdr.label_srv) g_hdr.label_srv->lpVtbl->Release(g_hdr.label_srv);
-    if (g_hdr.label_tex) g_hdr.label_tex->lpVtbl->Release(g_hdr.label_tex);
-    if (g_hdr.samp)      g_hdr.samp->lpVtbl->Release(g_hdr.samp);
-    if (g_hdr.cb)        g_hdr.cb->lpVtbl->Release(g_hdr.cb);
-    if (g_hdr.vs)        g_hdr.vs->lpVtbl->Release(g_hdr.vs);
-    if (g_hdr.ps)        g_hdr.ps->lpVtbl->Release(g_hdr.ps);
-    if (g_hdr.swap)      g_hdr.swap->lpVtbl->Release(g_hdr.swap);
-    if (g_hdr.ctx)       g_hdr.ctx->lpVtbl->Release(g_hdr.ctx);
-    if (g_hdr.device)    g_hdr.device->lpVtbl->Release(g_hdr.device);
+    if (g_gpu.ctx) g_gpu.ctx->lpVtbl->ClearState(g_gpu.ctx);
+    if (g_gpu.rtv)       g_gpu.rtv->lpVtbl->Release(g_gpu.rtv);
+    if (g_gpu.src_srv)   g_gpu.src_srv->lpVtbl->Release(g_gpu.src_srv);
+    if (g_gpu.src_tex)   g_gpu.src_tex->lpVtbl->Release(g_gpu.src_tex);
+    if (g_gpu.label_srv) g_gpu.label_srv->lpVtbl->Release(g_gpu.label_srv);
+    if (g_gpu.label_tex) g_gpu.label_tex->lpVtbl->Release(g_gpu.label_tex);
+    if (g_gpu.samp)      g_gpu.samp->lpVtbl->Release(g_gpu.samp);
+    if (g_gpu.cb)        g_gpu.cb->lpVtbl->Release(g_gpu.cb);
+    if (g_gpu.vs)        g_gpu.vs->lpVtbl->Release(g_gpu.vs);
+    if (g_gpu.ps)        g_gpu.ps->lpVtbl->Release(g_gpu.ps);
+    if (g_gpu.swap)      g_gpu.swap->lpVtbl->Release(g_gpu.swap);
+    if (g_gpu.ctx)       g_gpu.ctx->lpVtbl->Release(g_gpu.ctx);
+    if (g_gpu.device)    g_gpu.device->lpVtbl->Release(g_gpu.device);
 
-    if (g_hdr.label_dc)  { DeleteDC(g_hdr.label_dc); g_hdr.label_dc = NULL; }
-    if (g_hdr.label_bmp) { DeleteObject(g_hdr.label_bmp); g_hdr.label_bmp = NULL; }
+    if (g_gpu.label_dc)  { DeleteDC(g_gpu.label_dc); g_gpu.label_dc = NULL; }
+    if (g_gpu.label_bmp) { DeleteObject(g_gpu.label_bmp); g_gpu.label_bmp = NULL; }
 
-    ZeroMemory(&g_hdr, sizeof g_hdr);
+    ZeroMemory(&g_gpu, sizeof g_gpu);
 }
 
-// Upload the captured scRGB FP16 frame as a 4-channel texture. The capture is
-// 6 bytes/px (RGB), so the alpha channel is filled with 1.0 half-float.
-static int hdr_overlay_upload_source(void) {
-    if (!g_hdr.device || !g_hdr.ctx || !g_regionFrame.bits ||
-        !g_regionFrame.is_hdr || g_regionFrame.w <= 0 || g_regionFrame.h <= 0) {
+// Upload the captured frame as a 4-channel texture. HDR is RGB16F scRGB
+// (6 bytes/px) and becomes RGBA16F with A = 1.0h; SDR is RGB24 and becomes
+// BGRA8 with A = 255.
+static int gpu_overlay_upload_source(void) {
+    if (!g_gpu.device || !g_gpu.ctx || !g_regionFrame.bits ||
+        g_regionFrame.w <= 0 || g_regionFrame.h <= 0) {
         return 0;
     }
 
@@ -1170,54 +1183,70 @@ static int hdr_overlay_upload_source(void) {
     td.Height = (UINT)g_regionFrame.h;
     td.MipLevels = 1;
     td.ArraySize = 1;
-    td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    td.Format = g_gpu.is_hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT
+                             : DXGI_FORMAT_B8G8R8A8_UNORM;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DYNAMIC;
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
     td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
-    if (FAILED(g_hdr.device->lpVtbl->CreateTexture2D(g_hdr.device, &td, NULL, &g_hdr.src_tex))) {
-        dbg("hdr overlay: CreateTexture2D(source) failed");
+    if (FAILED(g_gpu.device->lpVtbl->CreateTexture2D(g_gpu.device, &td, NULL, &g_gpu.src_tex))) {
+        dbg("gpu overlay: CreateTexture2D(source) failed");
         return 0;
     }
 
     D3D11_MAPPED_SUBRESOURCE map;
-    if (FAILED(g_hdr.ctx->lpVtbl->Map(g_hdr.ctx, (ID3D11Resource *)g_hdr.src_tex,
+    if (FAILED(g_gpu.ctx->lpVtbl->Map(g_gpu.ctx, (ID3D11Resource *)g_gpu.src_tex,
                                       0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
-        dbg("hdr overlay: Map(source) failed");
+        dbg("gpu overlay: Map(source) failed");
         return 0;
     }
 
-    const uint16_t *src = (const uint16_t *)g_regionFrame.bits;
-    for (int y = 0; y < g_regionFrame.h; y++) {
-        uint16_t *dst = (uint16_t *)((uint8_t *)map.pData + (size_t)y * map.RowPitch);
-        for (int x = 0; x < g_regionFrame.w; x++) {
-            dst[0] = src[0];   // R
-            dst[1] = src[1];   // G
-            dst[2] = src[2];   // B
-            dst[3] = 0x3C00;   // A = 1.0h
-            dst += 4;
-            src += 3;
+    if (g_gpu.is_hdr) {
+        const uint16_t *src = (const uint16_t *)g_regionFrame.bits;
+        for (int y = 0; y < g_regionFrame.h; y++) {
+            uint16_t *dst = (uint16_t *)((uint8_t *)map.pData + (size_t)y * map.RowPitch);
+            for (int x = 0; x < g_regionFrame.w; x++) {
+                dst[0] = src[0];   // R
+                dst[1] = src[1];   // G
+                dst[2] = src[2];   // B
+                dst[3] = 0x3C00;   // A = 1.0h
+                dst += 4;
+                src += 3;
+            }
+        }
+    } else {
+        const uint8_t *src = (const uint8_t *)g_regionFrame.bits;
+        for (int y = 0; y < g_regionFrame.h; y++) {
+            uint8_t *dst = (uint8_t *)map.pData + (size_t)y * map.RowPitch;
+            for (int x = 0; x < g_regionFrame.w; x++) {
+                dst[0] = src[2];   // B
+                dst[1] = src[1];   // G
+                dst[2] = src[0];   // R
+                dst[3] = 255;      // A
+                dst += 4;
+                src += 3;
+            }
         }
     }
-    g_hdr.ctx->lpVtbl->Unmap(g_hdr.ctx, (ID3D11Resource *)g_hdr.src_tex, 0);
+    g_gpu.ctx->lpVtbl->Unmap(g_gpu.ctx, (ID3D11Resource *)g_gpu.src_tex, 0);
 
     D3D11_SHADER_RESOURCE_VIEW_DESC svd;
     ZeroMemory(&svd, sizeof svd);
     svd.Format = td.Format;
     svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     svd.Texture2D.MipLevels = 1;
-    if (FAILED(g_hdr.device->lpVtbl->CreateShaderResourceView(
-            g_hdr.device, (ID3D11Resource *)g_hdr.src_tex, &svd, &g_hdr.src_srv))) {
-        dbg("hdr overlay: CreateShaderResourceView(source) failed");
+    if (FAILED(g_gpu.device->lpVtbl->CreateShaderResourceView(
+            g_gpu.device, (ID3D11Resource *)g_gpu.src_tex, &svd, &g_gpu.src_srv))) {
+        dbg("gpu overlay: CreateShaderResourceView(source) failed");
         return 0;
     }
     return 1;
 }
 
-static int hdr_overlay_create_label_texture(int w, int h, const void *bits) {
-    if (g_hdr.label_srv) { g_hdr.label_srv->lpVtbl->Release(g_hdr.label_srv); g_hdr.label_srv = NULL; }
-    if (g_hdr.label_tex) { g_hdr.label_tex->lpVtbl->Release(g_hdr.label_tex); g_hdr.label_tex = NULL; }
+static int gpu_overlay_create_label_texture(int w, int h, const void *bits) {
+    if (g_gpu.label_srv) { g_gpu.label_srv->lpVtbl->Release(g_gpu.label_srv); g_gpu.label_srv = NULL; }
+    if (g_gpu.label_tex) { g_gpu.label_tex->lpVtbl->Release(g_gpu.label_tex); g_gpu.label_tex = NULL; }
 
     D3D11_TEXTURE2D_DESC td;
     ZeroMemory(&td, sizeof td);
@@ -1235,9 +1264,9 @@ static int hdr_overlay_create_label_texture(int w, int h, const void *bits) {
     init.pSysMem = bits;
     init.SysMemPitch = (UINT)td.Width * 4;
 
-    if (FAILED(g_hdr.device->lpVtbl->CreateTexture2D(g_hdr.device, &td,
-                                                     bits ? &init : NULL, &g_hdr.label_tex))) {
-        dbg("hdr overlay: CreateTexture2D(label) failed");
+    if (FAILED(g_gpu.device->lpVtbl->CreateTexture2D(g_gpu.device, &td,
+                                                     bits ? &init : NULL, &g_gpu.label_tex))) {
+        dbg("gpu overlay: CreateTexture2D(label) failed");
         return 0;
     }
 
@@ -1246,9 +1275,9 @@ static int hdr_overlay_create_label_texture(int w, int h, const void *bits) {
     svd.Format = td.Format;
     svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
     svd.Texture2D.MipLevels = 1;
-    if (FAILED(g_hdr.device->lpVtbl->CreateShaderResourceView(
-            g_hdr.device, (ID3D11Resource *)g_hdr.label_tex, &svd, &g_hdr.label_srv))) {
-        dbg("hdr overlay: CreateShaderResourceView(label) failed");
+    if (FAILED(g_gpu.device->lpVtbl->CreateShaderResourceView(
+            g_gpu.device, (ID3D11Resource *)g_gpu.label_tex, &svd, &g_gpu.label_srv))) {
+        dbg("gpu overlay: CreateShaderResourceView(label) failed");
         return 0;
     }
     return 1;
@@ -1257,8 +1286,8 @@ static int hdr_overlay_create_label_texture(int w, int h, const void *bits) {
 // Render the "W x H" readout into a small BGRA DIB (dark box + white text) and
 // upload it. GDI leaves the alpha bytes alone, so the box alpha can be seeded
 // in memory before TextOutW draws into it.
-static void hdr_overlay_update_label(const RECT *sel) {
-    if (!g_hdr.device || !g_hdr.ctx || !sel) return;
+static void gpu_overlay_update_label(const RECT *sel) {
+    if (!g_gpu.device || !g_gpu.ctx || !sel) return;
 
     int textW = (int)(sel->right - sel->left);
     int textH = (int)(sel->bottom - sel->top);
@@ -1284,9 +1313,9 @@ static void hdr_overlay_update_label(const RECT *sel) {
     if (h < 1) h = 1;
 
     int recreated = 0;
-    if (w != g_hdr.label_w || h != g_hdr.label_h || !g_hdr.label_bits) {
-        if (g_hdr.label_dc)  { DeleteDC(g_hdr.label_dc); g_hdr.label_dc = NULL; }
-        if (g_hdr.label_bmp) { DeleteObject(g_hdr.label_bmp); g_hdr.label_bmp = NULL; }
+    if (w != g_gpu.label_w || h != g_gpu.label_h || !g_gpu.label_bits) {
+        if (g_gpu.label_dc)  { DeleteDC(g_gpu.label_dc); g_gpu.label_dc = NULL; }
+        if (g_gpu.label_bmp) { DeleteObject(g_gpu.label_bmp); g_gpu.label_bmp = NULL; }
 
         HDC screen = GetDC(NULL);
         BITMAPINFO bi;
@@ -1299,23 +1328,23 @@ static void hdr_overlay_update_label(const RECT *sel) {
         bi.bmiHeader.biCompression = BI_RGB;
 
         void *bits = NULL;
-        g_hdr.label_bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
-        g_hdr.label_dc = CreateCompatibleDC(screen);
+        g_gpu.label_bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+        g_gpu.label_dc = CreateCompatibleDC(screen);
         ReleaseDC(NULL, screen);
 
-        if (!g_hdr.label_bmp || !g_hdr.label_dc || !bits) {
-            dbg("hdr overlay: label DIB creation failed");
+        if (!g_gpu.label_bmp || !g_gpu.label_dc || !bits) {
+            dbg("gpu overlay: label DIB creation failed");
             return;
         }
 
-        SelectObject(g_hdr.label_dc, g_hdr.label_bmp);
-        g_hdr.label_bits = bits;
-        g_hdr.label_w = w;
-        g_hdr.label_h = h;
+        SelectObject(g_gpu.label_dc, g_gpu.label_bmp);
+        g_gpu.label_bits = bits;
+        g_gpu.label_w = w;
+        g_gpu.label_h = h;
         recreated = 1;
     }
 
-    uint8_t *px = (uint8_t *)g_hdr.label_bits;
+    uint8_t *px = (uint8_t *)g_gpu.label_bits;
     size_t npix = (size_t)w * h;
     for (size_t i = 0; i < npix; i++, px += 4) {
         px[0] = 28;  // B
@@ -1324,81 +1353,114 @@ static void hdr_overlay_update_label(const RECT *sel) {
         px[3] = 215; // A
     }
 
-    SelectObject(g_hdr.label_dc, font);
-    SetBkMode(g_hdr.label_dc, TRANSPARENT);
-    SetTextColor(g_hdr.label_dc, RGB(255, 255, 255));
-    TextOutW(g_hdr.label_dc, pad, pad, text, len);
+    SelectObject(g_gpu.label_dc, font);
+    SetBkMode(g_gpu.label_dc, TRANSPARENT);
+    SetTextColor(g_gpu.label_dc, RGB(255, 255, 255));
+    TextOutW(g_gpu.label_dc, pad, pad, text, len);
+
+    // GDI writes the glyph RGB but leaves the alpha bytes undefined, so the
+    // readout came out hollow/haloed once the texture was blended. Keep the box
+    // translucent and make every inked pixel fully opaque; antialiased edges
+    // keep their grey in RGB, so they still blend smoothly against the frame.
+    px = (uint8_t *)g_gpu.label_bits;
+    for (size_t i = 0; i < npix; i++, px += 4) {
+        int ink = px[0] + px[1] + px[2];
+        px[3] = (ink > 28 * 3 + 2) ? 255 : 215;
+    }
 
     if (recreated) {
-        if (!hdr_overlay_create_label_texture(w, h, g_hdr.label_bits)) return;
+        if (!gpu_overlay_create_label_texture(w, h, g_gpu.label_bits)) return;
     } else {
-        g_hdr.ctx->lpVtbl->UpdateSubresource(g_hdr.ctx, (ID3D11Resource *)g_hdr.label_tex,
-                                             0, NULL, g_hdr.label_bits, (UINT)w * 4, 0);
+        g_gpu.ctx->lpVtbl->UpdateSubresource(g_gpu.ctx, (ID3D11Resource *)g_gpu.label_tex,
+                                             0, NULL, g_gpu.label_bits, (UINT)w * 4, 0);
     }
 
     int textX = sel->left + 8;
     int textY = (sel->top - (tm.tmHeight > 0 ? tm.tmHeight : 16) - 8) < 0
                 ? sel->top + 8
                 : sel->top - (tm.tmHeight > 0 ? tm.tmHeight : 16) - 8;
-    g_hdr.label_x = textX - pad;
-    g_hdr.label_y = textY - pad;
+    g_gpu.label_x = textX - pad;
+    g_gpu.label_y = textY - pad;
 }
 
-static void hdr_overlay_present(void) {
-    if (!g_hdrOverlayActive || !g_hdr.ctx || !g_hdr.swap) return;
+static void gpu_overlay_present(void) {
+    if (!g_gpuOverlayActive || !g_gpu.ctx || !g_gpu.swap) return;
 
     RECT sel;
     region_sel_rect(&sel);
     BOOL has_sel = region_has_selection() && !IsRectEmpty(&sel);
 
-    HdrOverlayCB cb;
+    GpuOverlayCB cb;
     ZeroMemory(&cb, sizeof cb);
-    cb.screen[0] = (float)g_hdr.w;
-    cb.screen[1] = (float)g_hdr.h;
-    cb.dim = HDR_OVERLAY_DIM;
-    cb.border = HDR_OVERLAY_BORDER;
-    cb.ui_scale = HDR_OVERLAY_UI_SCALE;
+    cb.screen[0] = (float)g_gpu.w;
+    cb.screen[1] = (float)g_gpu.h;
+    cb.dim = GPU_OVERLAY_DIM;
+    cb.border = GPU_OVERLAY_BORDER;
+    // UI colours are authored in sRGB. The SDR target is sRGB, so they pass
+    // through unchanged; scRGB is linear, so the border and the label both need
+    // the sRGB -> linear lift.
+    if (g_gpu.is_hdr) {
+        cb.border_color[0] = 0.0f;
+        cb.border_color[1] = 0.187f;   // sRGB(0, 120, 215) in linear scRGB
+        cb.border_color[2] = 0.673f;
+        cb.border_color[3] = 2.2f;
+    } else {
+        cb.border_color[0] = 0.0f;
+        cb.border_color[1] = 120.0f / 255.0f;
+        cb.border_color[2] = 215.0f / 255.0f;
+        cb.border_color[3] = 1.0f;
+    }
 
     if (has_sel) {
-        hdr_overlay_update_label(&sel);
+        gpu_overlay_update_label(&sel);
         cb.sel[0] = (float)sel.left;
         cb.sel[1] = (float)sel.top;
         cb.sel[2] = (float)sel.right;
         cb.sel[3] = (float)sel.bottom;
-        cb.label_pos[0] = (float)g_hdr.label_x;
-        cb.label_pos[1] = (float)g_hdr.label_y;
-        cb.label_size[0] = (float)g_hdr.label_w;
-        cb.label_size[1] = (float)g_hdr.label_h;
+        cb.label_pos[0] = (float)g_gpu.label_x;
+        cb.label_pos[1] = (float)g_gpu.label_y;
+        cb.label_size[0] = (float)g_gpu.label_w;
+        cb.label_size[1] = (float)g_gpu.label_h;
     }
 
-    g_hdr.ctx->lpVtbl->UpdateSubresource(g_hdr.ctx, (ID3D11Resource *)g_hdr.cb,
-                                         0, NULL, &cb, 0, 0);
+    // Constant buffers created with D3D11_USAGE_DYNAMIC must be written with
+    // Map/Unmap; UpdateSubresource is not valid for them
+    // (the runtime leaves the buffer undefined, which made the overlay render solid black).
+    D3D11_MAPPED_SUBRESOURCE cbmap;
+    if (SUCCEEDED(g_gpu.ctx->lpVtbl->Map(g_gpu.ctx, (ID3D11Resource *)g_gpu.cb,
+                                          0, D3D11_MAP_WRITE_DISCARD, 0, &cbmap))) {
+        memcpy(cbmap.pData, &cb, sizeof cb);
+        g_gpu.ctx->lpVtbl->Unmap(g_gpu.ctx, (ID3D11Resource *)g_gpu.cb, 0);
+    } else {
+        dbg("gpu overlay: Map(constant buffer) failed");
+    }
 
     D3D11_VIEWPORT vp;
     ZeroMemory(&vp, sizeof vp);
-    vp.Width = (float)g_hdr.w;
-    vp.Height = (float)g_hdr.h;
+    vp.Width = (float)g_gpu.w;
+    vp.Height = (float)g_gpu.h;
     vp.MaxDepth = 1.0f;
 
-    ID3D11ShaderResourceView *srvs[2] = { g_hdr.src_srv, g_hdr.label_srv };
-    g_hdr.ctx->lpVtbl->OMSetRenderTargets(g_hdr.ctx, 1, &g_hdr.rtv, NULL);
-    g_hdr.ctx->lpVtbl->RSSetViewports(g_hdr.ctx, 1, &vp);
-    g_hdr.ctx->lpVtbl->IASetPrimitiveTopology(g_hdr.ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    g_hdr.ctx->lpVtbl->VSSetShader(g_hdr.ctx, g_hdr.vs, NULL, 0);
-    g_hdr.ctx->lpVtbl->PSSetShader(g_hdr.ctx, g_hdr.ps, NULL, 0);
-    g_hdr.ctx->lpVtbl->PSSetConstantBuffers(g_hdr.ctx, 0, 1, &g_hdr.cb);
-    g_hdr.ctx->lpVtbl->PSSetShaderResources(g_hdr.ctx, 0, 2, srvs);
-    g_hdr.ctx->lpVtbl->PSSetSamplers(g_hdr.ctx, 0, 1, &g_hdr.samp);
-    g_hdr.ctx->lpVtbl->Draw(g_hdr.ctx, 3, 0);
+    ID3D11ShaderResourceView *srvs[2] = { g_gpu.src_srv, g_gpu.label_srv };
+    g_gpu.ctx->lpVtbl->OMSetRenderTargets(g_gpu.ctx, 1, &g_gpu.rtv, NULL);
+    g_gpu.ctx->lpVtbl->RSSetViewports(g_gpu.ctx, 1, &vp);
+    g_gpu.ctx->lpVtbl->IASetPrimitiveTopology(g_gpu.ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_gpu.ctx->lpVtbl->VSSetShader(g_gpu.ctx, g_gpu.vs, NULL, 0);
+    g_gpu.ctx->lpVtbl->PSSetShader(g_gpu.ctx, g_gpu.ps, NULL, 0);
+    g_gpu.ctx->lpVtbl->PSSetConstantBuffers(g_gpu.ctx, 0, 1, &g_gpu.cb);
+    g_gpu.ctx->lpVtbl->PSSetShaderResources(g_gpu.ctx, 0, 2, srvs);
+    g_gpu.ctx->lpVtbl->PSSetSamplers(g_gpu.ctx, 0, 1, &g_gpu.samp);
+    g_gpu.ctx->lpVtbl->Draw(g_gpu.ctx, 3, 0);
 
-    HRESULT hr = g_hdr.swap->lpVtbl->Present(g_hdr.swap, 1, 0);
+    HRESULT hr = g_gpu.swap->lpVtbl->Present(g_gpu.swap, 1, 0);
     if (FAILED(hr)) {
-        dbg("hdr overlay: Present failed hr=0x%08lX", hr);
+        dbg("gpu overlay: Present failed hr=0x%08lX", hr);
     }
 }
 
-static int hdr_overlay_init(HWND hwnd, HMONITOR monitor, int w, int h) {
-    ZeroMemory(&g_hdr, sizeof g_hdr);
+static int gpu_overlay_init(HWND hwnd, HMONITOR monitor, int w, int h, int is_hdr) {
+    ZeroMemory(&g_gpu, sizeof g_gpu);
+    g_gpu.is_hdr = is_hdr;
 
     IDXGIFactory1 *factory1 = NULL;
     IDXGIFactory2 *factory2 = NULL;
@@ -1413,11 +1475,11 @@ static int hdr_overlay_init(HWND hwnd, HMONITOR monitor, int w, int h) {
     // Windows 7: CreateDXGIFactory2 is Windows 8.1+, so QI for it instead of
     // importing it statically. QI simply fails on older systems -> GDI path.
     if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&factory1))) {
-        dbg("hdr overlay: CreateDXGIFactory1 failed");
+        dbg("gpu overlay: CreateDXGIFactory1 failed");
         goto done;
     }
     if (FAILED(factory1->lpVtbl->QueryInterface(factory1, &IID_IDXGIFactory2, (void **)&factory2))) {
-        dbg("hdr overlay: IDXGIFactory2 unavailable");
+        dbg("gpu overlay: IDXGIFactory2 unavailable");
         goto done;
     }
 
@@ -1442,7 +1504,7 @@ static int hdr_overlay_init(HWND hwnd, HMONITOR monitor, int w, int h) {
         if (!adapter) cand->lpVtbl->Release(cand);
     }
     if (!adapter) {
-        dbg("hdr overlay: no adapter for monitor");
+        dbg("gpu overlay: no adapter for monitor");
         goto done;
     }
 
@@ -1452,24 +1514,24 @@ static int hdr_overlay_init(HWND hwnd, HMONITOR monitor, int w, int h) {
     D3D_FEATURE_LEVEL got;
     if (FAILED(D3D11CreateDevice((IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL,
                                  D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 3,
-                                 D3D11_SDK_VERSION, &g_hdr.device, &got, &g_hdr.ctx))) {
-        dbg("hdr overlay: D3D11CreateDevice failed");
+                                 D3D11_SDK_VERSION, &g_gpu.device, &got, &g_gpu.ctx))) {
+        dbg("gpu overlay: D3D11CreateDevice failed");
         goto done;
     }
 
-    vs_blob = hdr_overlay_compile("VS", "vs_4_0");
-    ps_blob = hdr_overlay_compile("PS", "ps_4_0");
+    vs_blob = gpu_overlay_compile("VS", "vs_4_0");
+    ps_blob = gpu_overlay_compile("PS", "ps_4_0");
     if (!vs_blob || !ps_blob) goto done;
-    if (FAILED(g_hdr.device->lpVtbl->CreateVertexShader(g_hdr.device,
+    if (FAILED(g_gpu.device->lpVtbl->CreateVertexShader(g_gpu.device,
             vs_blob->lpVtbl->GetBufferPointer(vs_blob),
-            vs_blob->lpVtbl->GetBufferSize(vs_blob), NULL, &g_hdr.vs))) {
-        dbg("hdr overlay: CreateVertexShader failed");
+            vs_blob->lpVtbl->GetBufferSize(vs_blob), NULL, &g_gpu.vs))) {
+        dbg("gpu overlay: CreateVertexShader failed");
         goto done;
     }
-    if (FAILED(g_hdr.device->lpVtbl->CreatePixelShader(g_hdr.device,
+    if (FAILED(g_gpu.device->lpVtbl->CreatePixelShader(g_gpu.device,
             ps_blob->lpVtbl->GetBufferPointer(ps_blob),
-            ps_blob->lpVtbl->GetBufferSize(ps_blob), NULL, &g_hdr.ps))) {
-        dbg("hdr overlay: CreatePixelShader failed");
+            ps_blob->lpVtbl->GetBufferSize(ps_blob), NULL, &g_gpu.ps))) {
+        dbg("gpu overlay: CreatePixelShader failed");
         goto done;
     }
     vs_blob->lpVtbl->Release(vs_blob); vs_blob = NULL;
@@ -1479,7 +1541,7 @@ static int hdr_overlay_init(HWND hwnd, HMONITOR monitor, int w, int h) {
     ZeroMemory(&sd, sizeof sd);
     sd.Width = (UINT)w;
     sd.Height = (UINT)h;
-    sd.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    sd.Format = is_hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
     sd.SampleDesc.Count = 1;
     sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     sd.BufferCount = 2;
@@ -1488,43 +1550,51 @@ static int hdr_overlay_init(HWND hwnd, HMONITOR monitor, int w, int h) {
     sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 
     if (FAILED(factory2->lpVtbl->CreateSwapChainForHwnd(
-            factory2, (IUnknown *)g_hdr.device, hwnd, &sd, NULL, NULL, &swap1))) {
-        dbg("hdr overlay: CreateSwapChainForHwnd failed");
+            factory2, (IUnknown *)g_gpu.device, hwnd, &sd, NULL, NULL, &swap1))) {
+        dbg("gpu overlay: CreateSwapChainForHwnd failed");
         goto done;
     }
-    if (FAILED(swap1->lpVtbl->QueryInterface(swap1, &IID_IDXGISwapChain3, (void **)&g_hdr.swap))) {
-        dbg("hdr overlay: IDXGISwapChain3 unavailable");
+    if (FAILED(swap1->lpVtbl->QueryInterface(swap1, &IID_IDXGISwapChain3, (void **)&g_gpu.swap))) {
+        dbg("gpu overlay: IDXGISwapChain3 unavailable");
         goto done;
     }
     factory2->lpVtbl->MakeWindowAssociation(factory2, hwnd, DXGI_MWA_NO_ALT_ENTER);
 
-    // scRGB: linear, full-range, sRGB/Rec.709 primaries. 
-    // This is the same space the desktop duplication frame is captured in, so values pass through unchanged and >1.0 highlights stay HDR.
-    if (FAILED(g_hdr.swap->lpVtbl->SetColorSpace1(
-            g_hdr.swap, DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
-        dbg("hdr overlay: SetColorSpace1(scRGB) failed");
-        goto done;
+    if (is_hdr) {
+        // scRGB: linear, full-range, sRGB/Rec.709 primaries. This is the same
+        // space the desktop duplication frame is captured in, so values pass
+        // through unchanged and >1.0 highlights stay HDR.
+        if (FAILED(g_gpu.swap->lpVtbl->SetColorSpace1(
+                g_gpu.swap, DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
+            dbg("gpu overlay: SetColorSpace1(scRGB) failed");
+            goto done;
+        }
+    } else {
+        // sRGB is the default for a B8G8R8A8 flip chain; request it explicitly
+        // but do not abort if the driver refuses an otherwise working chain.
+        g_gpu.swap->lpVtbl->SetColorSpace1(
+            g_gpu.swap, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
     }
 
-    if (FAILED(g_hdr.swap->lpVtbl->GetBuffer(g_hdr.swap, 0,
+    if (FAILED(g_gpu.swap->lpVtbl->GetBuffer(g_gpu.swap, 0,
             &IID_ID3D11Texture2D, (void **)&backbuffer))) {
-        dbg("hdr overlay: GetBuffer failed");
+        dbg("gpu overlay: GetBuffer failed");
         goto done;
     }
-    if (FAILED(g_hdr.device->lpVtbl->CreateRenderTargetView(
-            g_hdr.device, (ID3D11Resource *)backbuffer, NULL, &g_hdr.rtv))) {
-        dbg("hdr overlay: CreateRenderTargetView failed");
+    if (FAILED(g_gpu.device->lpVtbl->CreateRenderTargetView(
+            g_gpu.device, (ID3D11Resource *)backbuffer, NULL, &g_gpu.rtv))) {
+        dbg("gpu overlay: CreateRenderTargetView failed");
         goto done;
     }
 
     D3D11_BUFFER_DESC bd;
     ZeroMemory(&bd, sizeof bd);
-    bd.ByteWidth = sizeof(HdrOverlayCB);
+    bd.ByteWidth = sizeof(GpuOverlayCB);
     bd.Usage = D3D11_USAGE_DYNAMIC;
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    if (FAILED(g_hdr.device->lpVtbl->CreateBuffer(g_hdr.device, &bd, NULL, &g_hdr.cb))) {
-        dbg("hdr overlay: CreateBuffer(cb) failed");
+    if (FAILED(g_gpu.device->lpVtbl->CreateBuffer(g_gpu.device, &bd, NULL, &g_gpu.cb))) {
+        dbg("gpu overlay: CreateBuffer(cb) failed");
         goto done;
     }
 
@@ -1535,22 +1605,23 @@ static int hdr_overlay_init(HWND hwnd, HMONITOR monitor, int w, int h) {
     smd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
     smd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     smd.MaxLOD = D3D11_FLOAT32_MAX;
-    if (FAILED(g_hdr.device->lpVtbl->CreateSamplerState(g_hdr.device, &smd, &g_hdr.samp))) {
-        dbg("hdr overlay: CreateSamplerState failed");
+    if (FAILED(g_gpu.device->lpVtbl->CreateSamplerState(g_gpu.device, &smd, &g_gpu.samp))) {
+        dbg("gpu overlay: CreateSamplerState failed");
         goto done;
     }
 
-    if (!hdr_overlay_upload_source()) goto done;
+    if (!gpu_overlay_upload_source()) goto done;
 
-    // A 1x1 transparent label keeps the shader's second texture bound even before a selection exists.
+    // A 1x1 transparent label keeps the shader's second texture bound even
+    // before a selection exists.
     {
         uint32_t transparent = 0;
-        if (!hdr_overlay_create_label_texture(1, 1, &transparent)) goto done;
+        if (!gpu_overlay_create_label_texture(1, 1, &transparent)) goto done;
     }
 
-    g_hdr.w = w;
-    g_hdr.h = h;
-    g_hdrOverlayActive = TRUE;
+    g_gpu.w = w;
+    g_gpu.h = h;
+    g_gpuOverlayActive = TRUE;
     ok = 1;
 
 done:
@@ -1562,7 +1633,7 @@ done:
     if (factory1) factory1->lpVtbl->Release(factory1);
     if (adapter) adapter->lpVtbl->Release(adapter);
 
-    if (!ok) hdr_overlay_destroy();
+    if (!ok) gpu_overlay_destroy();
     return ok;
 }
 
@@ -1609,8 +1680,8 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
 
-            if (g_hdrOverlayActive) {
-                hdr_overlay_present();
+            if (g_gpuOverlayActive) {
+                gpu_overlay_present();
                 EndPaint(hwnd, &ps);
                 return 0;
             }
@@ -1699,7 +1770,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_rcSel.bottom = g_rcSel.top;
             SetCapture(hwnd);
 
-            if (g_hdrOverlayActive) {
+            if (g_gpuOverlayActive) {
                 InvalidateRect(hwnd, NULL, FALSE);
             } else {
                 RECT dirty;
@@ -1714,9 +1785,9 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 int ny = GET_Y_LPARAM(lp);
                 if (nx == g_rcSel.right && ny == g_rcSel.bottom) return 0;
 
-                if (g_hdrOverlayActive) {
+                if (g_gpuOverlayActive) {
                     // The D3D path presents the whole frame anyway;
-                    // a full invalidation also covers the label box exactly.
+                    // A full invalidation also covers the label box exactly.
                     g_rcSel.right = nx;
                     g_rcSel.bottom = ny;
                     InvalidateRect(hwnd, NULL, FALSE);
@@ -1789,7 +1860,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_isRegionCapturing = FALSE;
             begin_mouse_grace(); // Start the 500ms block grace period
 // DO NOT call uninstall_mouse_hook() here anymore!
-            hdr_overlay_destroy();
+            gpu_overlay_destroy();
             if (g_hdcBack)  { DeleteDC(g_hdcBack); g_hdcBack = NULL; }
             if (g_hbmBack)  { DeleteObject(g_hbmBack); g_hbmBack = NULL; }
             if (g_hdcDim)   { DeleteDC(g_hdcDim); g_hdcDim = NULL; }
@@ -1814,8 +1885,8 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-// Give the overlay focus so it receives WM_KEYDOWN (Escape) and start the mouse hook. 
-// AttachThreadInput bypasses the strict SetForegroundWindow rules.
+// Give the overlay focus so it receives WM_KEYDOWN (Escape) and start the
+// mouse hook. AttachThreadInput bypasses the strict SetForegroundWindow rules.
 static void show_region_overlay(void) {
     ShowWindow(g_hwndRegion, SW_SHOW);
 
@@ -1921,18 +1992,19 @@ static void start_region_capture(void) {
         return;
     }
 
-    // HDR monitors get a real scRGB swap chain so the preview keeps the
-    // captured HDR data instead of an 8-bit SDR approximation.
+    // Use the GPU overlay on both HDR and SDR monitors. 
+    // HDR keeps the captured scRGB FP16 data instead of an 8-bit approximation
+    // SDR runs through the same presenter so the renderer can be verified on any display.
     // The saved crop is the same frame either way.
-    if (g_regionFrame.is_hdr) {
-        if (hdr_overlay_init(g_hwndRegion, target_monitor, g_screenW, g_screenH)) {
-            dbg("start_region_capture: HDR scRGB overlay active");
-            ReleaseDC(NULL, hdcScreen);
-            show_region_overlay();
-            return;
-        }
-        dbg("start_region_capture: HDR overlay unavailable, using SDR GDI preview");
+    if (gpu_overlay_init(g_hwndRegion, target_monitor, g_screenW, g_screenH,
+                         g_regionFrame.is_hdr)) {
+        dbg("start_region_capture: GPU overlay active (%s)",
+            g_regionFrame.is_hdr ? "HDR scRGB" : "SDR sRGB");
+        ReleaseDC(NULL, hdcScreen);
+        show_region_overlay();
+        return;
     }
+    dbg("start_region_capture: GPU overlay unavailable, using GDI preview");
 
     // Original screenshot: SDR preview of the captured frame on the overlay.
     g_hdcMem = CreateCompatibleDC(hdcScreen);
