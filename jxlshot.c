@@ -134,7 +134,7 @@ static void ensure_default_ini(void) {
     wchar_t val_debug[64] = L"0", val_lossless[64] = L"1", val_distance[64] = L"1.0", val_effort[64] = L"8";
     wchar_t val_export[MAX_PATH] = L"", val_hk_fvk[64] = L"44", val_hk_fmod[64] = L"0";
     wchar_t val_hk_rvk[64] = L"44", val_hk_rmod[64] = L"2", val_blank[64] = L"2";
-    wchar_t val_multi[64] = L"focusmonitor", val_hook[64] = L"0";
+    wchar_t val_multi[64] = L"focusmonitor", val_hook[64] = L"0", val_dark[64] = L"1";
 
     // Case 1: file exists
     if (GetFileAttributesW(ini_path) != INVALID_FILE_ATTRIBUTES) {
@@ -151,6 +151,7 @@ static void ensure_default_ini(void) {
         ini_ensure_key(ini_path, L"BlankCheckMode",  L"2");
         ini_ensure_key(ini_path, L"MultiMonitor",    L"focusmonitor");
         ini_ensure_key(ini_path, L"DisableKeyboardHook", L"0");
+        ini_ensure_key(ini_path, L"DarkMode", L"1");
 
         // Check if the INI version is older than the current app version
         wchar_t current_version[64];
@@ -170,6 +171,7 @@ static void ensure_default_ini(void) {
             GetPrivateProfileStringW(L"Capture", L"BlankCheckMode", L"2", val_blank, 64, ini_path);
             GetPrivateProfileStringW(L"Capture", L"MultiMonitor", L"focusmonitor", val_multi, 64, ini_path);
             GetPrivateProfileStringW(L"Capture", L"DisableKeyboardHook", L"0", val_hook, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"DarkMode", L"1", val_dark, 64, ini_path);
             
             // Delete the old file so it falls through to Case 2 to rewrite with new comments
             DeleteFileW(ini_path);
@@ -210,6 +212,7 @@ static void ensure_default_ini(void) {
         L";                      (seperateimages is accepted as an alias)\n"
         L";   DisableKeyboardHook : 1 = Disable global keyboard hooks (hotkeys).\n"
         L";                         0 = Enable global keyboard hooks (default).\n"
+        L";   DarkMode       : 1 = Dark window/menu theme, 0 = Light theme.\n"
         L";\n"
         L"; [Hotkey Settings] (Use the 'Hotkey Settings...' tray menu to configure these easily!)\n"
         L";   HotkeyFullVK    : Virtual Key code for Full Screen capture (e.g., 44 = PrintScreen).\n"
@@ -234,7 +237,8 @@ static void ensure_default_ini(void) {
         L"HotkeyRegionMod=2\n"
         L"BlankCheckMode=2\n"
         L"MultiMonitor=focusmonitor\n"
-        L"DisableKeyboardHook=0\n";
+        L"DisableKeyboardHook=0\n"
+        L"DarkMode=1\n";
 
 // Lossless at distance 1.0 give small size compare to lossy 1.0
 // Changing effort in distance 1.0 when using lossy is not useful
@@ -276,6 +280,7 @@ static void ensure_default_ini(void) {
         WritePrivateProfileStringW(L"Capture", L"BlankCheckMode", val_blank, ini_path);
         WritePrivateProfileStringW(L"Capture", L"MultiMonitor", val_multi, ini_path);
         WritePrivateProfileStringW(L"Capture", L"DisableKeyboardHook", val_hook, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"DarkMode", val_dark, ini_path);
     }
 }
 
@@ -329,6 +334,12 @@ static void init_config(void) {
     g_cfg.hk_region_mod = MOD_CONTROL; 
     g_cfg.hk_region_vk = VK_SNAPSHOT;
     g_cfg.disable_keyboard_hook = 0;
+
+    g_cfg.dark_mode = 1;
+    g_cfg.gui_x = 0;
+    g_cfg.gui_y = 0;
+    g_cfg.gui_w = 0;
+    g_cfg.gui_h = 0;
     
     // Use Known Folders API to correctly resolve localized folder names
     PWSTR pszPicturesPath = NULL;
@@ -374,6 +385,14 @@ static void init_config(void) {
     g_cfg.hk_full_mod = get_cfg_int(L"HotkeyFullMod", 0, ini_path);
     g_cfg.hk_region_vk = get_cfg_int(L"HotkeyRegionVK", VK_SNAPSHOT, ini_path);
     g_cfg.hk_region_mod = get_cfg_int(L"HotkeyRegionMod", MOD_CONTROL, ini_path);
+
+    // The window geometry is written back by the GUI when it closes
+    // so the strip reopens exactly where it was left.
+    g_cfg.dark_mode = get_cfg_int(L"DarkMode", 1, ini_path) ? 1 : 0;
+    g_cfg.gui_x = get_cfg_int(L"GuiX", 0, ini_path);
+    g_cfg.gui_y = get_cfg_int(L"GuiY", 0, ini_path);
+    g_cfg.gui_w = get_cfg_int(L"GuiW", 0, ini_path);
+    g_cfg.gui_h = get_cfg_int(L"GuiH", 0, ini_path);
 }
 
 // Unified Debug logging
