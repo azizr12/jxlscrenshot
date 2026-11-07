@@ -70,6 +70,30 @@ static COLORREF g_guiAccent, g_guiText, g_guiDim, g_guiCloseBg;
 #define GUI_DIM       (g_guiDim)
 #define GUI_CLOSE_HOT (g_guiCloseBg)
 
+
+static int gui_dpi_for_monitor(HMONITOR mon) {
+    int dpi = ui_dpi_for_monitor(mon);
+    MONITORINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
+    if (GetMonitorInfoW(mon, &mi)) {
+        int w = mi.rcMonitor.right - mi.rcMonitor.left;
+        int h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        int shortSide = (w < h) ? w : h;
+        int resDpi = MulDiv(shortSide, 96, 1080);
+        if (resDpi > dpi) dpi = resDpi;
+    }
+    return dpi;
+}
+
+static int gui_dpi_for_window(HWND hwnd) {
+    return gui_dpi_for_monitor(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST));
+}
+
+
+#define ui_dpi_for_window   gui_dpi_for_window
+#define ui_dpi_for_monitor  gui_dpi_for_monitor
+
 typedef struct {
     int   width, height;
     int   dpi;
@@ -295,8 +319,12 @@ static void gui_get_layout(HWND hwnd, GuiLayout *L) {
     L->shortLabels = (L->btnW < ui_scale(L->dpi, 90));
     L->subtitle = FALSE;
 
-    // Glyphs scale with the display scaling, not with the window size.
-    L->iconScale = (float)L->dpi / 96.0f;
+    // Icons scale with the display DPI
+    float base = (float)L->dpi / 96.0f;
+    float fit  = (float)((L->btnW < L->btnH) ? L->btnW : L->btnH) / (100.0f * base);
+    if (fit < 1.0f) fit = 1.0f;
+    if (fit > 2.5f) fit = 2.5f;
+    L->iconScale = base * fit;
 }
 
 // Close button: a flush rectangle in the top-right corner, no rounding, no gap.
@@ -566,21 +594,35 @@ static void gui_draw_button(LPDRAWITEMSTRUCT di) {
     GuiLayout L;
     gui_get_layout(GetParent(di->hwndItem), &L);
 
+    float fit = L.iconScale / ((float)L.dpi / 96.0f);
+
     COLORREF bg = down ? GUI_BTN_DOWN : (hot ? GUI_BTN_HOT : GUI_BTN);
     COLORREF border = hot ? GUI_ACCENT : GUI_BORDER;
 
-    gui_round_rect(dc, &rc, ui_scale(L.dpi, 8), bg, border);
+    gui_round_rect(dc, &rc, (int)(ui_scale(L.dpi, 8) * fit + 0.5f), bg, border);
 
     wchar_t label[128];
     GetWindowTextW(di->hwndItem, label, 128);
 
     SetBkMode(dc, TRANSPARENT);
 
-    HFONT labelFont = L.compact ? g_guiCardFontSm : g_guiCardFont;
-    HFONT smallFont = L.compact ? g_guiSmallFontSm : g_guiSmallFont;
+    // Font created here grows with the buttons.
+    int labelPx = (int)(ui_scale(L.dpi, 12) * fit + 0.5f);
+    HFONT labelFont = CreateFontW(-labelPx, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    if (!labelFont) labelFont = g_guiCardFontSm;
 
-    // Measure the label font so the icon/label/subtitle block can be centred
-    // vertically in whatever button height the user resized to.
+    int smallPx = (int)(ui_scale(L.dpi, 9) * fit + 0.5f);
+    HFONT smallFont = g_guiSmallFontSm;
+    HFONT smallOwned = NULL;
+    if (L.subtitle) {
+        smallOwned = CreateFontW(-smallPx, 0, 0, 0, FW_NORMAL, 0, 0, 0,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        if (smallOwned) smallFont = smallOwned;
+    }
+
     HFONT old = (HFONT)SelectObject(dc, labelFont);
     TEXTMETRICW tmLabel;
     GetTextMetricsW(dc, &tmLabel);
@@ -595,7 +637,7 @@ static void gui_draw_button(LPDRAWITEMSTRUCT di) {
         SelectObject(dc, prev);
     }
 
-    int gapIconText = ui_scale(L.dpi, 5);
+    int gapIconText = (int)(ui_scale(L.dpi, 5) * fit + 0.5f);
     int gapLabelSub = ui_scale(L.dpi, 2);
     int blockH = iconPx + gapIconText + tmLabel.tmHeight
                + (L.subtitle ? gapLabelSub + subH : 0);
@@ -627,6 +669,8 @@ static void gui_draw_button(LPDRAWITEMSTRUCT di) {
     }
 
     SelectObject(dc, old);
+    if (labelFont != g_guiCardFontSm) DeleteObject(labelFont);
+    if (smallOwned) DeleteObject(smallOwned);
 }
 
 // Hover tracking and Escape forwarding for the owner-drawn buttons.
@@ -2200,15 +2244,13 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         }
 
         case WM_DPICHANGED: {
-            int dpi = (int)LOWORD(wp);
-            if (dpi < 48) dpi = ui_dpi_for_window(hwnd);
             RECT *pr = (RECT *)lp;
             if (pr) {
                 SetWindowPos(hwnd, NULL, pr->left, pr->top,
-                             pr->right - pr->left, pr->bottom - pr->top,
-                             SWP_NOZORDER | SWP_NOACTIVATE);
+                            pr->right - pr->left, pr->bottom - pr->top,
+                            SWP_NOZORDER | SWP_NOACTIVATE);
             }
-            gui_create_fonts(dpi);
+            gui_create_fonts(ui_dpi_for_window(hwnd));   // was LOWORD(wp)
             gui_layout_children(hwnd);
             if (g_hwnd_catcher) position_settings_window(g_hwnd_catcher);
             InvalidateRect(hwnd, NULL, FALSE);
