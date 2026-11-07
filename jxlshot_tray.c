@@ -256,9 +256,11 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
 #define IDC_SETPATH      210
 #define IDC_PREVIEW      211
 
+// Design metrics at 96 DPI. g_hkDpi holds the DPI of the monitor the window is
+// on and hk_*() scale these for the actual window.
 #define HK_W        300
 #define HK_H        500
-#define HK_TITLE_H  36
+#define HK_TITLE_H  40
 #define HK_Y_HEAD   178
 #define HK_Y_LOSS   198
 #define HK_Y_DIST   240
@@ -270,13 +272,28 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
 #define HK_ROW_H    34
 #define HK_STEP_W   34
 #define HK_VAL_W    64
-#define HK_DN_X     (HK_W - 16 - HK_STEP_W - HK_VAL_W - HK_STEP_W)
-#define HK_UP_X     (HK_W - 16 - HK_STEP_W)
+
+// Close button: a square, flush in the corner, exactly like the Windows 8/10
+// title-bar close button.
+#define HK_CLOSE_W     40
+#define HK_CLOSE_GLYPH 5
+
+static void gui_draw_close_button(HDC dc, const RECT *rc, BOOL hot, BOOL fillIdle,
+                                  COLORREF idleBg, COLORREF idleFg, int extent);
+
+static int g_hkDpi = 96;
+
+static int hk_w(void)       { return ui_scale(g_hkDpi, HK_W); }
+static int hk_h(void)       { return ui_scale(g_hkDpi, HK_H); }
+static int hk_title_h(void) { return ui_scale(g_hkDpi, HK_TITLE_H); }
+static int hk_s(int px)     { return ui_scale(g_hkDpi, px); }
+static int hk_dn_x(void)    { return hk_w() - hk_s(16 + HK_STEP_W + HK_VAL_W + HK_STEP_W); }
+static int hk_up_x(void)    { return hk_w() - hk_s(16 + HK_STEP_W); }
 
 // Same idea as the GUI palette: variables so the settings window can follow the
 // sun/moon toggle instead of being permanently dark.
 static COLORREF g_hkBg, g_hkBtn, g_hkBtnHot, g_hkBtnDown, g_hkBorder;
-static COLORREF g_hkAccent, g_hkText, g_hkDim, g_hkCloseHot;
+static COLORREF g_hkAccent, g_hkText, g_hkDim;
 
 #define HK_BG        (g_hkBg)
 #define HK_BTN       (g_hkBtn)
@@ -286,7 +303,6 @@ static COLORREF g_hkAccent, g_hkText, g_hkDim, g_hkCloseHot;
 #define HK_ACCENT    (g_hkAccent)
 #define HK_TEXT      (g_hkText)
 #define HK_DIM       (g_hkDim)
-#define HK_CLOSE_HOT (g_hkCloseHot)
 
 static void hk_update_theme(void) {
     if (g_cfg.dark_mode) {
@@ -298,7 +314,6 @@ static void hk_update_theme(void) {
         g_hkAccent   = RGB(0, 120, 215);
         g_hkText     = RGB(240, 240, 240);
         g_hkDim      = RGB(150, 150, 150);
-        g_hkCloseHot = RGB(196, 43, 28);
     } else {
         g_hkBg       = RGB(248, 248, 248);
         g_hkBtn      = RGB(255, 255, 255);
@@ -308,11 +323,11 @@ static void hk_update_theme(void) {
         g_hkAccent   = RGB(0, 120, 215);
         g_hkText     = RGB(26, 26, 26);
         g_hkDim      = RGB(110, 110, 110);
-        g_hkCloseHot = RGB(196, 43, 28);
     }
 }
 
 static HWND  g_hwnd_catcher = NULL;
+static BOOL  g_hkHiddenForCapture = FALSE; // settings hidden by a running capture
 static int   g_catcher_target = 0; // 0 = idle, 1 = full, 2 = region
 static volatile BOOL g_hotkeyCapturing = FALSE; // checked by the keyboard hook
 static DWORD g_swallowUpVk = 0; // swallow key-up of the captured key
@@ -429,23 +444,20 @@ static void hk_draw_button(LPDRAWITEMSTRUCT di) {
                   (id == IDC_PREVIEW && g_cfg.show_preview) ||
                   (id == IDC_DISABLE_HOOK && g_cfg.disable_keyboard_hook == 0);
 
-    COLORREF bg;
-    if (id == IDC_HK_CLOSE) bg = hot ? HK_CLOSE_HOT : HK_BG;
-    else bg = dis ? HK_BTN : (down ? HK_BTN_DOWN : (hot ? HK_BTN_HOT : HK_BTN));
+    // The settings close button is drawn by the exact same code as the strip's
+    // close button: a square idle box in the window colour, theme glyph, red on
+    // hover, like the Windows 8/10 title-bar button.
+    if (id == IDC_HK_CLOSE) {
+        gui_draw_close_button(dc, &rc, hot, TRUE, HK_BG, HK_TEXT,
+                              hk_s(HK_CLOSE_GLYPH));
+        return;
+    }
+
+    COLORREF bg = dis ? HK_BTN : (down ? HK_BTN_DOWN : (hot ? HK_BTN_HOT : HK_BTN));
 
     HBRUSH b = CreateSolidBrush(bg);
     FillRect(dc, &rc, b);
     DeleteObject(b);
-
-    if (id == IDC_HK_CLOSE) {
-        int cx = (rc.left + rc.right) / 2, cy = (rc.top + rc.bottom) / 2, s = 5;
-        HPEN pen = CreatePen(PS_SOLID, 1, HK_TEXT);
-        HPEN old = (HPEN)SelectObject(dc, pen);
-        MoveToEx(dc, cx - s, cy - s, NULL); LineTo(dc, cx + s + 1, cy + s + 1);
-        MoveToEx(dc, cx + s, cy - s, NULL); LineTo(dc, cx - s - 1, cy + s + 1);
-        SelectObject(dc, old); DeleteObject(pen);
-        return;
-    }
 
     HBRUSH fb = CreateSolidBrush(active ? HK_ACCENT : HK_BORDER);
     FrameRect(dc, &rc, fb);
@@ -498,38 +510,86 @@ static void hk_save(int target, UINT vk, UINT mod) {
     gui_refresh(); // the capture cards show the new hotkey
 }
 
+static void hk_create_fonts(void) {
+    if (g_hkFont)      { DeleteObject(g_hkFont); g_hkFont = NULL; }
+    if (g_hkFontSmall) { DeleteObject(g_hkFontSmall); g_hkFontSmall = NULL; }
+
+    g_hkFont = CreateFontW(-hk_s(15), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
+                           CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g_hkFontSmall = CreateFontW(-hk_s(12), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
+                                CLEARTYPE_QUALITY, 0, L"Segoe UI");
+}
+
+// Everything in the Settings window is laid out from the 96-DPI design values
+// in HK_* so the window follows the Windows display-scaling setting.
+static void hk_layout_children(HWND hwnd) {
+    int m  = hk_s(16);
+    int cw = hk_s(HK_CLOSE_W);
+    int th = hk_title_h();
+    int bw = hk_w() - 2 * m;
+    int row = hk_s(HK_ROW_H);
+    int step = hk_s(HK_STEP_W);
+
+    struct { int id; int x, y, w, h; } b[] = {
+        { IDC_HK_FULL,      m, hk_s(48),  bw, hk_s(38) },
+        { IDC_HK_REGION,    m, hk_s(94),  bw, hk_s(38) },
+        { IDC_HK_CLOSE,     hk_w() - cw, 0, cw, th },
+        { IDC_LOSSLESS,     m, hk_s(HK_Y_LOSS), bw, row },
+        { IDC_DIST_DN,      hk_dn_x(), hk_s(HK_Y_DIST), step, row },
+        { IDC_DIST_UP,      hk_up_x(), hk_s(HK_Y_DIST), step, row },
+        { IDC_EFF_DN,       hk_dn_x(), hk_s(HK_Y_EFF),  step, row },
+        { IDC_EFF_UP,       hk_up_x(), hk_s(HK_Y_EFF),  step, row },
+        { IDC_SETPATH,      m, hk_s(HK_Y_EXPORT),  bw, row },
+        { IDC_PREVIEW,      m, hk_s(HK_Y_PREVIEW), bw, row },
+        { IDC_DISABLE_HOOK, m, hk_s(HK_Y_HOOK),    bw, row },
+    };
+
+    for (int i = 0; i < (int)(sizeof(b) / sizeof(b[0])); i++) {
+        HWND hb = GetDlgItem(hwnd, b[i].id);
+        if (hb) SetWindowPos(hb, NULL, b[i].x, b[i].y, b[i].w, b[i].h,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
+
 static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
+            if (g_hkDpi < 48) g_hkDpi = ui_dpi_for_window(hwnd);
             hk_update_theme();
-            g_hkFont = CreateFontW(-15, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
-                                   CLEARTYPE_QUALITY, 0, L"Segoe UI");
-            g_hkFontSmall = CreateFontW(-12, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
-                                        CLEARTYPE_QUALITY, 0, L"Segoe UI");
+            hk_create_fonts();
+
             HINSTANCE hi = GetModuleHandle(NULL);
-            struct { int id; int x, y, w, h; } b[] = {
-                { IDC_HK_FULL,   16, 48,  HK_W - 32, 38 },
-                { IDC_HK_REGION, 16, 94,  HK_W - 32, 38 },
-                { IDC_HK_CLOSE,  HK_W - 41, 1, 38, HK_TITLE_H - 2 },
-                { IDC_LOSSLESS,  16, HK_Y_LOSS, HK_W - 32, HK_ROW_H },
-                { IDC_DIST_DN,   HK_DN_X, HK_Y_DIST, HK_STEP_W, HK_ROW_H },
-                { IDC_DIST_UP,   HK_UP_X, HK_Y_DIST, HK_STEP_W, HK_ROW_H },
-                { IDC_EFF_DN,    HK_DN_X, HK_Y_EFF,  HK_STEP_W, HK_ROW_H },
-                { IDC_EFF_UP,    HK_UP_X, HK_Y_EFF,  HK_STEP_W, HK_ROW_H },
-                { IDC_SETPATH,       16, HK_Y_EXPORT, HK_W - 32, HK_ROW_H },
-                { IDC_PREVIEW,       16, HK_Y_PREVIEW, HK_W - 32, HK_ROW_H },
-                { IDC_DISABLE_HOOK,  16, HK_Y_HOOK, HK_W - 32, HK_ROW_H },
+            static const int ids[] = {
+                IDC_HK_FULL, IDC_HK_REGION, IDC_HK_CLOSE, IDC_LOSSLESS,
+                IDC_DIST_DN, IDC_DIST_UP, IDC_EFF_DN, IDC_EFF_UP,
+                IDC_SETPATH, IDC_PREVIEW, IDC_DISABLE_HOOK
             };
-            for (int i = 0; i < (int)(sizeof(b) / sizeof(b[0])); i++) {
+            for (int i = 0; i < (int)(sizeof(ids) / sizeof(ids[0])); i++) {
                 HWND hb = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                                          b[i].x, b[i].y, b[i].w, b[i].h, hwnd,
-                                          (HMENU)(INT_PTR)b[i].id, hi, NULL);
-                SetWindowSubclass(hb, HkBtnSubclass, (UINT_PTR)b[i].id, 0);
+                                          0, 0, 10, 10, hwnd,
+                                          (HMENU)(INT_PTR)ids[i], hi, NULL);
+                SetWindowSubclass(hb, HkBtnSubclass, (UINT_PTR)ids[i], 0);
             }
+            hk_layout_children(hwnd);
             hk_refresh_buttons(hwnd);
             return 0;
         }
         case WM_ERASEBKGND: return 1;
+
+        case WM_DPICHANGED: {
+            g_hkDpi = (int)LOWORD(wParam);
+            if (g_hkDpi < 48) g_hkDpi = ui_dpi_for_window(hwnd);
+            RECT *pr = (RECT *)lParam;
+            if (pr) {
+                SetWindowPos(hwnd, NULL, pr->left, pr->top,
+                             pr->right - pr->left, pr->bottom - pr->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            hk_create_fonts();
+            hk_layout_children(hwnd);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
 
         case WM_PAINT: {
             PAINTSTRUCT ps; HDC dc = BeginPaint(hwnd, &ps);
@@ -537,15 +597,24 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             HBRUSH bg = CreateSolidBrush(HK_BG); FillRect(dc, &rc, bg); DeleteObject(bg);
             HBRUSH bd = CreateSolidBrush(HK_BORDER); FrameRect(dc, &rc, bd); DeleteObject(bd);
 
+            int W = hk_w(), H = hk_h();
+            int m = hk_s(16);
+            int row = hk_s(HK_ROW_H);
+            int yHead = hk_s(HK_Y_HEAD);
+            int yDist = hk_s(HK_Y_DIST);
+            int yEff  = hk_s(HK_Y_EFF);
+            int ySys  = hk_s(HK_Y_SYS);
+            int dnX = hk_dn_x(), upX = hk_up_x(), step = hk_s(HK_STEP_W);
+
             SetBkMode(dc, TRANSPARENT);
             HFONT of = (HFONT)SelectObject(dc, g_hkFont);
             SetTextColor(dc, HK_TEXT);
-            RECT t = { 16, 0, HK_W - 48, HK_TITLE_H };
+            RECT t = { m, 0, W - hk_s(48), hk_title_h() };
             DrawTextW(dc, L"Settings", -1, &t, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
             SelectObject(dc, g_hkFontSmall);
             SetTextColor(dc, HK_DIM);
-            RECT h = { 16, 140, HK_W - 16, 172 };
+            RECT h = { m, hk_s(140), W - m, hk_s(172) };
             DrawTextW(dc, g_catcher_target
                 ? L"Press the new key combo. Esc cancels."
                 : L"Click a button, then press the new key combo.",
@@ -553,30 +622,30 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
             SelectObject(dc, g_hkFontSmall);
             SetTextColor(dc, HK_DIM);
-            RECT hd = { 16, HK_Y_HEAD, HK_W - 16, HK_Y_HEAD + 16 };
+            RECT hd = { m, yHead, W - m, yHead + hk_s(16) };
             DrawTextW(dc, L"JPEG XL", -1, &hd, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
 
             SelectObject(dc, g_hkFont);
             wchar_t vbuf[32];
             COLORREF dist_col = g_cfg.lossless ? HK_DIM : HK_TEXT;
 
-            RECT lr = { 16, HK_Y_DIST, HK_DN_X - 4, HK_Y_DIST + HK_ROW_H };
+            RECT lr = { m, yDist, dnX - hk_s(4), yDist + row };
             SetTextColor(dc, dist_col);
             DrawTextW(dc, L"Distance", -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-            RECT vr = { HK_DN_X + HK_STEP_W, HK_Y_DIST, HK_UP_X, HK_Y_DIST + HK_ROW_H };
+            RECT vr = { dnX + step, yDist, upX, yDist + row };
             _snwprintf(vbuf, 32, L"%.1f", g_cfg.distance);
             DrawTextW(dc, vbuf, -1, &vr, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
 
-            lr.top = HK_Y_EFF; lr.bottom = HK_Y_EFF + HK_ROW_H;
+            lr.top = yEff; lr.bottom = yEff + row;
             SetTextColor(dc, HK_TEXT);
             DrawTextW(dc, L"Effort", -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-            vr.top = HK_Y_EFF; vr.bottom = HK_Y_EFF + HK_ROW_H;
+            vr.top = yEff; vr.bottom = yEff + row;
             _snwprintf(vbuf, 32, L"%d", g_cfg.effort);
             DrawTextW(dc, vbuf, -1, &vr, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
 
             SelectObject(dc, g_hkFontSmall);
             SetTextColor(dc, HK_DIM);
-            RECT hs = { 16, HK_Y_SYS, HK_W - 16, HK_Y_SYS + 16 };
+            RECT hs = { m, ySys, W - m, ySys + hk_s(16) };
             DrawTextW(dc, L"System", -1, &hs, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
 
             // Current export folder, right-aligned in the section header.
@@ -584,14 +653,14 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 const wchar_t *slash = wcsrchr(g_cfg.export_path, L'\\');
                 const wchar_t *name = (slash && slash[1]) ? slash + 1 : g_cfg.export_path;
                 if (name[0]) {
-                    RECT er = { HK_W / 2, HK_Y_SYS, HK_W - 16, HK_Y_SYS + 16 };
+                    RECT er = { W / 2, ySys, W - m, ySys + hk_s(16) };
                     DrawTextW(dc, name, -1, &er,
                               DT_SINGLELINE | DT_RIGHT | DT_VCENTER | DT_END_ELLIPSIS);
                 }
             }
 
 
-            RECT info = { 16, HK_H - 35, HK_W - 16, HK_H - 5 };
+            RECT info = { m, H - hk_s(35), W - m, H - hk_s(5) };
             SIZE sz;
 
             SetTextColor(dc, HK_DIM);
@@ -616,7 +685,8 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(hwnd, &pt);
-            RECT info = { 16, HK_H - 35, HK_W - 16, HK_H - 5 };
+            RECT info = { hk_s(16), hk_h() - hk_s(35),
+                          hk_w() - hk_s(16), hk_h() - hk_s(5) };
             if (pt.x >= info.left && pt.x <= info.right && pt.y >= info.top && pt.y <= info.bottom) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
                 return TRUE;
@@ -627,7 +697,8 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // Check if the user clicked anywhere in the bottom info area
             int x = GET_X_LPARAM(lParam);
             int y = GET_Y_LPARAM(lParam);
-            RECT info = { 16, HK_H - 35, HK_W - 16, HK_H - 5 };
+            RECT info = { hk_s(16), hk_h() - hk_s(35),
+                          hk_w() - hk_s(16), hk_h() - hk_s(5) };
             
             if (x >= info.left && x <= info.right && y >= info.top && y <= info.bottom) {
                 // Trigger the existing IDM_OPENCONFIG command in the main tray window
@@ -638,7 +709,8 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         case WM_NCHITTEST: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ScreenToClient(hwnd, &pt);
-            if (pt.y >= 0 && pt.y < HK_TITLE_H && pt.x < HK_W - 41) return HTCAPTION; // drag area
+            if (pt.y >= 0 && pt.y < hk_title_h() &&
+                pt.x < hk_w() - hk_s(HK_CLOSE_W)) return HTCAPTION; // drag area
             return HTCLIENT;
         }
         case WM_DRAWITEM:
@@ -720,6 +792,7 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             if (g_hkFont)      { DeleteObject(g_hkFont); g_hkFont = NULL; }
             if (g_hkFontSmall) { DeleteObject(g_hkFontSmall); g_hkFontSmall = NULL; }
             g_hwnd_catcher = NULL;
+            g_hkHiddenForCapture = FALSE;
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -742,16 +815,18 @@ static void position_settings_window(HWND h) {
         HMONITOR mon = MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi = { sizeof(mi) };
         if (GetMonitorInfoW(mon, &mi)) {
+            int w = hk_w(), h = hk_h();
+
             // Prefer the right-hand side, then the left, then clamp on-screen.
-            x = ar.right + 8;
-            if (x + HK_W > mi.rcWork.right) {
-                x = ar.left - HK_W - 8;
-                if (x < mi.rcWork.left) x = mi.rcWork.left + 8;
-                if (x + HK_W > mi.rcWork.right) x = mi.rcWork.right - HK_W;
+            x = ar.right + hk_s(8);
+            if (x + w > mi.rcWork.right) {
+                x = ar.left - w - hk_s(8);
+                if (x < mi.rcWork.left) x = mi.rcWork.left + hk_s(8);
+                if (x + w > mi.rcWork.right) x = mi.rcWork.right - w;
             }
 
             y = ar.top;
-            if (y + HK_H > mi.rcWork.bottom) y = mi.rcWork.bottom - HK_H;
+            if (y + h > mi.rcWork.bottom) y = mi.rcWork.bottom - h;
             if (y < mi.rcWork.top) y = mi.rcWork.top;
 
             placed = TRUE;
@@ -761,19 +836,63 @@ static void position_settings_window(HWND h) {
     if (!placed) {
         MONITORINFO mi = { sizeof(mi) };
         GetMonitorInfoW(MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY), &mi);
-        x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - HK_W) / 2;
-        y = mi.rcWork.top  + ((mi.rcWork.bottom - mi.rcWork.top) - HK_H) / 2;
+        int w = hk_w(), h = hk_h();
+        x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - w) / 2;
+        y = mi.rcWork.top  + ((mi.rcWork.bottom - mi.rcWork.top) - h) / 2;
     }
 
     SetWindowPos(h, NULL, x, y, 0, 0,
                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+// The Settings window must never appear in a screenshot. Any capture path hides
+// it before grabbing and brings it back when the capture sequence ends (or when
+// the preview closes, whichever is later).
+static BOOL settings_hide_for_capture(void) {
+    if (!g_hwnd_catcher || !IsWindow(g_hwnd_catcher)) return FALSE;
+    if (!IsWindowVisible(g_hwnd_catcher)) return FALSE;
+
+    ShowWindow(g_hwnd_catcher, SW_HIDE);
+    g_hkHiddenForCapture = TRUE;
+    return TRUE;
+}
+
+static void settings_restore_after_capture(void) {
+    if (!g_hkHiddenForCapture) return;
+    g_hkHiddenForCapture = FALSE;
+
+    if (g_hwnd_catcher && IsWindow(g_hwnd_catcher)) {
+        ShowWindow(g_hwnd_catcher, SW_SHOW);
+        // Only take focus when the strip is not coming back as well, so the
+        // window that started the capture stays in front.
+        if (!gui_is_visible()) SetForegroundWindow(g_hwnd_catcher);
+    }
+}
+
+// The preview is the window the user is looking at after a capture, so the
+// Settings window only returns once the preview is gone (PreviewWndProc calls
+// settings_restore_after_capture on WM_DESTROY).
+static void settings_finish_capture(void) {
+    if (gui_preview_is_visible()) return;
+    settings_restore_after_capture();
+}
+
+// Toggle: the same Settings button (tray menu or strip) hides an open window.
 static void execute_hotkey_settings(HWND hwnd) {
     (void)hwnd; // message-only tray window can't be an owner
-    if (g_hwnd_catcher) {
-        position_settings_window(g_hwnd_catcher);
-        SetForegroundWindow(g_hwnd_catcher);
+    if (g_hwnd_catcher && IsWindow(g_hwnd_catcher)) {
+        if (IsWindowVisible(g_hwnd_catcher)) {
+            ShowWindow(g_hwnd_catcher, SW_HIDE);
+            // A manual hide wins over a pending capture restore.
+            g_hkHiddenForCapture = FALSE;
+        } else {
+            position_settings_window(g_hwnd_catcher);
+            ShowWindow(g_hwnd_catcher, SW_SHOW);
+            SetForegroundWindow(g_hwnd_catcher);
+            // It is visible again, so a capture finishing later must not
+            // re-show (or re-position) it as a "restore".
+            g_hkHiddenForCapture = FALSE;
+        }
         return;
     }
 
@@ -789,13 +908,22 @@ static void execute_hotkey_settings(HWND hwnd) {
         registered = TRUE;
     }
 
+    // Pick the DPI of the monitor the window will open on, so the first paint
+    // is already at the right scale (WM_CREATE runs before the window is shown).
+    HMONITOR target_mon = MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    HWND anchor = gui_hwnd();
+    if (anchor && IsWindowVisible(anchor))
+        target_mon = MonitorFromWindow(anchor, MONITOR_DEFAULTTONEAREST);
+    g_hkDpi = ui_dpi_for_monitor(target_mon);
+
     MONITORINFO mi = { sizeof(mi) };
     GetMonitorInfoW(MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY), &mi);
-    int x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - HK_W) / 2;
-    int y = mi.rcWork.top  + ((mi.rcWork.bottom - mi.rcWork.top) - HK_H) / 2;
+    int w = hk_w(), h = hk_h();
+    int x = mi.rcWork.left + ((mi.rcWork.right - mi.rcWork.left) - w) / 2;
+    int y = mi.rcWork.top  + ((mi.rcWork.bottom - mi.rcWork.top) - h) / 2;
 
     g_hwnd_catcher = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, L"JxlShotCatcherClass",
-        L"Settings", WS_POPUP, x, y, HK_W, HK_H, NULL, NULL, GetModuleHandle(NULL), NULL);
+        L"Settings", WS_POPUP, x, y, w, h, NULL, NULL, GetModuleHandle(NULL), NULL);
 
     if (g_hwnd_catcher) {
         // PotPlayer style: open beside the main strip, never on top of it.
@@ -900,10 +1028,12 @@ static int queue_grab_encode(Grab *g, const wchar_t *path) {
 }
 
 static void execute_full_capture(void) {
-    // Never let the previous preview end up inside the new screenshot. When
-    // this was the only delay (tray/hotkey path, no GUI timer), give the
-    // compositor a moment to remove it before grabbing.
-    if (preview_close_for_capture()) Sleep(120);
+    // Never let the previous preview or the Settings window end up inside the
+    // new screenshot. When this was the only delay (tray/hotkey path, no GUI
+    // timer), give the compositor a moment to remove them before grabbing.
+    BOOL hadPreview = preview_close_for_capture();
+    BOOL hadSettings = settings_hide_for_capture();
+    if (hadPreview || hadSettings) Sleep(120);
 
     dbg("execute_full_capture: begin (effort=%d, multimonitor=%s)",
         g_cfg.effort, g_cfg.multimonitor ? "separateimages" : "focusmonitor");
@@ -914,6 +1044,7 @@ static void execute_full_capture(void) {
 
         if (count <= 0) {
             MessageBoxW(NULL, L"No monitors found.", L"jxlshot", MB_ICONERROR);
+            settings_finish_capture();
             return;
         }
 
@@ -948,6 +1079,7 @@ static void execute_full_capture(void) {
         } else if (saved < count) {
             dbg("execute_full_capture: only %d of %d monitors saved", saved, count);
         }
+        settings_finish_capture();
         return;
     }
 
@@ -956,6 +1088,7 @@ static void execute_full_capture(void) {
     if (!grab_monitor(&g, monitor_under_cursor())) {
         dbg("execute_full_capture: grab failed, showing MessageBox");
         MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
+        settings_finish_capture();
         return;
     }
 
@@ -971,6 +1104,8 @@ static void execute_full_capture(void) {
         MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
     }
     free_grab(&g);
+
+    settings_finish_capture();
 }
 
 static void execute_open_releases(HWND hwnd) {
@@ -2054,7 +2189,11 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_regionMonitorRect.left = g_regionMonitorRect.top = 0;
             g_regionMonitorRect.right = g_regionMonitorRect.bottom = 0;
             g_rcSel.left = g_rcSel.top = g_rcSel.right = g_rcSel.bottom = 0;
-            
+
+            // Bring the Settings window back unless a preview opened on top of
+            // this capture (the preview restores it when it closes).
+            settings_finish_capture();
+
             return 0;
         }
     }
@@ -2085,8 +2224,11 @@ static void show_region_overlay(void) {
 }
 
 static void start_region_capture(void) {
-    // The previous preview would otherwise be frozen into the overlay frame.
-    if (preview_close_for_capture()) Sleep(120);
+    // The previous preview and the Settings window would otherwise be frozen
+    // into the overlay frame.
+    BOOL hadPreview = preview_close_for_capture();
+    BOOL hadSettings = settings_hide_for_capture();
+    if (hadPreview || hadSettings) Sleep(120);
 
     // Fallback safety: If the flag was somehow stuck, reset it before starting
     g_isRegionCapturing = TRUE; 
@@ -2108,6 +2250,7 @@ static void start_region_capture(void) {
         dbg("start_region_capture: GetMonitorInfo failed");
         g_isRegionCapturing = FALSE;
         begin_mouse_grace();
+        settings_finish_capture();
         return;
     }
 
@@ -2117,6 +2260,7 @@ static void start_region_capture(void) {
         free_grab(&g_regionFrame);
         g_isRegionCapturing = FALSE;
         begin_mouse_grace();
+        settings_finish_capture();
         return;
     }
 
@@ -2168,6 +2312,7 @@ static void start_region_capture(void) {
         ReleaseDC(NULL, hdcScreen);
         g_isRegionCapturing = FALSE;
         begin_mouse_grace();
+        settings_finish_capture();
         return;
     }
 
@@ -2751,6 +2896,10 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     // Route background save notifications to the UI thread from now on.
     g_saveNotify = show_save_notification_ui;
     g_saveOk = notify_save_ok_ui;
+
+    // Once the encoder has closed the .jxl, the preview can replace its raw
+    // capture with the decoded file (PQ / Rec.2020 -> scRGB in libjxl).
+    g_saveReady = preview_on_saved;
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) { 

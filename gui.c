@@ -15,7 +15,7 @@
 
 #define GUI_BTN_COUNT    4
 
-// Close button shared by the strip and the preview: flat red rectangle.
+// Close button shared by the strip and the preview
 #define GUI_CLOSE_W      34
 #define GUI_CLOSE_H      24
 #define GUI_CLOSE_GLYPH  4
@@ -47,6 +47,11 @@
 #define IDC_PREV_FOLDER      402
 #define IDC_PREV_CLOSE       403
 #define IDC_PREV_OPENWITH    404
+#define IDC_PREV_RELOAD      405
+
+// EncodeWorker -> preview window: the .jxl file is complete, decode it and
+// replace the raw preview. WM_APP is safe here; the preview class is private.
+#define WM_PREVIEW_FILE_READY (WM_APP + 12)
 
 
 // Palette. These are variables, not #defines, so the Dark/Light toggle can swap
@@ -67,6 +72,7 @@ static COLORREF g_guiAccent, g_guiText, g_guiDim, g_guiCloseBg;
 
 typedef struct {
     int   width, height;
+    int   dpi;
     int   titleH;
     int   margin, gap;
     int   btnTop, btnW, btnH;
@@ -79,8 +85,8 @@ typedef struct {
 
 static RECT gui_theme_rect(const GuiLayout *L, const RECT *closeRc) {
     RECT r;
-    r.right = closeRc->left - 6;
-    r.left = r.right - 84;   // "Dark" | "Light" selection bar
+    r.right = closeRc->left - ui_scale(L->dpi, 6);
+    r.left = r.right - ui_scale(L->dpi, 84);   // "Dark" | "Light" selection bar
     r.top = 0;
     r.bottom = L->titleH;
     return r;
@@ -155,8 +161,9 @@ static int     g_guiPendingCapture = 0; // 0 = idle, 1 = full, 2 = region
 // back underneath it.
 static BOOL    g_guiRestorePending = FALSE;
 
-// Preview window state. The bitmap is a 32-bpp top-down DIB that both the
-// window and the clipboard code read from.
+// Preview window state. The bitmap is a 32-bpp top-down DIB used by the GDI
+// fallback and the clipboard code; the normal on-screen path is the D3D
+// presenter below, which keeps HDR/SDR intact.
 static HWND      g_hwndPreview = NULL;
 static HBITMAP   g_prevBmp = NULL;
 static void     *g_prevBits = NULL;
@@ -166,6 +173,32 @@ static wchar_t    g_prevPath[MAX_PATH];         // file the capture was saved to
 static BOOL       g_prevXShown = FALSE;         // overlay close button visible
 static BOOL       g_prevXHot = FALSE;           // mouse over the overlay close button
 static int        g_prevBorder = 0;             // white frame width (full-screen captures)
+static BOOL       g_prevClosingForCapture = FALSE; // destroy is part of a new grab
+
+// Set once the preview has switched from the raw capture to the decoded .jxl.
+static BOOL       g_prevShowingDecoded = FALSE;
+
+// Path handed from the EncodeWorker to the preview window. The worker only
+// stores the string here and posts WM_PREVIEW_FILE_READY; decoding and the
+// D3D upload stay on the window thread. SRWLOCK_INIT needs no init call, so
+// an early-arriving worker is always safe.
+static SRWLOCK    g_prevReadyLock = SRWLOCK_INIT;
+static wchar_t    g_prevReadyPath[MAX_PATH];
+
+// The preview path is written by the UI thread but compared by the EncodeWorker
+// when a save finishes, so both sides go through the lock. Unlocked reads of
+// g_prevPath elsewhere are UI-thread only and stay safe.
+static void preview_set_path(const wchar_t *path) {
+    AcquireSRWLockExclusive(&g_prevReadyLock);
+    wcsncpy_s(g_prevPath, MAX_PATH, path ? path : L"", _TRUNCATE);
+    ReleaseSRWLockExclusive(&g_prevReadyLock);
+}
+
+static void preview_get_path(wchar_t *out) {
+    AcquireSRWLockShared(&g_prevReadyLock);
+    wcsncpy_s(out, MAX_PATH, g_prevPath, _TRUNCATE);
+    ReleaseSRWLockShared(&g_prevReadyLock);
+}
 
 
 // Theme
@@ -238,37 +271,39 @@ static void gui_get_layout(HWND hwnd, GuiLayout *L) {
     ZeroMemory(L, sizeof(*L));
     L->width = rc.right;
     L->height = rc.bottom;
+    L->dpi = ui_dpi_for_window(hwnd);
 
     // One UI only: the compact strip with the small title bar and icons. It
     // stays exactly like this at every window size, so expanding the window
-    // just gives the same four cards more room.
+    // just gives the same four cards more room. Metrics are 96-DPI design
+    // values scaled to the monitor the window is on.
     L->footer = FALSE;
     L->compact = TRUE;
-    L->titleH = 24;
-    L->margin = 8;
-    L->gap = 4;
+    L->titleH = ui_scale(L->dpi, 24);
+    L->margin = ui_scale(L->dpi, 8);
+    L->gap = ui_scale(L->dpi, 4);
 
-    int topPad = 4;
-    int bottomPad = 4;
+    int topPad = ui_scale(L->dpi, 4);
+    int bottomPad = ui_scale(L->dpi, 4);
     L->btnTop = L->titleH + topPad;
     L->btnH = L->height - bottomPad - L->btnTop;
-    if (L->btnH < 16) L->btnH = 16;
+    if (L->btnH < ui_scale(L->dpi, 16)) L->btnH = ui_scale(L->dpi, 16);
 
     L->btnW = (L->width - 2 * L->margin - (GUI_BTN_COUNT - 1) * L->gap) / GUI_BTN_COUNT;
-    if (L->btnW < 10) L->btnW = 10;
+    if (L->btnW < ui_scale(L->dpi, 10)) L->btnW = ui_scale(L->dpi, 10);
 
-    L->shortLabels = (L->btnW < 90);
+    L->shortLabels = (L->btnW < ui_scale(L->dpi, 90));
     L->subtitle = FALSE;
 
-    // Fixed glyph size: the icons must not grow when the window is enlarged.
-    L->iconScale = 1.0f;
+    // Glyphs scale with the display scaling, not with the window size.
+    L->iconScale = (float)L->dpi / 96.0f;
 }
 
 // Close button: a flush rectangle in the top-right corner, no rounding, no gap.
 static RECT gui_close_rect(const GuiLayout *L) {
     RECT r;
     r.right  = L->width;          // touches the right edge
-    r.left   = r.right - GUI_CLOSE_W;
+    r.left   = r.right - ui_scale(L->dpi, GUI_CLOSE_W);
     r.top    = 0;                 // touches the top edge
     r.bottom = L->titleH;
     return r;
@@ -289,15 +324,21 @@ static void gui_clamp_to_monitor(RECT *r) {
     int availW = m.right - m.left;
     int availH = m.bottom - m.top;
 
+    int dpi = ui_dpi_for_monitor(mon);
+    int maxW = ui_scale(dpi, GUI_MAX_W);
+    int maxH = ui_scale(dpi, GUI_MAX_H);
+    int minW = ui_scale(dpi, GUI_MIN_W);
+    int minH = ui_scale(dpi, GUI_MIN_H);
+
     int w = r->right - r->left;
     int h = r->bottom - r->top;
 
-    if (w > GUI_MAX_W) w = GUI_MAX_W;
-    if (h > GUI_MAX_H) h = GUI_MAX_H;
+    if (w > maxW) w = maxW;
+    if (h > maxH) h = maxH;
     if (w > availW)    w = availW;
     if (h > availH)    h = availH;
-    if (w < GUI_MIN_W) w = GUI_MIN_W;
-    if (h < GUI_MIN_H) h = GUI_MIN_H;
+    if (w < minW) w = minW;
+    if (h < minH) h = minH;
     if (w > availW)    w = availW;   // monitor narrower than the minimum
     if (h > availH)    h = availH;
 
@@ -528,7 +569,7 @@ static void gui_draw_button(LPDRAWITEMSTRUCT di) {
     COLORREF bg = down ? GUI_BTN_DOWN : (hot ? GUI_BTN_HOT : GUI_BTN);
     COLORREF border = hot ? GUI_ACCENT : GUI_BORDER;
 
-    gui_round_rect(dc, &rc, 8, bg, border);
+    gui_round_rect(dc, &rc, ui_scale(L.dpi, 8), bg, border);
 
     wchar_t label[128];
     GetWindowTextW(di->hwndItem, label, 128);
@@ -554,20 +595,21 @@ static void gui_draw_button(LPDRAWITEMSTRUCT di) {
         SelectObject(dc, prev);
     }
 
-    int gapIconText = 5;
-    int gapLabelSub = 2;
+    int gapIconText = ui_scale(L.dpi, 5);
+    int gapLabelSub = ui_scale(L.dpi, 2);
     int blockH = iconPx + gapIconText + tmLabel.tmHeight
                + (L.subtitle ? gapLabelSub + subH : 0);
 
     int blockTop = rc.top + ((rc.bottom - rc.top) - blockH) / 2;
-    if (blockTop < rc.top + 2) blockTop = rc.top + 2;
+    if (blockTop < rc.top + ui_scale(L.dpi, 2)) blockTop = rc.top + ui_scale(L.dpi, 2);
 
     int cx = (rc.left + rc.right) / 2;
     int iconCy = blockTop + iconPx / 2;
     gui_draw_icon(dc, id, cx, iconCy, hot ? GUI_ACCENT : GUI_TEXT, L.iconScale);
 
-    RECT lr = { rc.left + 4, blockTop + iconPx + gapIconText,
-                rc.right - 4, blockTop + iconPx + gapIconText + tmLabel.tmHeight };
+    int padX = ui_scale(L.dpi, 4);
+    RECT lr = { rc.left + padX, blockTop + iconPx + gapIconText,
+                rc.right - padX, blockTop + iconPx + gapIconText + tmLabel.tmHeight };
     SetTextColor(dc, GUI_TEXT);
     DrawTextW(dc, label, -1, &lr,
               DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
@@ -577,7 +619,8 @@ static void gui_draw_button(LPDRAWITEMSTRUCT di) {
         gui_button_subtitle(id, subtitle, 128);
 
         SelectObject(dc, smallFont);
-        RECT sr = { rc.left + 4, lr.bottom + gapLabelSub, rc.right - 4, lr.bottom + gapLabelSub + subH };
+        RECT sr = { rc.left + padX, lr.bottom + gapLabelSub,
+                    rc.right - padX, lr.bottom + gapLabelSub + subH };
         SetTextColor(dc, GUI_DIM);
         DrawTextW(dc, subtitle, -1, &sr,
                   DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
@@ -642,17 +685,20 @@ static RECT preview_image_rect(HWND hwnd) {
     return rc;
 }
 
-// Close button: flush in the top-right corner, 46x30, no margin.
+// Close button: flush in the top-right corner, scaled with the display DPI.
 static RECT preview_x_rect(HWND hwnd) {
     RECT rc;
     GetClientRect(hwnd, &rc);
-    RECT r = { rc.right - PREVIEW_X_W, 0, rc.right, PREVIEW_X_H };
+    int dpi = ui_dpi_for_window(hwnd);
+    int w = ui_scale(dpi, PREVIEW_X_W);
+    int h = ui_scale(dpi, PREVIEW_X_H);
+    RECT r = { rc.right - w, 0, rc.right, h };
     if (r.left < 0) r.left = 0;
     return r;
 }
 
-// Linear scRGB -> 8-bit sRGB lookup. The capture is already linear when HDR,
-// so this is the only colour conversion the preview needs.
+// Linear scRGB -> 8-bit sRGB lookup. Used only for the clipboard DIB and the
+// GDI fallback; the on-screen preview keeps the original FP16 values.
 static const uint8_t *preview_srgb_lut(void) {
     static uint8_t lut[1025];
     static BOOL built = FALSE;
@@ -672,10 +718,655 @@ static const uint8_t *preview_srgb_lut(void) {
     return lut;
 }
 
-// Convert the captured Grab into a 32-bpp BGRA DIB. SDR is a direct channel
-// swizzle; HDR takes the FP16 scRGB half floats through the sRGB LUT. Very
-// large frames are point-sampled down to PREVIEW_MAX_TEX so the preview bitmap
-// stays bounded even on 6K/8K displays.
+// GPU presentation for the preview window.
+
+// GDI only understands 8-bit SDR,
+// so drawing the captured frame through a DIB
+// flattened an HDR (FP16 scRGB) capture to sRGB before it ever reached the screen
+
+// The preview is therefore presented through D3D11 flip-model swap chain
+// FP16 scRGB chain for HDR captures and a B8G8R8A8 sRGB chain for SDR captures.
+// The GDI bitmap is still built as the clipboard source
+// and as the fallback when D3D is unavailable.
+
+
+typedef struct {
+    float img[4];    // left, top, right, bottom of the image in client pixels
+    float xbtn[4];   // close button rectangle (empty when it is hidden)
+    float ui_gamma;  // 1.0 for the sRGB chain, 2.2 to lift UI into linear scRGB
+    float pad[3];
+} PreviewGpuCB;
+
+typedef struct {
+    ID3D11Device             *device;
+    ID3D11DeviceContext      *ctx;
+    IDXGISwapChain3          *swap;
+    ID3D11RenderTargetView   *rtv;
+    ID3D11Texture2D          *src_tex;
+    ID3D11ShaderResourceView *src_srv;
+    ID3D11Texture2D          *x_tex;
+    ID3D11ShaderResourceView *x_srv;
+    ID3D11VertexShader       *vs;
+    ID3D11PixelShader        *ps;
+    ID3D11Buffer             *cb;
+    ID3D11SamplerState       *samp;
+    int is_hdr;
+    int swap_w, swap_h;
+    int x_tex_w, x_tex_h;
+    HDC x_dc;
+    HBITMAP x_bmp;
+    HGDIOBJ x_old;
+    void *x_bits;
+} PreviewGpu;
+
+static PreviewGpu g_prevGpu;
+static BOOL       g_prevGpuActive = FALSE;
+
+static const char k_preview_shader[] =
+    "cbuffer P : register(b0) {\n"
+    "  float4 img; float4 xbtn; float ui_gamma; float3 pad;\n"
+    "};\n"
+    "Texture2D<float4> Src : register(t0);\n"
+    "Texture2D<float4> Xbt : register(t1);\n"
+    "SamplerState Samp : register(s0);\n"
+    "struct V { float4 pos : SV_Position; };\n"
+    "V VS(uint id : SV_VertexID) {\n"
+    "  V o;\n"
+    // Same clockwise full-viewport triangle as the region overlay: the default
+    // rasterizer culls counter-clockwise faces and would leave the window black.
+    "  o.pos = float4((id == 1) ? 3.0 : -1.0, (id == 2) ? -3.0 : 1.0, 0.0, 1.0);\n"
+    "  return o;\n"
+    "}\n"
+    "float4 PS(V i) : SV_Target {\n"
+    "  float2 p = i.pos.xy;\n"
+    "  float3 c = float3(1.0, 1.0, 1.0);\n" // white frame / background
+    "  if (img.z > img.x && img.w > img.y &&\n"
+    "      p.x >= img.x && p.x < img.z && p.y >= img.y && p.y < img.w) {\n"
+    "    float2 uv = (p - img.xy) / (img.zw - img.xy);\n"
+    "    c = Src.SampleLevel(Samp, uv, 0.0).rgb;\n"
+    "  }\n"
+    "  if (xbtn.z > xbtn.x && p.x >= xbtn.x && p.x < xbtn.z &&\n"
+    "      p.y >= xbtn.y && p.y < xbtn.w) {\n"
+    "    float2 uv = (p - xbtn.xy) / (xbtn.zw - xbtn.xy);\n"
+    "    float3 t = Xbt.SampleLevel(Samp, uv, 0.0).rgb;\n"
+    // The button DIB is sRGB; the scRGB target is linear.
+    "    c = pow(max(t, 0.0), ui_gamma);\n"
+    "  }\n"
+    "  return float4(c, 1.0);\n"
+    "}\n";
+
+static ID3DBlob *preview_gpu_compile(const char *entry, const char *target) {
+    static HMODULE     compiler = NULL;
+    static pD3DCompile compile_fn = NULL;
+    static int         tried = 0;
+
+    if (!tried) {
+        tried = 1;
+        compiler = LoadLibraryW(L"d3dcompiler_47.dll");
+        if (compiler) {
+            compile_fn = (pD3DCompile)(void *)GetProcAddress(compiler, "D3DCompile");
+        }
+    }
+    if (!compile_fn) {
+        dbg("preview: D3DCompile unavailable, keeping GDI fallback");
+        return NULL;
+    }
+
+    ID3DBlob *code = NULL;
+    ID3DBlob *err = NULL;
+    HRESULT hr = compile_fn(k_preview_shader, sizeof k_preview_shader - 1,
+                            NULL, NULL, NULL, entry, target, 0, 0, &code, &err);
+    if (FAILED(hr)) {
+        dbg("preview: shader %s compile failed (0x%08lX) %s", entry, hr,
+            err ? (const char *)err->lpVtbl->GetBufferPointer(err) : "");
+        if (err) err->lpVtbl->Release(err);
+        if (code) code->lpVtbl->Release(code);
+        return NULL;
+    }
+    if (err) err->lpVtbl->Release(err);
+    return code;
+}
+
+static void preview_gpu_destroy(void) {
+    g_prevGpuActive = FALSE;
+
+    if (g_prevGpu.ctx) g_prevGpu.ctx->lpVtbl->ClearState(g_prevGpu.ctx);
+    if (g_prevGpu.rtv)      g_prevGpu.rtv->lpVtbl->Release(g_prevGpu.rtv);
+    if (g_prevGpu.src_srv)  g_prevGpu.src_srv->lpVtbl->Release(g_prevGpu.src_srv);
+    if (g_prevGpu.src_tex)  g_prevGpu.src_tex->lpVtbl->Release(g_prevGpu.src_tex);
+    if (g_prevGpu.x_srv)    g_prevGpu.x_srv->lpVtbl->Release(g_prevGpu.x_srv);
+    if (g_prevGpu.x_tex)    g_prevGpu.x_tex->lpVtbl->Release(g_prevGpu.x_tex);
+    if (g_prevGpu.samp)     g_prevGpu.samp->lpVtbl->Release(g_prevGpu.samp);
+    if (g_prevGpu.cb)       g_prevGpu.cb->lpVtbl->Release(g_prevGpu.cb);
+    if (g_prevGpu.vs)       g_prevGpu.vs->lpVtbl->Release(g_prevGpu.vs);
+    if (g_prevGpu.ps)       g_prevGpu.ps->lpVtbl->Release(g_prevGpu.ps);
+    if (g_prevGpu.swap)     g_prevGpu.swap->lpVtbl->Release(g_prevGpu.swap);
+    if (g_prevGpu.ctx)      g_prevGpu.ctx->lpVtbl->Release(g_prevGpu.ctx);
+    if (g_prevGpu.device)   g_prevGpu.device->lpVtbl->Release(g_prevGpu.device);
+
+    if (g_prevGpu.x_dc && g_prevGpu.x_old)
+        SelectObject(g_prevGpu.x_dc, g_prevGpu.x_old);
+    if (g_prevGpu.x_dc)  { DeleteDC(g_prevGpu.x_dc); g_prevGpu.x_dc = NULL; }
+    if (g_prevGpu.x_bmp) { DeleteObject(g_prevGpu.x_bmp); g_prevGpu.x_bmp = NULL; }
+
+    ZeroMemory(&g_prevGpu, sizeof g_prevGpu);
+}
+
+// Upload one frame into the preview texture.
+//
+// `src` is packed 3-channel RGB: half floats in linear scRGB for HDR, sRGB
+// bytes for SDR. The source may be larger than the stored preview bitmap, so it
+// is point-sampled down to dw x dh and 6K/8K frames stay bounded. The new
+// texture is only swapped in after every step succeeded: a failed decode or
+// upload leaves the previous frame on screen instead of going black.
+static int preview_gpu_upload(const void *src, int sw, int sh,
+                              int dw, int dh, int is_hdr) {
+    if (!g_prevGpu.device || !g_prevGpu.ctx) return 0;
+    if (!src || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return 0;
+    if (is_hdr != g_prevGpu.is_hdr) {
+        dbg("preview: upload colour space mismatch (chain %s, frame %s)",
+            g_prevGpu.is_hdr ? "HDR" : "SDR", is_hdr ? "HDR" : "SDR");
+        return 0;
+    }
+
+    D3D11_TEXTURE2D_DESC td;
+    ZeroMemory(&td, sizeof td);
+    td.Width = (UINT)dw;
+    td.Height = (UINT)dh;
+    td.MipLevels = 1;
+    td.ArraySize = 1;
+    td.Format = is_hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT
+                       : DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DYNAMIC;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+
+    ID3D11Texture2D *tex = NULL;
+    ID3D11ShaderResourceView *srv = NULL;
+
+    if (FAILED(g_prevGpu.device->lpVtbl->CreateTexture2D(
+            g_prevGpu.device, &td, NULL, &tex))) {
+        dbg("preview: CreateTexture2D(source) failed");
+        return 0;
+    }
+
+    D3D11_MAPPED_SUBRESOURCE map;
+    if (FAILED(g_prevGpu.ctx->lpVtbl->Map(
+            g_prevGpu.ctx, (ID3D11Resource *)tex,
+            0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        dbg("preview: Map(source) failed");
+        tex->lpVtbl->Release(tex);
+        return 0;
+    }
+
+    const int bpp = is_hdr ? 6 : 3;
+    const uint8_t *base = (const uint8_t *)src;
+
+    for (int y = 0; y < dh; y++) {
+        int sy = (dw == sw && dh == sh) ? y : (int)((long long)y * sh / dh);
+        if (sy >= sh) sy = sh - 1;
+        const uint8_t *srow = base + (size_t)sy * sw * bpp;
+        uint8_t *drow = (uint8_t *)map.pData + (size_t)y * map.RowPitch;
+
+        for (int x = 0; x < dw; x++) {
+            int sx = (dw == sw && dh == sh) ? x : (int)((long long)x * sw / dw);
+            if (sx >= sw) sx = sw - 1;
+            const uint8_t *sp = srow + (size_t)sx * bpp;
+            uint8_t *dp = drow + (size_t)x * 4;
+
+            if (is_hdr) {
+                dp[0] = sp[0]; dp[1] = sp[1];   // R (half)
+                dp[2] = sp[2]; dp[3] = sp[3];   // G
+                dp[4] = sp[4]; dp[5] = sp[5];   // B
+                dp[6] = 0x00;  dp[7] = 0x3C;    // A = 1.0h
+            } else {
+                dp[0] = sp[2]; // B
+                dp[1] = sp[1]; // G
+                dp[2] = sp[0]; // R
+                dp[3] = 255;
+            }
+        }
+    }
+
+    g_prevGpu.ctx->lpVtbl->Unmap(g_prevGpu.ctx, (ID3D11Resource *)tex, 0);
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC svd;
+    ZeroMemory(&svd, sizeof svd);
+    svd.Format = td.Format;
+    svd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+    svd.Texture2D.MipLevels = 1;
+    if (FAILED(g_prevGpu.device->lpVtbl->CreateShaderResourceView(
+            g_prevGpu.device, (ID3D11Resource *)tex, &svd, &srv))) {
+        dbg("preview: CreateShaderResourceView(source) failed");
+        tex->lpVtbl->Release(tex);
+        return 0;
+    }
+
+    // Success: replace the previous frame.
+    if (g_prevGpu.src_srv) {
+        g_prevGpu.src_srv->lpVtbl->Release(g_prevGpu.src_srv);
+        g_prevGpu.src_srv = NULL;
+    }
+    if (g_prevGpu.src_tex) {
+        g_prevGpu.src_tex->lpVtbl->Release(g_prevGpu.src_tex);
+        g_prevGpu.src_tex = NULL;
+    }
+    g_prevGpu.src_tex = tex;
+    g_prevGpu.src_srv = srv;
+    return 1;
+}
+
+// Upload the captured frame. The grab is packed 3-channel RGB: half floats in
+// linear scRGB for HDR, sRGB bytes for SDR. preview_make_bitmap() has already
+// sized the on-screen texture (g_prevW/g_prevH), so those bounds are reused.
+static int preview_gpu_upload_source(const Grab *g) {
+    if (!g || !g->bits) return 0;
+    return preview_gpu_upload(g->bits, g->w, g->h, g_prevW, g_prevH, g->is_hdr);
+}
+
+// Redraw the close button into its DIB and upload it. Called each time the
+// button's visibility or hover state can have changed; the DIB is tiny.
+static int preview_gpu_update_x_texture(void) {
+    if (!g_prevGpu.ctx || !g_prevGpu.x_tex) return 0;
+
+    int xw = g_prevGpu.x_tex_w, xh = g_prevGpu.x_tex_h;
+    if (xw <= 0 || xh <= 0) return 0;
+
+    if (!g_prevGpu.x_dc || !g_prevGpu.x_bmp) {
+        HDC screen = GetDC(NULL);
+        BITMAPINFO bi;
+        ZeroMemory(&bi, sizeof bi);
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = xw;
+        bi.bmiHeader.biHeight = -xh; // top-down
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+
+        void *bits = NULL;
+        g_prevGpu.x_bmp = CreateDIBSection(screen, &bi, DIB_RGB_COLORS, &bits, NULL, 0);
+        g_prevGpu.x_dc = CreateCompatibleDC(screen);
+        ReleaseDC(NULL, screen);
+
+        if (!g_prevGpu.x_dc || !g_prevGpu.x_bmp || !bits) {
+            dbg("preview: close button DIB creation failed");
+            return 0;
+        }
+        g_prevGpu.x_bits = bits;
+        g_prevGpu.x_old = SelectObject(g_prevGpu.x_dc, g_prevGpu.x_bmp);
+    }
+
+    // The texture is already scaled to the monitor DPI,
+    // so the glyph extent is scaled by the same ratio as the button.
+    int glyph = MulDiv(GUI_CLOSE_GLYPH, xw, PREVIEW_X_W);
+    if (glyph < 1) glyph = 1;
+
+    RECT r = { 0, 0, xw, xh };
+    gui_draw_close_button(g_prevGpu.x_dc, &r, g_prevXHot, TRUE,
+                          RGB(32, 32, 32), RGB(255, 255, 255), glyph);
+
+    // GDI leaves the alpha bytes alone; the shader uses the RGB of an opaque
+    // button, so force every pixel opaque.
+    uint8_t *px = (uint8_t *)g_prevGpu.x_bits;
+    for (size_t i = 0, n = (size_t)xw * xh; i < n; i++, px += 4)
+        px[3] = 255;
+
+    g_prevGpu.ctx->lpVtbl->UpdateSubresource(
+        g_prevGpu.ctx, (ID3D11Resource *)g_prevGpu.x_tex, 0, NULL,
+        g_prevGpu.x_bits, (UINT)xw * 4, 0);
+    return 1;
+}
+
+static void preview_gpu_present(HWND hwnd) {
+    if (!g_prevGpuActive || !g_prevGpu.ctx || !g_prevGpu.swap) return;
+
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    RECT img = preview_image_rect(hwnd);
+
+    PreviewGpuCB cb;
+    ZeroMemory(&cb, sizeof cb);
+    cb.img[0] = (float)img.left;
+    cb.img[1] = (float)img.top;
+    cb.img[2] = (float)img.right;
+    cb.img[3] = (float)img.bottom;
+    cb.ui_gamma = g_prevGpu.is_hdr ? 2.2f : 1.0f;
+
+    if (g_prevXShown) {
+        RECT xr = preview_x_rect(hwnd);
+        cb.xbtn[0] = (float)xr.left;
+        cb.xbtn[1] = (float)xr.top;
+        cb.xbtn[2] = (float)xr.right;
+        cb.xbtn[3] = (float)xr.bottom;
+        preview_gpu_update_x_texture();
+    }
+
+    D3D11_MAPPED_SUBRESOURCE cbmap;
+    if (SUCCEEDED(g_prevGpu.ctx->lpVtbl->Map(
+            g_prevGpu.ctx, (ID3D11Resource *)g_prevGpu.cb,
+            0, D3D11_MAP_WRITE_DISCARD, 0, &cbmap))) {
+        memcpy(cbmap.pData, &cb, sizeof cb);
+        g_prevGpu.ctx->lpVtbl->Unmap(g_prevGpu.ctx, (ID3D11Resource *)g_prevGpu.cb, 0);
+    }
+
+    D3D11_VIEWPORT vp;
+    ZeroMemory(&vp, sizeof vp);
+    vp.Width = (float)(rc.right - rc.left);
+    vp.Height = (float)(rc.bottom - rc.top);
+    vp.MaxDepth = 1.0f;
+
+    ID3D11ShaderResourceView *srvs[2] = { g_prevGpu.src_srv, g_prevGpu.x_srv };
+    g_prevGpu.ctx->lpVtbl->OMSetRenderTargets(g_prevGpu.ctx, 1, &g_prevGpu.rtv, NULL);
+    g_prevGpu.ctx->lpVtbl->RSSetViewports(g_prevGpu.ctx, 1, &vp);
+    g_prevGpu.ctx->lpVtbl->IASetPrimitiveTopology(
+        g_prevGpu.ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    g_prevGpu.ctx->lpVtbl->VSSetShader(g_prevGpu.ctx, g_prevGpu.vs, NULL, 0);
+    g_prevGpu.ctx->lpVtbl->PSSetShader(g_prevGpu.ctx, g_prevGpu.ps, NULL, 0);
+    g_prevGpu.ctx->lpVtbl->PSSetConstantBuffers(g_prevGpu.ctx, 0, 1, &g_prevGpu.cb);
+    g_prevGpu.ctx->lpVtbl->PSSetShaderResources(g_prevGpu.ctx, 0, 2, srvs);
+    g_prevGpu.ctx->lpVtbl->PSSetSamplers(g_prevGpu.ctx, 0, 1, &g_prevGpu.samp);
+    g_prevGpu.ctx->lpVtbl->Draw(g_prevGpu.ctx, 3, 0);
+
+    HRESULT hr = g_prevGpu.swap->lpVtbl->Present(g_prevGpu.swap, 1, 0);
+    if (FAILED(hr)) dbg("preview: Present failed hr=0x%08lX", hr);
+}
+
+// Keep the swap chain matching the window if the frame size changes
+// (DPI change, or a new capture reusing an open preview window).
+static void preview_gpu_resize(HWND hwnd) {
+    if (!g_prevGpuActive || !g_prevGpu.swap || !g_prevGpu.device) return;
+
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    UINT w = (UINT)(rc.right - rc.left);
+    UINT h = (UINT)(rc.bottom - rc.top);
+    if (w < 1 || h < 1) return;
+    if ((int)w == g_prevGpu.swap_w && (int)h == g_prevGpu.swap_h) return;
+
+    if (g_prevGpu.rtv) {
+        g_prevGpu.rtv->lpVtbl->Release(g_prevGpu.rtv);
+        g_prevGpu.rtv = NULL;
+    }
+
+    DXGI_FORMAT fmt = g_prevGpu.is_hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT
+                                       : DXGI_FORMAT_B8G8R8A8_UNORM;
+    if (FAILED(g_prevGpu.swap->lpVtbl->ResizeBuffers(g_prevGpu.swap, 2, w, h, fmt, 0))) {
+        dbg("preview: ResizeBuffers failed, falling back to GDI");
+        preview_gpu_destroy();
+        return;
+    }
+
+    ID3D11Texture2D *backbuffer = NULL;
+    if (FAILED(g_prevGpu.swap->lpVtbl->GetBuffer(
+            g_prevGpu.swap, 0, &IID_ID3D11Texture2D, (void **)&backbuffer))) {
+        dbg("preview: GetBuffer failed after resize");
+        preview_gpu_destroy();
+        return;
+    }
+    HRESULT hr = g_prevGpu.device->lpVtbl->CreateRenderTargetView(
+        g_prevGpu.device, (ID3D11Resource *)backbuffer, NULL, &g_prevGpu.rtv);
+    backbuffer->lpVtbl->Release(backbuffer);
+    if (FAILED(hr)) {
+        dbg("preview: CreateRenderTargetView failed after resize");
+        preview_gpu_destroy();
+        return;
+    }
+
+    g_prevGpu.swap_w = (int)w;
+    g_prevGpu.swap_h = (int)h;
+}
+
+static int preview_gpu_init(HWND hwnd, const Grab *g, int is_hdr) {
+    preview_gpu_destroy();
+    g_prevGpu.is_hdr = is_hdr;
+
+    IDXGIFactory1 *factory1 = NULL;
+    IDXGIFactory2 *factory2 = NULL;
+    IDXGIAdapter1 *adapter = NULL;
+    ID3DBlob *vs_blob = NULL;
+    ID3DBlob *ps_blob = NULL;
+    IDXGISwapChain1 *swap1 = NULL;
+    ID3D11Texture2D *backbuffer = NULL;
+    int ok = 0;
+
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    UINT w = (UINT)(rc.right - rc.left);
+    UINT h = (UINT)(rc.bottom - rc.top);
+    if (w < 1 || h < 1) return 0;
+
+    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+
+    // Find the adapter that drives this monitor. CreateDXGIFactory2 is
+    // Windows 8.1+, so QI for it and fall back to GDI on older systems.
+    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&factory1))) {
+        dbg("preview: CreateDXGIFactory1 failed");
+        goto done;
+    }
+    if (FAILED(factory1->lpVtbl->QueryInterface(
+            factory1, &IID_IDXGIFactory2, (void **)&factory2))) {
+        dbg("preview: IDXGIFactory2 unavailable");
+        goto done;
+    }
+
+    for (UINT ai = 0; !adapter; ai++) {
+        IDXGIAdapter1 *cand = NULL;
+        if (factory1->lpVtbl->EnumAdapters1(factory1, ai, &cand) == DXGI_ERROR_NOT_FOUND)
+            break;
+        if (!cand) continue;
+
+        for (UINT oi = 0; ; oi++) {
+            IDXGIOutput *out = NULL;
+            if (cand->lpVtbl->EnumOutputs(cand, oi, &out) == DXGI_ERROR_NOT_FOUND)
+                break;
+            if (!out) continue;
+
+            DXGI_OUTPUT_DESC od;
+            if (SUCCEEDED(out->lpVtbl->GetDesc(out, &od)) && od.Monitor == monitor) {
+                adapter = cand;
+                out->lpVtbl->Release(out);
+                break;
+            }
+            out->lpVtbl->Release(out);
+        }
+        if (!adapter) cand->lpVtbl->Release(cand);
+    }
+    if (!adapter) {
+        dbg("preview: no adapter for monitor");
+        goto done;
+    }
+
+    D3D_FEATURE_LEVEL levels[] = {
+        D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1, D3D_FEATURE_LEVEL_10_0
+    };
+    D3D_FEATURE_LEVEL got;
+    if (FAILED(D3D11CreateDevice((IDXGIAdapter *)adapter, D3D_DRIVER_TYPE_UNKNOWN, NULL,
+                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT, levels, 3,
+                                 D3D11_SDK_VERSION, &g_prevGpu.device, &got,
+                                 &g_prevGpu.ctx))) {
+        dbg("preview: D3D11CreateDevice failed");
+        goto done;
+    }
+
+    vs_blob = preview_gpu_compile("VS", "vs_4_0");
+    ps_blob = preview_gpu_compile("PS", "ps_4_0");
+    if (!vs_blob || !ps_blob) goto done;
+    if (FAILED(g_prevGpu.device->lpVtbl->CreateVertexShader(
+            g_prevGpu.device, vs_blob->lpVtbl->GetBufferPointer(vs_blob),
+            vs_blob->lpVtbl->GetBufferSize(vs_blob), NULL, &g_prevGpu.vs))) {
+        dbg("preview: CreateVertexShader failed");
+        goto done;
+    }
+    if (FAILED(g_prevGpu.device->lpVtbl->CreatePixelShader(
+            g_prevGpu.device, ps_blob->lpVtbl->GetBufferPointer(ps_blob),
+            ps_blob->lpVtbl->GetBufferSize(ps_blob), NULL, &g_prevGpu.ps))) {
+        dbg("preview: CreatePixelShader failed");
+        goto done;
+    }
+    vs_blob->lpVtbl->Release(vs_blob); vs_blob = NULL;
+    ps_blob->lpVtbl->Release(ps_blob); ps_blob = NULL;
+
+    DXGI_SWAP_CHAIN_DESC1 sd;
+    ZeroMemory(&sd, sizeof sd);
+    sd.Width = w;
+    sd.Height = h;
+    sd.Format = is_hdr ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_B8G8R8A8_UNORM;
+    sd.SampleDesc.Count = 1;
+    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    sd.BufferCount = 2;
+    sd.Scaling = DXGI_SCALING_STRETCH;
+    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    sd.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+
+    if (FAILED(factory2->lpVtbl->CreateSwapChainForHwnd(
+            factory2, (IUnknown *)g_prevGpu.device, hwnd, &sd, NULL, NULL, &swap1))) {
+        dbg("preview: CreateSwapChainForHwnd failed");
+        goto done;
+    }
+    if (FAILED(swap1->lpVtbl->QueryInterface(
+            swap1, &IID_IDXGISwapChain3, (void **)&g_prevGpu.swap))) {
+        dbg("preview: IDXGISwapChain3 unavailable");
+        goto done;
+    }
+    factory2->lpVtbl->MakeWindowAssociation(factory2, hwnd, DXGI_MWA_NO_ALT_ENTER);
+
+    if (is_hdr) {
+        // The captured frame is linear scRGB (1.0 = SDR reference white). Pass
+        // it through unchanged so values above 1.0 stay HDR highlights instead
+        // of being clipped to white by an 8-bit sRGB DIB.
+        if (FAILED(g_prevGpu.swap->lpVtbl->SetColorSpace1(
+                g_prevGpu.swap, DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709))) {
+            dbg("preview: SetColorSpace1(scRGB) failed");
+            goto done;
+        }
+    } else {
+        // sRGB is the default for a B8G8R8A8 flip chain; request it explicitly
+        // but do not abort if the driver refuses an otherwise working chain.
+        g_prevGpu.swap->lpVtbl->SetColorSpace1(
+            g_prevGpu.swap, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709);
+    }
+
+    if (FAILED(g_prevGpu.swap->lpVtbl->GetBuffer(
+            g_prevGpu.swap, 0, &IID_ID3D11Texture2D, (void **)&backbuffer))) {
+        dbg("preview: GetBuffer failed");
+        goto done;
+    }
+    if (FAILED(g_prevGpu.device->lpVtbl->CreateRenderTargetView(
+            g_prevGpu.device, (ID3D11Resource *)backbuffer, NULL, &g_prevGpu.rtv))) {
+        dbg("preview: CreateRenderTargetView failed");
+        goto done;
+    }
+
+    D3D11_BUFFER_DESC bd;
+    ZeroMemory(&bd, sizeof bd);
+    bd.ByteWidth = sizeof(PreviewGpuCB);
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(g_prevGpu.device->lpVtbl->CreateBuffer(
+            g_prevGpu.device, &bd, NULL, &g_prevGpu.cb))) {
+        dbg("preview: CreateBuffer(cb) failed");
+        goto done;
+    }
+
+    D3D11_SAMPLER_DESC smd;
+    ZeroMemory(&smd, sizeof smd);
+    smd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    smd.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    smd.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    smd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    smd.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(g_prevGpu.device->lpVtbl->CreateSamplerState(
+            g_prevGpu.device, &smd, &g_prevGpu.samp))) {
+        dbg("preview: CreateSamplerState failed");
+        goto done;
+    }
+
+    if (!preview_gpu_upload_source(g)) goto done;
+
+    // The close button texture is filled in before it is first sampled. Its
+    // size is scaled with the monitor DPI so the glyph stays crisp.
+    {
+        int xw = ui_scale(ui_dpi_for_window(hwnd), PREVIEW_X_W);
+        int xh = ui_scale(ui_dpi_for_window(hwnd), PREVIEW_X_H);
+        if (xw < 1) xw = 1;
+        if (xh < 1) xh = 1;
+
+        D3D11_TEXTURE2D_DESC xtd;
+        ZeroMemory(&xtd, sizeof xtd);
+        xtd.Width = (UINT)xw;
+        xtd.Height = (UINT)xh;
+        xtd.MipLevels = 1;
+        xtd.ArraySize = 1;
+        xtd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        xtd.SampleDesc.Count = 1;
+        xtd.Usage = D3D11_USAGE_DEFAULT;
+        xtd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        // Safe default: an opaque dark button, so the texture is never
+        // undefined even if the first GDI render fails.
+        uint32_t *xinit = (uint32_t *)malloc((size_t)xw * xh * sizeof(uint32_t));
+        if (!xinit) {
+            dbg("preview: close button init allocation failed");
+            goto done;
+        }
+        for (int i = 0; i < xw * xh; i++) xinit[i] = 0xFF202020u;
+
+        D3D11_SUBRESOURCE_DATA xdata;
+        ZeroMemory(&xdata, sizeof xdata);
+        xdata.pSysMem = xinit;
+        xdata.SysMemPitch = (UINT)xw * 4;
+
+        HRESULT xhr = g_prevGpu.device->lpVtbl->CreateTexture2D(
+                g_prevGpu.device, &xtd, &xdata, &g_prevGpu.x_tex);
+        free(xinit);
+
+        if (FAILED(xhr)) {
+            dbg("preview: CreateTexture2D(close button) failed");
+            goto done;
+        }
+
+        g_prevGpu.x_tex_w = xw;
+        g_prevGpu.x_tex_h = xh;
+
+        D3D11_SHADER_RESOURCE_VIEW_DESC xsvd;
+        ZeroMemory(&xsvd, sizeof xsvd);
+        xsvd.Format = xtd.Format;
+        xsvd.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        xsvd.Texture2D.MipLevels = 1;
+        if (FAILED(g_prevGpu.device->lpVtbl->CreateShaderResourceView(
+                g_prevGpu.device, (ID3D11Resource *)g_prevGpu.x_tex, &xsvd,
+                &g_prevGpu.x_srv))) {
+            dbg("preview: CreateShaderResourceView(close button) failed");
+            goto done;
+        }
+    }
+
+    g_prevGpu.swap_w = (int)w;
+    g_prevGpu.swap_h = (int)h;
+    g_prevGpuActive = TRUE;
+    ok = 1;
+
+done:
+    if (backbuffer) backbuffer->lpVtbl->Release(backbuffer);
+    if (swap1) swap1->lpVtbl->Release(swap1);
+    if (vs_blob) vs_blob->lpVtbl->Release(vs_blob);
+    if (ps_blob) ps_blob->lpVtbl->Release(ps_blob);
+    if (factory2) factory2->lpVtbl->Release(factory2);
+    if (factory1) factory1->lpVtbl->Release(factory1);
+    if (adapter) adapter->lpVtbl->Release(adapter);
+
+    if (!ok) preview_gpu_destroy();
+    return ok;
+}
+
+// Convert the captured Grab into a 32-bpp BGRA DIB. This is the clipboard
+// source and the GDI fallback; the on-screen preview goes through
+// preview_gpu_present() when D3D is available. SDR is a direct channel swizzle;
+// HDR takes the FP16 scRGB half floats through the sRGB LUT. Very large frames
+// are point-sampled down to PREVIEW_MAX_TEX so the bitmap stays bounded even on
+// 6K/8K displays.
 static BOOL preview_make_bitmap(const Grab *g) {
     if (!g || !g->bits || g->w <= 0 || g->h <= 0) return FALSE;
 
@@ -861,6 +1552,49 @@ static void preview_open_with(void) {
         ShellExecuteW(NULL, L"openas", file, NULL, NULL, SW_SHOWNORMAL);
 }
 
+// EncodeWorker side: remember the finished file and poke the preview. No GDI
+// or D3D calls here; those objects belong to the window thread.
+static void preview_on_saved(const wchar_t *path) {
+    if (!path || !path[0]) return;
+
+    // Ignore saves that do not belong to the capture this preview is showing
+    // (multimonitor mode saves several files; only the first one is previewed).
+    wchar_t current[MAX_PATH];
+    preview_get_path(current);
+    if (_wcsicmp(current, path) != 0) return;
+
+    AcquireSRWLockExclusive(&g_prevReadyLock);
+    wcsncpy_s(g_prevReadyPath, MAX_PATH, path, _TRUNCATE);
+    ReleaseSRWLockExclusive(&g_prevReadyLock);
+
+    HWND hwnd = g_hwndPreview;
+    if (hwnd && IsWindow(hwnd)) {
+        PostMessageW(hwnd, WM_PREVIEW_FILE_READY, 0, 0);
+    }
+}
+
+// Swap the preview over to the decoded .jxl once the encoder has closed the
+// file. HDR stays FP16 linear scRGB (libjxl converts the PQ / Rec.2020 data),
+// SDR stays 8-bit sRGB, so the existing passthrough shader works unchanged.
+static void preview_reload_from_file(HWND hwnd, const wchar_t *path) {
+    if (!g_prevGpuActive || !hwnd || !path || !path[0]) return;
+
+    int is_hdr = g_prevGpu.is_hdr;
+    uint8_t *bits = NULL;
+    int w = 0, h = 0;
+
+    if (!decode_jxl_for_preview(path, is_hdr, &bits, &w, &h)) return;
+    if (w <= 0 || h <= 0 || !bits) { free(bits); return; }
+
+    if (preview_gpu_upload(bits, w, h, g_prevW, g_prevH, is_hdr)) {
+        g_prevShowingDecoded = TRUE;
+        dbg("preview: showing decoded %s frame %dx%d",
+            is_hdr ? "HDR" : "SDR", w, h);
+        InvalidateRect(hwnd, NULL, FALSE);
+    }
+    free(bits);
+}
+
 // Right-click menu, using the same hidden owner window as the tray menu so it
 // picks up the Dark/Light theme.
 static void preview_show_menu(HWND hwnd, POINT pt) {
@@ -874,6 +1608,9 @@ static void preview_show_menu(HWND hwnd, POINT pt) {
     AppendMenuW(menu, MF_STRING, IDC_PREV_COPY,   L"Copy Image");
     AppendMenuW(menu, MF_STRING | (exists ? 0 : MF_GRAYED),
                 IDC_PREV_OPENWITH, L"Open With...");
+    AppendMenuW(menu, MF_STRING | (exists ? 0 : MF_GRAYED) |
+                      (g_prevShowingDecoded ? MF_CHECKED : 0),
+                IDC_PREV_RELOAD, L"View Encoded JXL");
     AppendMenuW(menu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(menu, MF_STRING, IDC_PREV_CLOSE, L"Close Preview");
 
@@ -1031,8 +1768,9 @@ static void preview_paint(HWND hwnd, HDC dc) {
 
     if (g_prevXShown) {
         RECT xr = preview_x_rect(hwnd);
+        int glyph = ui_scale(ui_dpi_for_window(hwnd), GUI_CLOSE_GLYPH);
         gui_draw_close_button(dc, &xr, g_prevXHot, TRUE,
-                              RGB(32, 32, 32), RGB(255, 255, 255), GUI_CLOSE_GLYPH);
+                              RGB(32, 32, 32), RGB(255, 255, 255), glyph);
     }
 }
 
@@ -1046,8 +1784,8 @@ static void gui_preview_show(const Grab *g, const wchar_t *path) {
     if (!g || !g->bits || g->w <= 0 || g->h <= 0) return;
     if (!preview_make_bitmap(g)) return;
 
-    if (path && path[0]) wcsncpy_s(g_prevPath, MAX_PATH, path, _TRUNCATE);
-    else g_prevPath[0] = L'\0';
+    if (path && path[0]) preview_set_path(path);
+    else preview_set_path(NULL);
 
     if (!g_guiBgBrush) gui_update_theme();
     preview_register_class();
@@ -1064,10 +1802,11 @@ static void gui_preview_show(const Grab *g, const wchar_t *path) {
 
     int w = g->w, h = g->h;
     int border = 0;
+    int preview_dpi = ui_dpi_for_monitor(MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST));
 
     if (availW > 0 && availH > 0 &&
         (g->w >= availW * 95 / 100 || g->h >= availH * 95 / 100)) {
-        border = PREVIEW_FULL_BORDER;
+        border = ui_scale(preview_dpi, PREVIEW_FULL_BORDER);
         double s1 = (double)availW * 0.85 / g->w;
         double s2 = (double)availH * 0.85 / g->h;
         double sc = (s1 < s2) ? s1 : s2;
@@ -1084,6 +1823,7 @@ static void gui_preview_show(const Grab *g, const wchar_t *path) {
     g_prevBorder = border;
     g_prevXShown = FALSE;
     g_prevXHot = FALSE;
+    g_prevShowingDecoded = FALSE;
 
     if (!g_hwndPreview || !IsWindow(g_hwndPreview)) {
         g_hwndPreview = CreateWindowExW(
@@ -1097,6 +1837,13 @@ static void gui_preview_show(const Grab *g, const wchar_t *path) {
     } else {
         SetWindowPos(g_hwndPreview, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
         InvalidateRect(g_hwndPreview, NULL, FALSE);
+    }
+
+    // Present the frame in its own colour space: FP16 scRGB for HDR captures,
+    // B8G8R8A8 sRGB for SDR. The GDI bitmap is only the fallback (and the
+    // clipboard source) if D3D setup fails.
+    if (!preview_gpu_init(g_hwndPreview, g, g->is_hdr)) {
+        dbg("preview: GPU presentation unavailable, using GDI fallback");
     }
 
     ShowWindow(g_hwndPreview, SW_SHOW);
@@ -1127,7 +1874,9 @@ static BOOL preview_close_for_capture(void) {
     if (g_hwndPreview && IsWindow(g_hwndPreview)) {
         BOOL wasPending = g_guiRestorePending;
         g_guiRestorePending = FALSE;
+        g_prevClosingForCapture = TRUE;
         DestroyWindow(g_hwndPreview);
+        g_prevClosingForCapture = FALSE;
         g_guiRestorePending = wasPending;
         return TRUE;
     }
@@ -1147,10 +1896,26 @@ static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
             preview_clamp_to_monitor((RECT *)lp);
             return TRUE;
 
+        case WM_PREVIEW_FILE_READY: {
+            // The encoder finished writing the file. Only refresh if it is the
+            // capture this preview is showing (a stale message from an earlier
+            // capture is ignored).
+            wchar_t path[MAX_PATH];
+            AcquireSRWLockShared(&g_prevReadyLock);
+            wcsncpy_s(path, MAX_PATH, g_prevReadyPath, _TRUNCATE);
+            ReleaseSRWLockShared(&g_prevReadyLock);
+
+            if (path[0] && _wcsicmp(path, g_prevPath) == 0) {
+                preview_reload_from_file(hwnd, path);
+            }
+            return 0;
+        }
+
         case WM_NCLBUTTONDBLCLK:
             return 0; // no maximize on double click
 
         case WM_SIZE:
+            preview_gpu_resize(hwnd);
             InvalidateRect(hwnd, NULL, FALSE);
             return 0;
 
@@ -1160,7 +1925,10 @@ static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC dc = BeginPaint(hwnd, &ps);
-            preview_paint(hwnd, dc);
+            // HDR/SDR-aware GPU presentation; the GDI painter is only the
+            // fallback when D3D setup is unavailable.
+            if (g_prevGpuActive) preview_gpu_present(hwnd);
+            else                 preview_paint(hwnd, dc);
             EndPaint(hwnd, &ps);
             return 0;
         }
@@ -1282,6 +2050,7 @@ static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                 case IDC_PREV_COPY:     preview_copy_to_clipboard(); break;
                 case IDC_PREV_FOLDER:   preview_open_folder(); break;
                 case IDC_PREV_OPENWITH: preview_open_with(); break;
+                case IDC_PREV_RELOAD:   preview_reload_from_file(hwnd, g_prevPath); break;
                 case IDC_PREV_CLOSE:    DestroyWindow(hwnd); break;
             }
             return 0;
@@ -1299,11 +2068,13 @@ static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
 
         case WM_DESTROY: {
             KillTimer(hwnd, PREVIEW_TIMER_X);
+            preview_gpu_destroy();
             g_hwndPreview = NULL;
             g_prevXShown = FALSE;
             g_prevXHot = FALSE;
-            g_prevPath[0] = L'\0';
+            preview_set_path(NULL);
             g_prevBorder = 0;
+            g_prevShowingDecoded = FALSE;
 
             if (g_prevBmp) {
                 DeleteObject(g_prevBmp);
@@ -1322,6 +2093,12 @@ static LRESULT CALLBACK PreviewWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp
                     SetFocus(g_hwndGui);
                 }
             }
+
+            // The Settings window also hid for the capture. Skip this when the
+            // preview is being destroyed only because a new capture started:
+            // the caller hides it again for the new grab.
+            if (!g_prevClosingForCapture)
+                settings_restore_after_capture();
             return 0;
         }
 
@@ -1341,12 +2118,14 @@ static void gui_refresh(void) {
 }
 
 // Hide the window first: a screenshot must not contain the window that asked
-// for it. A short timer gives the compositor time to repaint the desktop.
+// for it (or the Settings window it opened). A short timer gives the
+// compositor time to repaint the desktop.
 static void gui_start_capture(int kind) {
     if (!g_hwndGui || g_guiPendingCapture) return;
 
     // A previous preview must not be part of the new capture.
     preview_close_for_capture();
+    settings_hide_for_capture();
 
     g_guiPendingCapture = kind;
     g_guiRestorePending = TRUE; // the strip returns after the capture/preview
@@ -1358,50 +2137,61 @@ static void gui_start_capture(int kind) {
 // Window procedure
 
 
+static void gui_create_fonts(int dpi) {
+    if (g_guiTitleFont)    { DeleteObject(g_guiTitleFont); g_guiTitleFont = NULL; }
+    if (g_guiCardFont)     { DeleteObject(g_guiCardFont); g_guiCardFont = NULL; }
+    if (g_guiSmallFont)    { DeleteObject(g_guiSmallFont); g_guiSmallFont = NULL; }
+    if (g_guiXFont)        { DeleteObject(g_guiXFont); g_guiXFont = NULL; }
+    if (g_guiTitleFontSm)  { DeleteObject(g_guiTitleFontSm); g_guiTitleFontSm = NULL; }
+    if (g_guiCardFontSm)   { DeleteObject(g_guiCardFontSm); g_guiCardFontSm = NULL; }
+    if (g_guiSmallFontSm)  { DeleteObject(g_guiSmallFontSm); g_guiSmallFontSm = NULL; }
+    if (g_guiXFontSm)      { DeleteObject(g_guiXFontSm); g_guiXFontSm = NULL; }
+
+    g_guiTitleFont = CreateFontW(-ui_scale(dpi, 22), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Variable Display");
+    g_guiCardFont = CreateFontW(-ui_scale(dpi, 14), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    g_guiSmallFont = CreateFontW(-ui_scale(dpi, 11), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    g_guiXFont = CreateFontW(-ui_scale(dpi, 18), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+
+    g_guiTitleFontSm = CreateFontW(-ui_scale(dpi, 14), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Variable Display");
+    g_guiCardFontSm = CreateFontW(-ui_scale(dpi, 12), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    g_guiSmallFontSm = CreateFontW(-ui_scale(dpi, 9), 0, 0, 0, FW_NORMAL, 0, 0, 0,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    g_guiXFontSm = CreateFontW(-ui_scale(dpi, 13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+}
+
 static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
         case WM_CREATE: {
             gui_update_theme();
             ApplyDarkMode(hwnd);
 
-            g_guiTitleFont = CreateFontW(-22, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Variable Display");
-            g_guiCardFont = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            g_guiSmallFont = CreateFontW(-11, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            g_guiXFont = CreateFontW(-18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-
-            g_guiTitleFontSm = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Variable Display");
-            g_guiCardFontSm = CreateFontW(-12, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            g_guiSmallFontSm = CreateFontW(-9, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-            g_guiXFontSm = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
+            gui_create_fonts(ui_dpi_for_window(hwnd));
 
             // Buttons are created in left-to-right order: Full Screen, Region,
             // Settings, Open Folder. Export path and quality live in the
             // Settings window, so the strip stays at four buttons.
             HINSTANCE hi = GetModuleHandleW(NULL);
-            int x = 8;
             for (int i = 0; i < GUI_BTN_COUNT; i++) {
                 HWND hb = CreateWindowExW(0, L"BUTTON", kGuiButtons[i].longText,
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                    x, 52, 100, 90,
+                    0, 0, 10, 10,
                     hwnd, (HMENU)(INT_PTR)kGuiButtons[i].id, hi, NULL);
                 if (hb) SetWindowSubclass(hb, GuiBtnSubclass, (UINT_PTR)kGuiButtons[i].id, 0);
-                x += 104;
             }
 
             gui_layout_children(hwnd);
@@ -1409,12 +2199,29 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
 
+        case WM_DPICHANGED: {
+            int dpi = (int)LOWORD(wp);
+            if (dpi < 48) dpi = ui_dpi_for_window(hwnd);
+            RECT *pr = (RECT *)lp;
+            if (pr) {
+                SetWindowPos(hwnd, NULL, pr->left, pr->top,
+                             pr->right - pr->left, pr->bottom - pr->top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            gui_create_fonts(dpi);
+            gui_layout_children(hwnd);
+            if (g_hwnd_catcher) position_settings_window(g_hwnd_catcher);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+
         case WM_GETMINMAXINFO: {
             MINMAXINFO *mmi = (MINMAXINFO *)lp;
-            mmi->ptMinTrackSize.x = GUI_MIN_W;
-            mmi->ptMinTrackSize.y = GUI_MIN_H;
-            mmi->ptMaxTrackSize.x = GUI_MAX_W;
-            mmi->ptMaxTrackSize.y = GUI_MAX_H;
+            int dpi = ui_dpi_for_window(hwnd);
+            mmi->ptMinTrackSize.x = ui_scale(dpi, GUI_MIN_W);
+            mmi->ptMinTrackSize.y = ui_scale(dpi, GUI_MIN_H);
+            mmi->ptMaxTrackSize.x = ui_scale(dpi, GUI_MAX_W);
+            mmi->ptMaxTrackSize.y = ui_scale(dpi, GUI_MAX_H);
             return 0;
         }
 
@@ -1507,9 +2314,9 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 }
 
                 RECT bar = g_cfg.dark_mode ? dl : dr;
-                bar.top = bar.bottom - 3;
-                bar.left += 8;
-                bar.right -= 8;
+                bar.top = bar.bottom - ui_scale(L.dpi, 3);
+                bar.left += ui_scale(L.dpi, 8);
+                bar.right -= ui_scale(L.dpi, 8);
                 HBRUSH ab = CreateSolidBrush(GUI_ACCENT);
                 FillRect(dc, &bar, ab);
                 DeleteObject(ab);
@@ -1525,7 +2332,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             // Close button: same flat red rectangle as the preview's.
             gui_draw_close_button(dc, &closeRc, g_guiCloseHot, FALSE,
-                                  0, GUI_TEXT, GUI_CLOSE_GLYPH);
+                                  0, GUI_TEXT, ui_scale(L.dpi, GUI_CLOSE_GLYPH));
 
             SelectObject(dc, oldFont);
             EndPaint(hwnd, &ps);
@@ -1605,7 +2412,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             RECT themeRc = gui_theme_rect(&L, &closeRc);
             if (PtInRect(&closeRc, pt) || PtInRect(&themeRc, pt)) return HTCLIENT;
 
-            const int border = 6;
+            const int border = ui_scale(L.dpi, 6);
             BOOL left   = pt.x < border;
             BOOL right  = pt.x >= L.width - border;
             BOOL top    = pt.y < border;
@@ -1825,6 +2632,7 @@ static void execute_gui(void) {
     mi.cbSize = sizeof(mi);
     GetMonitorInfoW(mon, &mi);
     RECT wa = mi.rcMonitor; // physical monitor pixels
+    int dpi = ui_dpi_for_monitor(mon);
 
     int x, y, w, h;
     if (g_cfg.gui_w > 0 && g_cfg.gui_h > 0) {
@@ -1833,8 +2641,8 @@ static void execute_gui(void) {
         x = g_cfg.gui_x;
         y = g_cfg.gui_y;
     } else {
-        w = GUI_DEF_W;
-        h = GUI_DEF_H;
+        w = ui_scale(dpi, GUI_DEF_W);
+        h = ui_scale(dpi, GUI_DEF_H);
         x = wa.left + (wa.right - wa.left - w) / 2;
         y = wa.top + (wa.bottom - wa.top - h) / 2;
     }

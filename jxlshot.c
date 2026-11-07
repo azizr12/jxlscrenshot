@@ -41,6 +41,7 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <jxl/encode.h>
+#include <jxl/decode.h>
 #include <d3d11.h>
 #include <dxgi1_2.h>
 #include <dxgi1_5.h>
@@ -480,6 +481,59 @@ static void set_dpi_aware(void) {
     } else {
         SetProcessDPIAware();
     }
+}
+
+// UI scaling helpers.
+
+
+typedef UINT (WINAPI *PfnGetDpiForWindow)(HWND);
+typedef HRESULT (WINAPI *PfnGetDpiForMonitor)(HMONITOR, int, UINT *, UINT *);
+
+static int ui_dpi_fallback(void) {
+    HDC dc = GetDC(NULL);
+    int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
+    if (dc) ReleaseDC(NULL, dc);
+    return (dpi >= 48) ? dpi : 96;
+}
+
+static int ui_dpi_for_window(HWND hwnd) {
+    static PfnGetDpiForWindow fn = NULL;
+    static BOOL tried = FALSE;
+
+    if (!tried) {
+        fn = (PfnGetDpiForWindow)(void *)GetProcAddress(
+            GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+        tried = TRUE;
+    }
+    if (fn) {
+        UINT dpi = fn(hwnd);
+        if (dpi >= 48) return (int)dpi;
+    }
+    return ui_dpi_fallback();
+}
+
+static int ui_dpi_for_monitor(HMONITOR mon) {
+    static PfnGetDpiForMonitor fn = NULL;
+    static BOOL tried = FALSE;
+
+    if (!tried) {
+        HMODULE shcore = LoadLibraryW(L"shcore.dll");
+        if (shcore) {
+            fn = (PfnGetDpiForMonitor)(void *)GetProcAddress(shcore, "GetDpiForMonitor");
+        }
+        tried = TRUE;
+    }
+    if (fn && mon) {
+        UINT dx = 96, dy = 96;
+        if (SUCCEEDED(fn(mon, 0 /* MDT_EFFECTIVE_DPI */, &dx, &dy)) && dx >= 48)
+            return (int)dx;
+    }
+    return ui_dpi_fallback();
+}
+
+static int ui_scale(int dpi, int px) {
+    if (dpi < 48) dpi = 96;
+    return MulDiv(px, dpi, 96);
 }
 
 static void build_out_path_tag(wchar_t *path, int n, int is_hdr, const wchar_t *tag) {
@@ -1348,6 +1402,13 @@ static SaveNotifyFn g_saveNotify = NULL;
 typedef void (*SaveOkFn)(void);
 static SaveOkFn g_saveOk = NULL;
 
+// Called on the EncodeWorker after the .jxl file has been fully written. The
+// preview installs this to replace its raw capture with the decoded file, so it
+// shows exactly what was saved (PQ / Rec.2020 for HDR). Must be thread-safe:
+// the callback runs on the worker, the preview window on the UI thread.
+typedef void (*SaveReadyFn)(const wchar_t *path);
+static SaveReadyFn g_saveReady = NULL;
+
 static void notify_save_result(UINT icon, const wchar_t *title, const wchar_t *body) {
     if (g_saveNotify) { g_saveNotify(icon, title, body); return; }
     MessageBoxW(NULL, body, title, icon | MB_OK);
@@ -1356,6 +1417,8 @@ static void notify_save_result(UINT icon, const wchar_t *title, const wchar_t *b
 static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int lossless, float distance, const wchar_t *path) {
     uint8_t *buf = NULL; 
     size_t size = 0;
+    wchar_t saved_path[MAX_PATH];
+    wcsncpy_s(saved_path, MAX_PATH, path ? path : L"", _TRUNCATE);
 #ifdef DEBUG
     double t_save0 = now_ms(), t_enc_done, t_write0;
 #endif
@@ -1460,6 +1523,7 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
                 ok = 0;
             } else {
                 ok = 1; // Fallback succeeded
+                wcsncpy_s(saved_path, MAX_PATH, fallback_path, _TRUNCATE);
             }
             fclose(f_fallback);
         } else {
@@ -1491,8 +1555,145 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
     dbg("bench save: encode=%.2f ms, write+fallback=%.2f ms, TOTAL=%.2f ms",
         t_enc_done - t_save0, now_ms() - t_enc_done, now_ms() - t_save0);
 #endif
-    
+
+    // The file is closed and complete: let the preview decode it. Deliberately
+    // after the write so a reader can never see a partially written file.
+    if (ok && g_saveReady) g_saveReady(saved_path);
+
     free(buf); 
+    return ok;
+}
+
+// Decode a saved .jxl back to the preview's native pixel layout.
+//
+// HDR captures are written as 16-bit PQ / Rec.2020 (see scrgb_to_pq2020).
+// Asking libjxl for linear sRGB with a desired intensity target of 80 nits
+// reproduces the scRGB convention the preview swap chain already uses:
+// 1.0 = SDR reference white, values above 1.0 = HDR highlights. The passthrough
+// shader therefore needs no PQ or primaries maths. SDR captures decode back to
+// 8-bit sRGB, matching the B8G8R8A8 sRGB chain.
+//
+// `out_bits` is malloc'd and owned by the caller. It is always 3 channels,
+// packed RGB: 6 bytes per pixel for HDR (half floats) or 3 for SDR.
+static int decode_jxl_for_preview(const wchar_t *path, int is_hdr,
+                                  uint8_t **out_bits, int *out_w, int *out_h) {
+    if (!path || !path[0] || !out_bits || !out_w || !out_h) return 0;
+    *out_bits = NULL;
+    *out_w = *out_h = 0;
+
+    FILE *f = _wfopen(path, L"rb");
+    if (!f) {
+        dbg("preview decode: _wfopen failed for %ls", path);
+        return 0;
+    }
+    if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    __int64 file_size = _ftelli64(f);
+    if (file_size <= 0 || file_size > (__int64)1024 * 1024 * 1024) {
+        fclose(f);
+        return 0;
+    }
+    if (_fseeki64(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
+
+    uint8_t *file = (uint8_t *)malloc((size_t)file_size);
+    if (!file) { fclose(f); return 0; }
+    size_t got = fread(file, 1, (size_t)file_size, f);
+    fclose(f);
+    if (got != (size_t)file_size) {
+        free(file);
+        return 0;
+    }
+
+    int ok = 0;
+    JxlDecoder *dec = NULL;
+    void *runner = NULL;
+    uint8_t *pixels = NULL;
+    JxlBasicInfo info;
+    ZeroMemory(&info, sizeof info);
+    int have_info = 0;
+
+    JxlPixelFormat fmt;
+    ZeroMemory(&fmt, sizeof fmt);
+    fmt.num_channels = 3;
+    fmt.data_type = is_hdr ? JXL_TYPE_FLOAT16 : JXL_TYPE_UINT8;
+    fmt.endianness = JXL_NATIVE_ENDIAN;
+    fmt.align = 0;
+
+    dec = JxlDecoderCreate(NULL);
+    if (!dec) goto done;
+
+    runner = JxlThreadParallelRunnerCreate(
+        NULL, JxlThreadParallelRunnerDefaultNumWorkerThreads());
+    if (runner) {
+        (void)JxlDecoderSetParallelRunner(dec, JxlThreadParallelRunner, runner);
+    }
+
+    if (JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING |
+                                       JXL_DEC_NEED_IMAGE_OUT_BUFFER |
+                                       JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
+        goto done;
+    }
+
+    // Must happen before the first ProcessInput. 80 nits is scRGB 1.0.
+    if (is_hdr) {
+        (void)JxlDecoderSetDesiredIntensityTarget(dec, 80.0f);
+    }
+
+    if (JxlDecoderSetInput(dec, file, (size_t)file_size) != JXL_DEC_SUCCESS) goto done;
+    JxlDecoderCloseInput(dec);
+
+    for (;;) {
+        JxlDecoderStatus st = JxlDecoderProcessInput(dec);
+        if (st == JXL_DEC_BASIC_INFO) {
+            if (JxlDecoderGetBasicInfo(dec, &info) != JXL_DEC_SUCCESS) goto done;
+            if (info.xsize == 0 || info.ysize == 0 ||
+                info.xsize > 65535 || info.ysize > 65535) goto done;
+            have_info = 1;
+        } else if (st == JXL_DEC_COLOR_ENCODING) {
+            JxlColorEncoding target;
+            if (is_hdr) JxlColorEncodingSetToLinearSRGB(&target, JXL_FALSE);
+            else        JxlColorEncodingSetToSRGB(&target, JXL_FALSE);
+
+            if (JxlDecoderSetPreferredColorProfile(dec, &target) != JXL_DEC_SUCCESS) {
+                dbg("preview decode: SetPreferredColorProfile failed");
+                goto done;
+            }
+        } else if (st == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
+            if (!have_info) goto done;
+            size_t size = 0;
+            if (JxlDecoderImageOutBufferSize(dec, &fmt, &size) != JXL_DEC_SUCCESS)
+                goto done;
+            free(pixels);
+            pixels = (uint8_t *)malloc(size);
+            if (!pixels) goto done;
+            if (JxlDecoderSetImageOutBuffer(dec, &fmt, pixels, size) != JXL_DEC_SUCCESS)
+                goto done;
+        } else if (st == JXL_DEC_FULL_IMAGE) {
+            ok = (pixels != NULL);
+            break;
+        } else if (st == JXL_DEC_SUCCESS) {
+            ok = (pixels != NULL);
+            break;
+        } else {
+            // NEED_MORE_INPUT cannot happen (the whole file was supplied),
+            // ERROR or an unexpected event means there is nothing to show.
+            dbg("preview decode: ProcessInput stopped (%d)", (int)st);
+            goto done;
+        }
+    }
+
+    if (ok && pixels) {
+        *out_bits = pixels;
+        *out_w = (int)info.xsize;
+        *out_h = (int)info.ysize;
+        pixels = NULL;
+    }
+
+done:
+    free(pixels);
+    if (dec) JxlDecoderDestroy(dec);
+    if (runner) JxlThreadParallelRunnerDestroy(runner);
+    free(file);
+    if (!ok) dbg("preview decode: failed for %ls", path);
     return ok;
 }
 
