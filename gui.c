@@ -649,11 +649,10 @@ static LRESULT CALLBACK GuiBtnSubclass(HWND h, UINT m, WPARAM w, LPARAM l,
 
 
 
-// Default image viewer hand-off
-//
-// The app no longer draws its own capture preview. Once the background encoder
-// has closed the .jxl, it is opened with whatever the user associated with the
-// extension, so the screenshot appears in the normal Windows image viewer.
+// Default image
+
+// Once the background encoder has closed the .jxl,
+// it is opened with the Default image
 
 // Path of the capture whose viewer should be launched. Written on the UI
 // thread before the encode is queued, read by the EncodeWorker when the save
@@ -962,7 +961,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                     execute_full_capture();
                     // Stay hidden after the grab: the capture opens in the
                     // default image viewer and the tray icon is the only UI
-                    // left, exactly like a tray/hotkey capture.
+                    // left.
                 } else if (kind == 2) {
                     start_region_capture();
                     // The overlay is topmost and owns the screen; wait until it
@@ -1220,7 +1219,7 @@ static void execute_gui(void) {
         x = g_cfg.gui_x;
         y = g_cfg.gui_y;
     } else {
-        // First run: derive the size from the monitor instead of using a fixed
+        // On first run derive the size from the monitor instead of using a fixed
         // pixel size. 32% x 18% keeps the 600x190 design proportions on a
         // 1080p screen and scales sensibly to small laptop panels and 4K.
         int screenW = wa.right - wa.left;
