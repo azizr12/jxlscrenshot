@@ -325,7 +325,6 @@ static void hk_update_theme(void) {
 }
 
 static HWND  g_hwnd_catcher = NULL;
-static BOOL  g_hkHiddenForCapture = FALSE; // settings hidden by a running capture
 static int   g_catcher_target = 0; // 0 = idle, 1 = full, 2 = region
 static volatile BOOL g_hotkeyCapturing = FALSE; // checked by the keyboard hook
 static DWORD g_swallowUpVk = 0; // swallow key-up of the captured key
@@ -790,7 +789,6 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             if (g_hkFont)      { DeleteObject(g_hkFont); g_hkFont = NULL; }
             if (g_hkFontSmall) { DeleteObject(g_hkFontSmall); g_hkFontSmall = NULL; }
             g_hwnd_catcher = NULL;
-            g_hkHiddenForCapture = FALSE;
             return 0;
     }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -844,33 +842,19 @@ static void position_settings_window(HWND h) {
 }
 
 // The Settings window must never appear in a screenshot. Any capture path hides
-// it before grabbing and brings it back when the capture sequence ends.
+// it before grabbing and leaves it hidden afterwards, like the main strip.
 static BOOL settings_hide_for_capture(void) {
     if (!g_hwnd_catcher || !IsWindow(g_hwnd_catcher)) return FALSE;
     if (!IsWindowVisible(g_hwnd_catcher)) return FALSE;
 
     ShowWindow(g_hwnd_catcher, SW_HIDE);
-    g_hkHiddenForCapture = TRUE;
     return TRUE;
 }
 
-static void settings_restore_after_capture(void) {
-    if (!g_hkHiddenForCapture) return;
-    g_hkHiddenForCapture = FALSE;
-
-    if (g_hwnd_catcher && IsWindow(g_hwnd_catcher)) {
-        ShowWindow(g_hwnd_catcher, SW_SHOW);
-        // Only take focus when the strip is not coming back as well, so the
-        // window that started the capture stays in front.
-        if (!gui_is_visible()) SetForegroundWindow(g_hwnd_catcher);
-    }
-}
-
-// The capture is done: bring the Settings window back. There is no in-app
-// preview anymore, so nothing has to stay hidden while a separate window is on
-// screen.
+// The capture is done, but the Settings window stays hidden: the tray icon is
+// the only UI left after a capture. Use the tray menu or the Settings shortcut
+// to open it again.
 static void settings_finish_capture(void) {
-    settings_restore_after_capture();
 }
 
 // Toggle: the same Settings button (tray menu or strip) hides an open window.
@@ -879,15 +863,10 @@ static void execute_hotkey_settings(HWND hwnd) {
     if (g_hwnd_catcher && IsWindow(g_hwnd_catcher)) {
         if (IsWindowVisible(g_hwnd_catcher)) {
             ShowWindow(g_hwnd_catcher, SW_HIDE);
-            // A manual hide wins over a pending capture restore.
-            g_hkHiddenForCapture = FALSE;
         } else {
             position_settings_window(g_hwnd_catcher);
             ShowWindow(g_hwnd_catcher, SW_SHOW);
             SetForegroundWindow(g_hwnd_catcher);
-            // It is visible again, so a capture finishing later must not
-            // re-show (or re-position) it as a "restore".
-            g_hkHiddenForCapture = FALSE;
         }
         return;
     }

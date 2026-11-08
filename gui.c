@@ -1145,16 +1145,23 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 // Entry point (called from the tray menu / tray icon)
 
 
-
 static HWND gui_hwnd(void) {
     return g_hwndGui;
 }
 
 // True when the strip is on screen. Captures started from the tray menu or a
 // hotkey use this to route through gui_start_capture(), which hides the window
-// for the shot and brings it back afterwards.
+// so it cannot appear in its own screenshot.
 static BOOL gui_is_visible(void) {
     return (g_hwndGui && IsWindowVisible(g_hwndGui)) ? TRUE : FALSE;
+}
+
+// True when a real position/size was saved.
+static BOOL gui_has_saved_geometry(void) {
+    if (g_cfg.gui_w <= 0 || g_cfg.gui_h <= 0) return FALSE;
+    if (g_cfg.gui_x == 0 && g_cfg.gui_y == 0 &&
+        g_cfg.gui_w == GUI_MIN_W && g_cfg.gui_h == GUI_MIN_H) return FALSE;
+    return TRUE;
 }
 
 static void execute_gui(void) {
@@ -1196,8 +1203,9 @@ static void execute_gui(void) {
 
     // Pick the monitor from the last known position (or the cursor when there
     // is no saved geometry) and clamp the strip inside its physical bounds.
+    BOOL hasGeometry = gui_has_saved_geometry();
     POINT anchor;
-    if (g_cfg.gui_w > 0 && g_cfg.gui_h > 0) {
+    if (hasGeometry) {
         anchor.x = g_cfg.gui_x;
         anchor.y = g_cfg.gui_y;
     } else {
@@ -1213,7 +1221,7 @@ static void execute_gui(void) {
     int dpi = ui_dpi_for_monitor(mon);
 
     int x, y, w, h;
-    if (g_cfg.gui_w > 0 && g_cfg.gui_h > 0) {
+    if (hasGeometry) {
         w = g_cfg.gui_w;
         h = g_cfg.gui_h;
         x = g_cfg.gui_x;
