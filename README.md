@@ -1,6 +1,5 @@
 <div style="display: flex; align-items: center; gap: 20px;">
     <img alt="Logo" src="icon.ico" />
-    <img alt="helpful photo" src="tray_menu.png" />
 </div>
 
 [![Download Windows Installer](https://img.shields.io/badge/⬇_Download-Windows_Installer-2ea44f?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/azizr12/jxlscrenshot/releases/latest/download/jxlshot-setup-x64.exe)
