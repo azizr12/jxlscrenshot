@@ -5,7 +5,7 @@ v2.4.5 - 8 November 2026
 - addded a dark/light theme selection in for UI in jxlshot window, so the tray context menu, the Settings window follow the same theme
 - ADDED a Snipping Tool like window
 - ADDED option to perview image after taken using the default image viewer from OS
-- add option to on/off the perview image after taken
+- add option to on/off the perview image after taken in settings
 - fixed some issues in code related to ui stay in screen after image taken
 
 
