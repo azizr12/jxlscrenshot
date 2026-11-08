@@ -535,6 +535,10 @@ static void gui_draw_button(LPDRAWITEMSTRUCT di) {
     COLORREF bg = down ? GUI_BTN_DOWN : (hot ? GUI_BTN_HOT : GUI_BTN);
     COLORREF border = hot ? GUI_ACCENT : GUI_BORDER;
 
+    // Clear the full button rect with the strip background first so those corners blend in,
+    // then draw the rounded card on top.
+    if (g_guiBgBrush) FillRect(dc, &rc, g_guiBgBrush);
+
     gui_round_rect(dc, &rc, (int)(ui_scale(L.dpi, 8) * fit + 0.5f), bg, border);
 
     wchar_t label[128];
