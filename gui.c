@@ -5,6 +5,7 @@
 #include <windowsx.h>
 #include <commctrl.h>
 #include <shellapi.h>
+#include <gdiplus.h>
 
 #define GUI_DEF_W        600
 #define GUI_DEF_H        190
@@ -366,6 +367,104 @@ static void gui_round_rect(HDC dc, const RECT *rc, int radius, COLORREF fill, CO
     DeleteObject(rgn);
 }
 
+// Anti-aliased rounded card for the four main strip buttons.
+//
+// GDI's CreateRoundRectRgn produces hard, stair-stepped corners
+// the arc is rasterised without coverage,
+// so at a 10px radius the diagonal reads as a visible 1px staircase.
+// GDI+ fills the same geometry as a path with anti-aliasing,
+// so each corner pixel is blended with the window background.
+// Only the strip buttons use this; the Settings controls keep the plain GDI
+// look on purpose.
+
+static ULONG_PTR g_gdipToken = 0;
+static BOOL      g_gdipReady = FALSE;
+
+static BOOL gui_gdip_start(void) {
+    if (g_gdipReady) return TRUE;
+
+    GdiplusStartupInput in;
+    ZeroMemory(&in, sizeof(in));
+    in.GdiplusVersion = 1;
+
+    if (GdiplusStartup(&g_gdipToken, &in, NULL) != 0) return FALSE;
+    g_gdipReady = TRUE;
+    return TRUE;
+}
+
+static ARGB gui_argb(COLORREF c) {
+    return 0xFF000000u
+         | ((ARGB)GetRValue(c) << 16)
+         | ((ARGB)GetGValue(c) << 8)
+         |  (ARGB)GetBValue(c);
+}
+
+static void gui_round_rect_smooth(HDC dc, const RECT *rc, int radius,
+                                  COLORREF fill, COLORREF border) {
+    int w = rc->right - rc->left;
+    int h = rc->bottom - rc->top;
+    if (w <= 0 || h <= 0) return;
+
+    // Never let the two opposite arcs overlap on short buttons.
+    if (radius > w / 2) radius = w / 2;
+    if (radius > h / 2) radius = h / 2;
+
+    if (radius <= 0 || !gui_gdip_start()) {
+        gui_round_rect(dc, rc, radius, fill, border);
+        return;
+    }
+
+    GpGraphics *g = NULL;
+    if (GdipCreateFromHDC(dc, &g) != 0 || !g) {
+        gui_round_rect(dc, rc, radius, fill, border);
+        return;
+    }
+
+    GpPath *path = NULL;
+    if (GdipCreatePath(FillModeAlternate, &path) != 0 || !path) {
+        GdipDeleteGraphics(g);
+        gui_round_rect(dc, rc, radius, fill, border);
+        return;
+    }
+
+    GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+
+    REAL x  = (REAL)rc->left;
+    REAL y  = (REAL)rc->top;
+    REAL rw = (REAL)w;
+    REAL rh = (REAL)h;
+    REAL d  = (REAL)(radius * 2);
+
+    // Four quarter arcs joined by the straight edges.
+    GdipAddPathArc(path, x, y, d, d, 180.0f, 90.0f);            // top-left
+    GdipAddPathArc(path, x + rw - d, y, d, d, 270.0f, 90.0f);   // top-right
+    GdipAddPathArc(path, x + rw - d, y + rh - d, d, d, 0.0f, 90.0f);  // bottom-right
+    GdipAddPathArc(path, x, y + rh - d, d, d, 90.0f, 90.0f);    // bottom-left
+    GdipClosePathFigure(path);
+
+    GpSolidFill *brush = NULL;
+    if (GdipCreateSolidFill(gui_argb(fill), &brush) == 0 && brush) {
+        GdipFillPath(g, brush, path);
+        GdipDeleteBrush(brush);
+    }
+
+    if (border != fill) {
+        GpPen *pen = NULL;
+        if (GdipCreatePen1(gui_argb(border), 1.0f, UnitPixel, &pen) == 0 && pen) {
+            // Inset so the 1px outline stays inside the rounded card and does
+            // not bleed into the background.
+            GdipSetPenMode(pen, PenAlignmentInset);
+            GdipDrawPath(g, pen, path);
+            GdipDeletePen(pen);
+        }
+    }
+
+    GdipDeletePath(path);
+    // Deleting the graphics flushes the anti-aliased pixels to the HDC before
+    // the label and icon are drawn with plain GDI.
+    GdipDeleteGraphics(g);
+}
+
 // Full-screen glyph
 static void gui_draw_monitor_icon(HDC dc, int cx, int cy, COLORREF col) {
     HPEN pen = CreatePen(PS_SOLID, 2, col);
@@ -535,11 +634,20 @@ static void gui_draw_button(LPDRAWITEMSTRUCT di) {
     COLORREF bg = down ? GUI_BTN_DOWN : (hot ? GUI_BTN_HOT : GUI_BTN);
     COLORREF border = hot ? GUI_ACCENT : GUI_BORDER;
 
+    // An owner-drawn button does not get the window background underneath it
+    // the four corners outside the rounded region would keep whatever the default control background left there.
     // Clear the full button rect with the strip background first so those corners blend in,
     // then draw the rounded card on top.
     if (g_guiBgBrush) FillRect(dc, &rc, g_guiBgBrush);
 
-    gui_round_rect(dc, &rc, (int)(ui_scale(L.dpi, 8) * fit + 0.5f), bg, border);
+    int inset = ui_scale(L.dpi, 2);
+    RECT card = rc;
+    InflateRect(&card, -inset, -inset);
+    if (card.right <= card.left || card.bottom <= card.top) card = rc;
+
+    // 10px radius at 96 DPI (scaled with the layout), drawn with GDI+
+    // so the arcs are anti-aliased instead of the 1px staircase GDI gives.
+    gui_round_rect_smooth(dc, &card, (int)(ui_scale(L.dpi, 10) * fit + 0.5f), bg, border);
 
     wchar_t label[128];
     GetWindowTextW(di->hwndItem, label, 128);
