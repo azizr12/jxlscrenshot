@@ -77,7 +77,7 @@ typedef struct {
 // 1=16 samples (4x4), 2=256 samples (16x16), 3=ALL pixels
     int     multimonitor; // 0 = focusmonitor, 1 = separateimages
     int     disable_keyboard_hook; // 1 = disable global keyboard hook, 0 = enable (default)
-    int     show_preview; // 1 = open the capture preview window after a capture
+    int     show_preview; // 1 = open the saved capture in the default image viewer
     wchar_t export_path[MAX_PATH];
     UINT    hk_full_mod;
     UINT    hk_full_vk;
@@ -217,7 +217,7 @@ static void ensure_default_ini(void) {
         L";                      (seperateimages is accepted as an alias)\n"
         L";   DisableKeyboardHook : 1 = Disable global keyboard hooks (hotkeys).\n"
         L";                         0 = Enable global keyboard hooks (default).\n"
-        L";   ShowPreview    : 1 = Show the capture preview window after a capture (default).\n"
+        L";   ShowPreview    : 1 = Open the saved capture in the default image viewer (default).\n"
         L";                    0 = Save silently and keep the compact strip only.\n"
         L";   DarkMode       : 1 = Dark window/menu theme, 0 = Light theme.\n"
         L";\n"
@@ -403,8 +403,8 @@ static void init_config(void) {
     g_cfg.dark_mode = get_cfg_int(L"DarkMode", 1, ini_path) ? 1 : 0;
     g_cfg.gui_x = get_cfg_int(L"GuiX", 0, ini_path);
     g_cfg.gui_y = get_cfg_int(L"GuiY", 0, ini_path);
-    g_cfg.gui_w = get_cfg_int(L"GuiW", 400, ini_path);
-    g_cfg.gui_h = get_cfg_int(L"GuiH", 96, ini_path);
+    g_cfg.gui_w = get_cfg_int(L"GuiW", 0, ini_path);
+    g_cfg.gui_h = get_cfg_int(L"GuiH", 0, ini_path);
 }
 
 // Unified Debug logging
@@ -1403,9 +1403,9 @@ typedef void (*SaveOkFn)(void);
 static SaveOkFn g_saveOk = NULL;
 
 // Called on the EncodeWorker after the .jxl file has been fully written. The
-// preview installs this to replace its raw capture with the decoded file, so it
-// shows exactly what was saved (PQ / Rec.2020 for HDR). Must be thread-safe:
-// the callback runs on the worker, the preview window on the UI thread.
+// tray build installs this to open the saved file in the default image viewer.
+// Must be thread-safe: the callback runs on the worker, the shell call on the
+// UI thread.
 typedef void (*SaveReadyFn)(const wchar_t *path);
 static SaveReadyFn g_saveReady = NULL;
 
@@ -1556,144 +1556,12 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
         t_enc_done - t_save0, now_ms() - t_enc_done, now_ms() - t_save0);
 #endif
 
-    // The file is closed and complete: let the preview decode it. Deliberately
-    // after the write so a reader can never see a partially written file.
+    // The file is closed and complete: let the tray open it with the default
+    // image viewer. Deliberately after the write so a reader can never see a
+    // partially written file.
     if (ok && g_saveReady) g_saveReady(saved_path);
 
     free(buf); 
-    return ok;
-}
-
-// Decode a saved .jxl back to the preview's native pixel layout.
-//
-// HDR captures are written as 16-bit PQ / Rec.2020 (see scrgb_to_pq2020).
-// Asking libjxl for linear sRGB with a desired intensity target of 80 nits
-// reproduces the scRGB convention the preview swap chain already uses:
-// 1.0 = SDR reference white, values above 1.0 = HDR highlights. The passthrough
-// shader therefore needs no PQ or primaries maths. SDR captures decode back to
-// 8-bit sRGB, matching the B8G8R8A8 sRGB chain.
-//
-// `out_bits` is malloc'd and owned by the caller. It is always 3 channels,
-// packed RGB: 6 bytes per pixel for HDR (half floats) or 3 for SDR.
-static int decode_jxl_for_preview(const wchar_t *path, int is_hdr,
-                                  uint8_t **out_bits, int *out_w, int *out_h) {
-    if (!path || !path[0] || !out_bits || !out_w || !out_h) return 0;
-    *out_bits = NULL;
-    *out_w = *out_h = 0;
-
-    FILE *f = _wfopen(path, L"rb");
-    if (!f) {
-        dbg("preview decode: _wfopen failed for %ls", path);
-        return 0;
-    }
-    if (_fseeki64(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
-    __int64 file_size = _ftelli64(f);
-    if (file_size <= 0 || file_size > (__int64)1024 * 1024 * 1024) {
-        fclose(f);
-        return 0;
-    }
-    if (_fseeki64(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
-
-    uint8_t *file = (uint8_t *)malloc((size_t)file_size);
-    if (!file) { fclose(f); return 0; }
-    size_t got = fread(file, 1, (size_t)file_size, f);
-    fclose(f);
-    if (got != (size_t)file_size) {
-        free(file);
-        return 0;
-    }
-
-    int ok = 0;
-    JxlDecoder *dec = NULL;
-    void *runner = NULL;
-    uint8_t *pixels = NULL;
-    JxlBasicInfo info;
-    ZeroMemory(&info, sizeof info);
-    int have_info = 0;
-
-    JxlPixelFormat fmt;
-    ZeroMemory(&fmt, sizeof fmt);
-    fmt.num_channels = 3;
-    fmt.data_type = is_hdr ? JXL_TYPE_FLOAT16 : JXL_TYPE_UINT8;
-    fmt.endianness = JXL_NATIVE_ENDIAN;
-    fmt.align = 0;
-
-    dec = JxlDecoderCreate(NULL);
-    if (!dec) goto done;
-
-    runner = JxlThreadParallelRunnerCreate(
-        NULL, JxlThreadParallelRunnerDefaultNumWorkerThreads());
-    if (runner) {
-        (void)JxlDecoderSetParallelRunner(dec, JxlThreadParallelRunner, runner);
-    }
-
-    if (JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING |
-                                       JXL_DEC_NEED_IMAGE_OUT_BUFFER |
-                                       JXL_DEC_FULL_IMAGE) != JXL_DEC_SUCCESS) {
-        goto done;
-    }
-
-    // Must happen before the first ProcessInput. 80 nits is scRGB 1.0.
-    if (is_hdr) {
-        (void)JxlDecoderSetDesiredIntensityTarget(dec, 80.0f);
-    }
-
-    if (JxlDecoderSetInput(dec, file, (size_t)file_size) != JXL_DEC_SUCCESS) goto done;
-    JxlDecoderCloseInput(dec);
-
-    for (;;) {
-        JxlDecoderStatus st = JxlDecoderProcessInput(dec);
-        if (st == JXL_DEC_BASIC_INFO) {
-            if (JxlDecoderGetBasicInfo(dec, &info) != JXL_DEC_SUCCESS) goto done;
-            if (info.xsize == 0 || info.ysize == 0 ||
-                info.xsize > 65535 || info.ysize > 65535) goto done;
-            have_info = 1;
-        } else if (st == JXL_DEC_COLOR_ENCODING) {
-            JxlColorEncoding target;
-            if (is_hdr) JxlColorEncodingSetToLinearSRGB(&target, JXL_FALSE);
-            else        JxlColorEncodingSetToSRGB(&target, JXL_FALSE);
-
-            if (JxlDecoderSetPreferredColorProfile(dec, &target) != JXL_DEC_SUCCESS) {
-                dbg("preview decode: SetPreferredColorProfile failed");
-                goto done;
-            }
-        } else if (st == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
-            if (!have_info) goto done;
-            size_t size = 0;
-            if (JxlDecoderImageOutBufferSize(dec, &fmt, &size) != JXL_DEC_SUCCESS)
-                goto done;
-            free(pixels);
-            pixels = (uint8_t *)malloc(size);
-            if (!pixels) goto done;
-            if (JxlDecoderSetImageOutBuffer(dec, &fmt, pixels, size) != JXL_DEC_SUCCESS)
-                goto done;
-        } else if (st == JXL_DEC_FULL_IMAGE) {
-            ok = (pixels != NULL);
-            break;
-        } else if (st == JXL_DEC_SUCCESS) {
-            ok = (pixels != NULL);
-            break;
-        } else {
-            // NEED_MORE_INPUT cannot happen (the whole file was supplied),
-            // ERROR or an unexpected event means there is nothing to show.
-            dbg("preview decode: ProcessInput stopped (%d)", (int)st);
-            goto done;
-        }
-    }
-
-    if (ok && pixels) {
-        *out_bits = pixels;
-        *out_w = (int)info.xsize;
-        *out_h = (int)info.ysize;
-        pixels = NULL;
-    }
-
-done:
-    free(pixels);
-    if (dec) JxlDecoderDestroy(dec);
-    if (runner) JxlThreadParallelRunnerDestroy(runner);
-    free(file);
-    if (!ok) dbg("preview decode: failed for %ls", path);
     return ok;
 }
 

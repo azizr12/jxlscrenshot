@@ -149,7 +149,6 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDM_OPENEXPORT   109
 #define IDM_HOTKEYS      110
 #define IDM_GUI          111
-#define IDM_CLOSEPREVIEW 112
 
 // Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
 #define IDI_APP_ICON  1001
@@ -185,10 +184,9 @@ static void gui_refresh(void);
 static HWND gui_hwnd(void);
 static void gui_start_capture(int kind);
 static BOOL gui_is_visible(void);
-static void gui_preview_show(const Grab *g, const wchar_t *path);
-static BOOL preview_close_for_capture(void);
-static BOOL gui_preview_is_visible(void);
-static void gui_preview_close(void);
+static void gui_open_capture_viewer(const Grab *g, const wchar_t *path);
+static void gui_cancel_open_capture(void);
+static void gui_open_capture_now(void);
 
 // Toggle debug logging from the tray menu. The label always shows the current
 // state, and the choice is written back to the INI so it survives a restart.
@@ -392,7 +390,7 @@ static void hk_refresh_buttons(HWND hwnd) {
                    g_cfg.lossless ? L"Lossless:  ON" : L"Lossless:  OFF (lossy)");
     SetWindowTextW(GetDlgItem(hwnd, IDC_SETPATH), L"Set Export Folder...");
     SetWindowTextW(GetDlgItem(hwnd, IDC_PREVIEW),
-                   g_cfg.show_preview ? L"Capture Preview:  ON" : L"Capture Preview:  OFF");
+                   g_cfg.show_preview ? L"Open In Viewer:  ON" : L"Open In Viewer:  OFF");
     SetWindowTextW(GetDlgItem(hwnd, IDC_DIST_DN), L"\u2212");
     SetWindowTextW(GetDlgItem(hwnd, IDC_DIST_UP), L"+");
     SetWindowTextW(GetDlgItem(hwnd, IDC_EFF_DN),  L"\u2212");
@@ -751,7 +749,7 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     g_cfg.show_preview = !g_cfg.show_preview;
                     jxl_save_settings();
                     hk_refresh_buttons(hwnd);
-                    if (!g_cfg.show_preview) gui_preview_close();
+                    if (!g_cfg.show_preview) gui_cancel_open_capture();
                     dbg("settings changed: show_preview=%d", g_cfg.show_preview);
                     break;
 
@@ -846,8 +844,7 @@ static void position_settings_window(HWND h) {
 }
 
 // The Settings window must never appear in a screenshot. Any capture path hides
-// it before grabbing and brings it back when the capture sequence ends (or when
-// the preview closes, whichever is later).
+// it before grabbing and brings it back when the capture sequence ends.
 static BOOL settings_hide_for_capture(void) {
     if (!g_hwnd_catcher || !IsWindow(g_hwnd_catcher)) return FALSE;
     if (!IsWindowVisible(g_hwnd_catcher)) return FALSE;
@@ -869,11 +866,10 @@ static void settings_restore_after_capture(void) {
     }
 }
 
-// The preview is the window the user is looking at after a capture, so the
-// Settings window only returns once the preview is gone (PreviewWndProc calls
-// settings_restore_after_capture on WM_DESTROY).
+// The capture is done: bring the Settings window back. There is no in-app
+// preview anymore, so nothing has to stay hidden while a separate window is on
+// screen.
 static void settings_finish_capture(void) {
-    if (gui_preview_is_visible()) return;
     settings_restore_after_capture();
 }
 
@@ -941,9 +937,6 @@ static void show_tray_menu(HWND hwnd) {
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_FULL, L"Capture Full Screen");
     AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
-    if (gui_preview_is_visible()) {
-        AppendMenuW(hMenu, MF_STRING, IDM_CLOSEPREVIEW, L"Close Preview");
-    }
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, L"Open Export Folder");
@@ -1028,12 +1021,11 @@ static int queue_grab_encode(Grab *g, const wchar_t *path) {
 }
 
 static void execute_full_capture(void) {
-    // Never let the previous preview or the Settings window end up inside the
-    // new screenshot. When this was the only delay (tray/hotkey path, no GUI
-    // timer), give the compositor a moment to remove them before grabbing.
-    BOOL hadPreview = preview_close_for_capture();
+    // Never let the Settings window end up inside the new screenshot. When this
+    // was the only delay (tray/hotkey path, no GUI timer), give the compositor
+    // a moment to remove it before grabbing.
     BOOL hadSettings = settings_hide_for_capture();
-    if (hadPreview || hadSettings) Sleep(120);
+    if (hadSettings) Sleep(120);
 
     dbg("execute_full_capture: begin (effort=%d, multimonitor=%s)",
         g_cfg.effort, g_cfg.multimonitor ? "separateimages" : "focusmonitor");
@@ -1066,9 +1058,9 @@ static void execute_full_capture(void) {
             build_out_path_tag(out_path, MAX_PATH, g.is_hdr, tag);
             dbg("execute_full_capture: monitor %d -> %ls", i + 1, out_path);
 
-            // Show one preview (the first monitor that produced a frame).
+            // Open one viewer for the first monitor that produced a frame.
             // Separate-images mode still saves every monitor.
-            if (saved == 0) gui_preview_show(&g, out_path);
+            if (saved == 0) gui_open_capture_viewer(&g, out_path);
 
             if (queue_grab_encode(&g, out_path)) saved++;
             free_grab(&g);
@@ -1096,9 +1088,8 @@ static void execute_full_capture(void) {
     build_out_path(out_path, MAX_PATH, g.is_hdr);
     dbg("execute_full_capture: writing to %ls", out_path);
 
-    // Show the Snipping Tool style preview of the frame before handing the
-    // pixels to the background encoder.
-    gui_preview_show(&g, out_path);
+    // Hand the saved path to the viewer once the encoder is done with it.
+    gui_open_capture_viewer(&g, out_path);
 
     if (!queue_grab_encode(&g, out_path)) {
         MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
@@ -1972,9 +1963,8 @@ static void crop_and_encode_region(RECT *r) {
     wchar_t out_path[MAX_PATH];
     build_out_path(out_path, MAX_PATH, crop.is_hdr);
 
-    // Preview the exact crop the user selected, in the same HDR/SDR format
-    // that will be encoded.
-    gui_preview_show(&crop, out_path);
+    // Hand the crop to the viewer once the encoder has written the file.
+    gui_open_capture_viewer(&crop, out_path);
 
     if (!queue_grab_encode(&crop, out_path)) {
         dbg("crop_and_encode_region: save failed");
@@ -2190,8 +2180,7 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_regionMonitorRect.right = g_regionMonitorRect.bottom = 0;
             g_rcSel.left = g_rcSel.top = g_rcSel.right = g_rcSel.bottom = 0;
 
-            // Bring the Settings window back unless a preview opened on top of
-            // this capture (the preview restores it when it closes).
+            // Bring the Settings window back now that the overlay is gone.
             settings_finish_capture();
 
             return 0;
@@ -2224,11 +2213,9 @@ static void show_region_overlay(void) {
 }
 
 static void start_region_capture(void) {
-    // The previous preview and the Settings window would otherwise be frozen
-    // into the overlay frame.
-    BOOL hadPreview = preview_close_for_capture();
+    // The Settings window would otherwise be frozen into the overlay frame.
     BOOL hadSettings = settings_hide_for_capture();
-    if (hadPreview || hadSettings) Sleep(120);
+    if (hadSettings) Sleep(120);
 
     // Fallback safety: If the flag was somehow stuck, reset it before starting
     g_isRegionCapturing = TRUE; 
@@ -2548,6 +2535,7 @@ static void uninstall_mouse_hook(void) { }
 
 #define WM_JXLSHOT_SAVE_NOTIFY (WM_USER + 30)
 #define WM_JXLSHOT_SAVE_OK     (WM_USER + 31)
+#define WM_GUI_OPEN_CAPTURE    (WM_USER + 32)
 
 typedef struct {
     UINT    icon;
@@ -2718,6 +2706,9 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
         case WM_JXLSHOT_SAVE_OK:
             show_save_ok(hwnd);
             return 0;
+        case WM_GUI_OPEN_CAPTURE:
+            gui_open_capture_now();
+            return 0;
         case WM_TIMER:
             if (wp == TIMER_TRAY_ICON) {
                 KillTimer(hwnd, TIMER_TRAY_ICON);
@@ -2753,7 +2744,6 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 case IDM_GUI: execute_gui(); break;
                 case IDM_FULL: request_full_capture(); break;
                 case IDM_REGION: request_region_capture(); break;
-                case IDM_CLOSEPREVIEW: gui_preview_close(); break;
                 case IDM_SETPATH: execute_set_path(); break;
                 case IDM_OPENEXPORT: execute_open_export_folder(); break;
                 case IDM_OPENCONFIG: execute_open_config(hwnd); break;
@@ -2897,9 +2887,8 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     g_saveNotify = show_save_notification_ui;
     g_saveOk = notify_save_ok_ui;
 
-    // Once the encoder has closed the .jxl, the preview can replace its raw
-    // capture with the decoded file (PQ / Rec.2020 -> scRGB in libjxl).
-    g_saveReady = preview_on_saved;
+    // Once the encoder has closed the .jxl, open it in the default viewer.
+    g_saveReady = gui_capture_saved;
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) { 
