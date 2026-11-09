@@ -133,7 +133,7 @@ static void ensure_default_ini(void) {
     ini_path[MAX_PATH - 1] = 0;
 
     int needs_refresh = 0;
-    wchar_t val_debug[64] = L"0", val_lossless[64] = L"1", val_distance[64] = L"1.0", val_effort[64] = L"8";
+    wchar_t val_debug[64] = L"0", val_lossless[64] = L"1", val_distance[64] = L"1.0", val_effort[64] = L"7";
     wchar_t val_export[MAX_PATH] = L"", val_hk_fvk[64] = L"44", val_hk_fmod[64] = L"0";
     wchar_t val_hk_rvk[64] = L"44", val_hk_rmod[64] = L"2", val_blank[64] = L"2";
     wchar_t val_multi[64] = L"focusmonitor", val_hook[64] = L"0", val_dark[64] = L"1";
@@ -145,7 +145,7 @@ static void ensure_default_ini(void) {
         ini_ensure_key(ini_path, L"Debug",           L"0");
         ini_ensure_key(ini_path, L"Lossless",        L"1");
         ini_ensure_key(ini_path, L"Distance",        L"1.0");
-        ini_ensure_key(ini_path, L"Effort",          L"8");
+        ini_ensure_key(ini_path, L"Effort",          L"7");
         ini_ensure_key(ini_path, L"ExportPath",      L"");
         ini_ensure_key(ini_path, L"HotkeyFullVK",    L"44");
         ini_ensure_key(ini_path, L"HotkeyFullMod",   L"0");
@@ -166,7 +166,7 @@ static void ensure_default_ini(void) {
             GetPrivateProfileStringW(L"Capture", L"Debug", L"0", val_debug, 64, ini_path);
             GetPrivateProfileStringW(L"Capture", L"Lossless", L"1", val_lossless, 64, ini_path);
             GetPrivateProfileStringW(L"Capture", L"Distance", L"1.0", val_distance, 64, ini_path);
-            GetPrivateProfileStringW(L"Capture", L"Effort", L"8", val_effort, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"Effort", L"7", val_effort, 64, ini_path);
             GetPrivateProfileStringW(L"Capture", L"ExportPath", L"", val_export, MAX_PATH, ini_path);
             GetPrivateProfileStringW(L"Capture", L"HotkeyFullVK", L"44", val_hk_fvk, 64, ini_path);
             GetPrivateProfileStringW(L"Capture", L"HotkeyFullMod", L"0", val_hk_fmod, 64, ini_path);
@@ -204,7 +204,7 @@ static void ensure_default_ini(void) {
 // distance only work if the encoding is lossy
         L";   Lossless       : If set to 1, strictly forces true lossless (overrides Distance).\n"
         L";                    If set to 0, the encoder uses the 'Distance' value above.\n"
-        L";   Effort         : Encoder effort 1-10 (default 8). Lower = faster capture/save,\n"
+        L";   Effort         : Encoder effort 1-10 (default 7). Lower = faster capture/save,\n"
         L";                      higher = smaller file but much slower encoding.\n"
         L";\n"
         L"; [General Settings]\n"
@@ -236,7 +236,7 @@ static void ensure_default_ini(void) {
         L"Debug=0\n"
         L"Lossless=1\n"
         L"Distance=1.0\n"
-        L"Effort=8\n"
+        L"Effort=7\n"
         L"ExportPath=\n"
         L"HotkeyFullVK=44\n"
         L"HotkeyFullMod=0\n"
@@ -336,7 +336,7 @@ static void init_config(void) {
     g_cfg.lossless = 1; 
     g_cfg.distance = 1.0f; 
     g_cfg.blank_check_mode = 2;
-    g_cfg.effort = 8;
+    g_cfg.effort = 7;
     g_cfg.multimonitor = 0;
     g_cfg.hk_full_mod = 0; 
     g_cfg.hk_full_vk = VK_SNAPSHOT;
@@ -366,7 +366,7 @@ static void init_config(void) {
     g_cfg.debug_enabled = get_cfg_int(L"Debug", 1, ini_path);
     g_cfg.lossless = get_cfg_int(L"Lossless", 1, ini_path);
     g_cfg.blank_check_mode = get_cfg_int(L"BlankCheckMode", 2, ini_path);
-    g_cfg.effort = get_cfg_int(L"Effort", 8, ini_path);
+    g_cfg.effort = get_cfg_int(L"Effort", 7, ini_path);
     if (g_cfg.effort < 1)  g_cfg.effort = 1;
     if (g_cfg.effort > 10) g_cfg.effort = 10;
     if (g_cfg.blank_check_mode < 0) g_cfg.blank_check_mode = 0;
