@@ -1,5 +1,5 @@
-# One job: builds the portable ZIP and the installer EXE, uploads both,
-# and attaches both to a GitHub release when a v* tag is pushed.
+# One workflow: builds portable ZIP + installer EXE for x64 and ARM64,
+# uploads them, and attaches them to a GitHub release when a v* tag is pushed.
 
 name: build-windows installer
 on:
@@ -13,9 +13,26 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    name: build-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+            msystem: MINGW64
+            pkgprefix: mingw-w64-x86_64
+            cc: gcc
+            objdump: objdump
+          - arch: arm64
+            runner: windows-11-arm
+            msystem: CLANGARM64
+            pkgprefix: mingw-w64-clang-aarch64
+            cc: clang
+            objdump: llvm-objdump
     defaults:
       run:
         shell: msys2 {0}
@@ -23,42 +40,48 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up MSYS2 (MinGW-w64)
+      - name: Set up MSYS2 (${{ matrix.msystem }})
         uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: ${{ matrix.msystem }}
           update: true
           install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-libjxl
+            ${{ matrix.pkgprefix }}-toolchain
+            ${{ matrix.pkgprefix }}-libjxl
             zip
 
       - name: Compile and bundle runtime DLLs
         run: |
-          # Compile the resource file
           windres -i resource.rc -o resource.o
 
-          # Compile tray version
-          gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
+          ${{ matrix.cc }} -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
               -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.o \
               -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lgdiplus
 
-          # Prepare distribution directory
           mkdir -p dist
           cp jxlshot_tray.exe dist/
           cp README.md dist/ 2>/dev/null || true
 
-          # Copy all MinGW/libjxl DLL dependencies without running the exe
-          ldd jxlshot_tray.exe | grep "/mingw64/bin" | awk '{print $3}' | sort -u | xargs -I {} cp {} dist/
+          # Recursively collect non-system DLL dependencies from the toolchain's bin dir
+          # (uses objdump instead of ldd, which can't read ARM64 binaries reliably)
+          BINDIR="$MSYSTEM_PREFIX/bin"
+          collect() {
+            for dll in $(${{ matrix.objdump }} -p "$1" | awk '/DLL Name:/ {print $3}'); do
+              if [ -f "$BINDIR/$dll" ] && [ ! -f "dist/$dll" ]; then
+                cp "$BINDIR/$dll" dist/
+                collect "$BINDIR/$dll"
+              fi
+            done
+          }
+          collect jxlshot_tray.exe
 
           echo "--- dist contents ---"
           ls -lh dist/
 
       - name: Package portable ZIP
         run: |
-          # Keep the portable files at the ZIP root
-          (cd dist && zip -r ../jxlshot-windows-x64.zip .)
-          ls -lh jxlshot-windows-x64.zip
+          (cd dist && zip -r ../jxlshot-windows-${{ matrix.arch }}.zip .)
+          ls -lh jxlshot-windows-${{ matrix.arch }}.zip
 
       - name: Build Inno Setup Installer
         shell: pwsh
@@ -72,31 +95,29 @@ jobs:
               throw "Inno Setup compiler not found."
           }
 
-          # setup.iss reads dist\jxlshot_tray.exe and dist\*.dll
-          & $iscc setup.iss
+          & $iscc "/DMyArch=${{ matrix.arch }}" setup.iss
           if ($LASTEXITCODE -ne 0) {
               throw "ISCC failed with exit code $LASTEXITCODE"
           }
 
-          # setup.iss has OutputDir=Output, so the installer lands here
-          if (-Not (Test-Path "Output\jxlshot-setup-x64.exe")) {
+          if (-Not (Test-Path "Output\jxlshot-setup-${{ matrix.arch }}.exe")) {
               Get-ChildItem -Recurse -Filter *.exe | Select-Object FullName
               throw "The installer EXE was not created."
           }
 
-      - name: Upload portable ZIP (raw, not double-zipped)
+      - name: Upload portable ZIP
         uses: actions/upload-artifact@v7
         with:
-          name: jxlshot-windows-x64.zip
-          path: jxlshot-windows-x64.zip
+          name: jxlshot-windows-${{ matrix.arch }}.zip
+          path: jxlshot-windows-${{ matrix.arch }}.zip
           archive: false
           if-no-files-found: error
 
-      - name: Upload installer EXE (raw, not zipped)
+      - name: Upload installer EXE
         uses: actions/upload-artifact@v7
         with:
-          name: jxlshot-setup-x64.exe
-          path: Output/jxlshot-setup-x64.exe
+          name: jxlshot-setup-${{ matrix.arch }}.exe
+          path: Output/jxlshot-setup-${{ matrix.arch }}.exe
           archive: false
           if-no-files-found: error
 
@@ -106,5 +127,5 @@ jobs:
         with:
           fail_on_unmatched_files: true
           files: |
-            jxlshot-windows-x64.zip
-            Output/jxlshot-setup-x64.exe
+            jxlshot-windows-${{ matrix.arch }}.zip
+            Output/jxlshot-setup-${{ matrix.arch }}.exe

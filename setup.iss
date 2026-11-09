@@ -4,6 +4,11 @@
 #define MyAppURL "https://github.com/azizr12/jxlscrenshot"
 #define MyAppExeName "jxlshot_tray.exe"
 
+; Passed from CI as /DMyArch=x64 or /DMyArch=arm64 (defaults to x64 for local builds)
+#ifndef MyArch
+  #define MyArch "x64"
+#endif
+
 [Setup]
 ; NOTE: The value of AppId uniquely identifies this application. 
 ; Do not use the same AppId value in installers for other applications.
@@ -17,7 +22,7 @@ DefaultDirName={localappdata}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
 OutputDir=Output
-OutputBaseFilename=jxlshot-setup-x64
+OutputBaseFilename=jxlshot-setup-{#MyArch}
 
 ; Prevent Inno Setup from remembering previous task selections.
 ; This forces the installer to respect the "unchecked" flags below.
@@ -41,8 +46,13 @@ VersionInfoVersion={#MyAppVersion}
 WizardStyle=modern
 ; No admin rights required for AppData installation
 PrivilegesRequired=lowest
+#if Str(MyArch) == "arm64"
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#else
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
