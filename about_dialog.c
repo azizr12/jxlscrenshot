@@ -71,6 +71,14 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             int jxl_minor = (jxl_ver / 1000) % 1000;
             int jxl_patch = jxl_ver % 1000;
 
+            // Detect CPU architecture and instruction sets.
+            // The architecture is decided at compile time, so each build reports itself correctly.
+#if defined(_M_ARM64) || defined(__aarch64__)
+            // ARM64 build: NEON (Advanced SIMD) is mandatory on ARMv8-A,
+            // so it is always present and needs no runtime check.
+            const wchar_t* cpu_arch = L"ARM64";
+            const wchar_t* cpu_ext  = L"NEON";
+#else
             // Define fallback constants for older Windows SDK headers
 #ifndef PF_AVX512F_INSTRUCTIONS_AVAILABLE
 #define PF_AVX512F_INSTRUCTIONS_AVAILABLE 41
@@ -87,10 +95,12 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             BOOL has_avx2 = IsProcessorFeaturePresent(PF_AVX2_INSTRUCTIONS_AVAILABLE);
             BOOL has_avx = IsProcessorFeaturePresent(PF_AVX_INSTRUCTIONS_AVAILABLE);
 
+            const wchar_t* cpu_arch = L"x86-64";
             const wchar_t* cpu_ext = L"SSE2";
             if (has_avx512) cpu_ext = L"AVX-512";
             else if (has_avx2) cpu_ext = L"AVX2";
             else if (has_avx) cpu_ext = L"AVX";
+#endif
 
             // Format the final string.
             // Double-space after each label gives a little breathing room without needing tabs.
@@ -98,8 +108,8 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
                 L"Minimal tray screenshot tool using JPEG XL.\n\n"
                 L"App Version:  %s\n"
                 L"libjxl Version:  %d.%d.%d\n"
-                L"CPU Architecture:  x86-64 (%s)",
-                APP_VERSIONW, jxl_major, jxl_minor, jxl_patch, cpu_ext);
+                L"CPU Architecture:  %s (%s)",
+                APP_VERSIONW, jxl_major, jxl_minor, jxl_patch, cpu_arch, cpu_ext);
             
             desc_text[511] = L'\0'; // Guarantee null-termination
 
