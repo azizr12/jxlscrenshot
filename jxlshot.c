@@ -218,7 +218,7 @@ static void ensure_default_ini(void) {
         L";   DisableKeyboardHook : 1 = Disable global keyboard hooks (hotkeys).\n"
         L";                         0 = Enable global keyboard hooks (default).\n"
         L";   ShowPreview    : 1 = Open the saved capture in the default image viewer (default).\n"
-        L";                    0 = Save silently and keep the compact strip only.\n"
+        L";                    0 = Save silently.\n"
         L";   DarkMode       : 1 = Dark window/menu theme, 0 = Light theme.\n"
         L";\n"
         L"; [Hotkey Settings] (Use the 'Hotkey Settings...' tray menu to configure these easily!)\n"
