@@ -12,6 +12,6 @@
 
 - and it has also config for controlling lossy compression or keep lossless as default from setttings
 
-- also there is HDR support too (still experimental), alongside DPI and colors support, and multi-monitor.
+- also there is HDR support too, alongside DPI and colors support, and multi-monitor.
 
 - ***. . .***
