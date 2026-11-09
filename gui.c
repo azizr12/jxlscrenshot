@@ -26,14 +26,10 @@
 #define IDC_GUI_REGION   302
 #define IDC_GUI_SETTINGS 303
 #define IDC_GUI_EXPORT   304
-#define IDC_GUI_ABOUT    306
-#define IDC_GUI_CLOSE    307
 
 
 #define TIMER_GUI_CAPTURE     1
-#define TIMER_GUI_REGION_DONE 2
 #define GUI_CAPTURE_DELAY_MS  220
-#define GUI_REGION_POLL_MS    120
 
 // Palette. These are variables, not #defines, so the Dark/Light toggle can swap
 // the whole window between themes at runtime. gui_update_theme fills them from
@@ -81,10 +77,6 @@ typedef struct {
     int   titleH;
     int   margin, gap;
     int   btnTop, btnW, btnH;
-    BOOL  footer;
-    BOOL  compact;
-    BOOL  shortLabels;
-    BOOL  subtitle;
     float iconScale;
 } GuiLayout;
 
@@ -100,13 +92,12 @@ static RECT gui_theme_rect(const GuiLayout *L, const RECT *closeRc) {
 
 static const struct {
     int     id;
-    LPCWSTR longText;
-    LPCWSTR shortText;
+    LPCWSTR text;
 } kGuiButtons[GUI_BTN_COUNT] = {
-    { IDC_GUI_FULL,     L"Full Screen", L"Full"     },
-    { IDC_GUI_REGION,   L"Region",      L"Region"   },
-    { IDC_GUI_SETTINGS, L"Settings",    L"Settings" },
-    { IDC_GUI_EXPORT,   L"Open Folder", L"Open"     },
+    { IDC_GUI_FULL,     L"Full Screen"},
+    { IDC_GUI_REGION,   L"Region"},
+    { IDC_GUI_SETTINGS, L"Settings"},
+    { IDC_GUI_EXPORT,   L"Open Folder"},
 };
 
 static int  g_guiThemeHot = 0;   // 0 none, 1 Dark segment, 2 Light segment
@@ -148,17 +139,8 @@ static HWND    g_hwndGui = NULL;
 static HBRUSH  g_guiBgBrush = NULL;
 static HFONT   g_guiTitleFont = NULL;
 static HFONT   g_guiCardFont = NULL;
-static HFONT   g_guiSmallFont = NULL;
-static HFONT   g_guiXFont = NULL;
-static HFONT   g_guiTitleFontSm = NULL;
-static HFONT   g_guiCardFontSm = NULL;
-static HFONT   g_guiSmallFontSm = NULL;
-static HFONT   g_guiXFontSm = NULL;
 static HWND    g_guiHoverBtn = NULL;
 static BOOL    g_guiCloseHot = FALSE;
-static BOOL    g_guiCompact = FALSE;
-static BOOL    g_guiShortLabels = FALSE;
-static BOOL    g_guiShortLabelsSet = FALSE;
 static int     g_guiPendingCapture = 0; // 0 = idle, 1 = full, 2 = region
 
 
@@ -238,8 +220,6 @@ static void gui_get_layout(HWND hwnd, GuiLayout *L) {
     // stays exactly like this at every window size, so expanding the window
     // just gives the same four cards more room. Metrics are 96-DPI design
     // values scaled to the monitor the window is on.
-    L->footer = FALSE;
-    L->compact = TRUE;
     L->titleH = ui_scale(L->dpi, 24);
     L->margin = ui_scale(L->dpi, 8);
     L->gap = ui_scale(L->dpi, 4);
@@ -252,9 +232,6 @@ static void gui_get_layout(HWND hwnd, GuiLayout *L) {
 
     L->btnW = (L->width - 2 * L->margin - (GUI_BTN_COUNT - 1) * L->gap) / GUI_BTN_COUNT;
     if (L->btnW < ui_scale(L->dpi, 10)) L->btnW = ui_scale(L->dpi, 10);
-
-    L->shortLabels = (L->btnW < ui_scale(L->dpi, 90));
-    L->subtitle = FALSE;
 
     // Icons scale with the display DPI
     float base = (float)L->dpi / 96.0f;
@@ -323,20 +300,6 @@ static void gui_clamp_to_monitor(RECT *r) {
 static void gui_layout_children(HWND hwnd) {
     GuiLayout L;
     gui_get_layout(hwnd, &L);
-
-    if (!g_guiShortLabelsSet || g_guiShortLabels != L.shortLabels) {
-        for (int i = 0; i < GUI_BTN_COUNT; i++) {
-            HWND hb = GetDlgItem(hwnd, kGuiButtons[i].id);
-            if (hb) {
-                SetWindowTextW(hb, L.shortLabels ? kGuiButtons[i].shortText
-                                                 : kGuiButtons[i].longText);
-            }
-        }
-        g_guiShortLabels = L.shortLabels;
-        g_guiShortLabelsSet = TRUE;
-    }
-
-    g_guiCompact = L.compact;
 
     int x = L.margin;
     for (int i = 0; i < GUI_BTN_COUNT; i++) {
@@ -565,8 +528,9 @@ static void gui_draw_icon_raw(HDC dc, int id, int cx, int cy, COLORREF col) {
     }
 }
 
-// Draw the fixed-size glyph scaled around (cx, cy). Scale is 1.0 in the one
-// UI the strip uses, so the icons never grow with the window.
+// Draw the fixed-size glyph scaled around (cx, cy). The scale comes from the
+// strip layout (display DPI times how far the card has grown past its base
+// size).
 static void gui_draw_icon(HDC dc, int id, int cx, int cy, COLORREF col, float scale) {
     if (scale < 0.05f) scale = 1.0f;
 
@@ -586,36 +550,6 @@ static void gui_draw_icon(HDC dc, int id, int cx, int cy, COLORREF col, float sc
         RestoreDC(dc, saved);
     } else {
         gui_draw_icon_raw(dc, id, cx, cy, col);
-    }
-}
-
-// Capture buttons show their hotkey underneath the label. A disabled hotkey is
-// spelled out instead of the settings dialog's "Click to set" wording.
-static void gui_hotkey_hint(wchar_t *out, size_t n, UINT vk, UINT mod) {
-    if (vk == 0) {
-        wcsncpy_s(out, n, L"No hotkey", _TRUNCATE);
-        return;
-    }
-    format_hotkey_string(vk, mod, out, n);
-}
-
-static void gui_button_subtitle(int id, wchar_t *out, size_t n) {
-    switch (id) {
-        case IDC_GUI_FULL:
-            gui_hotkey_hint(out, n, g_cfg.hk_full_vk, g_cfg.hk_full_mod);
-            break;
-        case IDC_GUI_REGION:
-            gui_hotkey_hint(out, n, g_cfg.hk_region_vk, g_cfg.hk_region_mod);
-            break;
-        case IDC_GUI_SETTINGS:
-            wcsncpy_s(out, n, L"Preferences", _TRUNCATE);
-            break;
-        case IDC_GUI_EXPORT:
-            wcsncpy_s(out, n, L"Show exports", _TRUNCATE);
-            break;
-        default:
-            out[0] = L'\0';
-            break;
     }
 }
 
@@ -659,36 +593,16 @@ static void gui_draw_button(LPDRAWITEMSTRUCT di) {
     HFONT labelFont = CreateFontW(-labelPx, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    if (!labelFont) labelFont = g_guiCardFontSm;
-
-    int smallPx = (int)(ui_scale(L.dpi, 9) * fit + 0.5f);
-    HFONT smallFont = g_guiSmallFontSm;
-    HFONT smallOwned = NULL;
-    if (L.subtitle) {
-        smallOwned = CreateFontW(-smallPx, 0, 0, 0, FW_NORMAL, 0, 0, 0,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-        if (smallOwned) smallFont = smallOwned;
-    }
+    if (!labelFont) labelFont = g_guiCardFont;
 
     HFONT old = (HFONT)SelectObject(dc, labelFont);
     TEXTMETRICW tmLabel;
     GetTextMetricsW(dc, &tmLabel);
 
     int iconPx = (int)(32.0f * L.iconScale + 0.5f);
-    int subH = 0;
-    if (L.subtitle) {
-        HFONT prev = (HFONT)SelectObject(dc, smallFont);
-        TEXTMETRICW tmSub;
-        GetTextMetricsW(dc, &tmSub);
-        subH = tmSub.tmHeight;
-        SelectObject(dc, prev);
-    }
 
     int gapIconText = (int)(ui_scale(L.dpi, 5) * fit + 0.5f);
-    int gapLabelSub = ui_scale(L.dpi, 2);
-    int blockH = iconPx + gapIconText + tmLabel.tmHeight
-               + (L.subtitle ? gapLabelSub + subH : 0);
+    int blockH = iconPx + gapIconText + tmLabel.tmHeight;
 
     int blockTop = rc.top + ((rc.bottom - rc.top) - blockH) / 2;
     if (blockTop < rc.top + ui_scale(L.dpi, 2)) blockTop = rc.top + ui_scale(L.dpi, 2);
@@ -704,21 +618,8 @@ static void gui_draw_button(LPDRAWITEMSTRUCT di) {
     DrawTextW(dc, label, -1, &lr,
               DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
 
-    if (L.subtitle) {
-        wchar_t subtitle[128];
-        gui_button_subtitle(id, subtitle, 128);
-
-        SelectObject(dc, smallFont);
-        RECT sr = { rc.left + padX, lr.bottom + gapLabelSub,
-                    rc.right - padX, lr.bottom + gapLabelSub + subH };
-        SetTextColor(dc, GUI_DIM);
-        DrawTextW(dc, subtitle, -1, &sr,
-                  DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS);
-    }
-
     SelectObject(dc, old);
-    if (labelFont != g_guiCardFontSm) DeleteObject(labelFont);
-    if (smallOwned) DeleteObject(smallOwned);
+    if (labelFont != g_guiCardFont) DeleteObject(labelFont);
 }
 
 // Hover tracking and Escape forwarding for the owner-drawn buttons.
@@ -789,9 +690,7 @@ static void gui_open_capture_now(void) {
 
     AcquireSRWLockExclusive(&g_viewerLock);
     wcsncpy_s(path, MAX_PATH, g_viewerPath, _TRUNCATE);
-    // A newer capture may have replaced the pending path while this message
-    // was queued; only clear the one that actually finished saving.
-    if (_wcsicmp(g_viewerPath, path) == 0) g_viewerPath[0] = L'\0';
+    g_viewerPath[0] = L'\0';
     ReleaseSRWLockExclusive(&g_viewerLock);
 
     if (!path[0]) return;
@@ -821,9 +720,8 @@ static void gui_cancel_open_capture(void) {
     ReleaseSRWLockExclusive(&g_viewerLock);
 }
 
-// Called by the settings/hotkey code whenever g_cfg changes. This window has
-// no child text controls, so a repaint is all it takes for the status line and
-// the capture-card hotkey hints to show the new values.
+// Called by the settings/hotkey code whenever g_cfg changes. Triggers a
+// repaint of the strip.
 static void gui_refresh(void) {
     if (g_hwndGui) InvalidateRect(g_hwndGui, NULL, FALSE);
 }
@@ -848,40 +746,15 @@ static void gui_start_capture(int kind) {
 
 
 static void gui_create_fonts(int dpi) {
-    if (g_guiTitleFont)    { DeleteObject(g_guiTitleFont); g_guiTitleFont = NULL; }
-    if (g_guiCardFont)     { DeleteObject(g_guiCardFont); g_guiCardFont = NULL; }
-    if (g_guiSmallFont)    { DeleteObject(g_guiSmallFont); g_guiSmallFont = NULL; }
-    if (g_guiXFont)        { DeleteObject(g_guiXFont); g_guiXFont = NULL; }
-    if (g_guiTitleFontSm)  { DeleteObject(g_guiTitleFontSm); g_guiTitleFontSm = NULL; }
-    if (g_guiCardFontSm)   { DeleteObject(g_guiCardFontSm); g_guiCardFontSm = NULL; }
-    if (g_guiSmallFontSm)  { DeleteObject(g_guiSmallFontSm); g_guiSmallFontSm = NULL; }
-    if (g_guiXFontSm)      { DeleteObject(g_guiXFontSm); g_guiXFontSm = NULL; }
+    if (g_guiTitleFont) { DeleteObject(g_guiTitleFont); g_guiTitleFont = NULL; }
+    if (g_guiCardFont)  { DeleteObject(g_guiCardFont);  g_guiCardFont = NULL; }
 
-    g_guiTitleFont = CreateFontW(-ui_scale(dpi, 22), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
+    g_guiTitleFont = CreateFontW(-ui_scale(dpi, 14), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Variable Display");
-    g_guiCardFont = CreateFontW(-ui_scale(dpi, 14), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
+    g_guiCardFont = CreateFontW(-ui_scale(dpi, 12), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    g_guiSmallFont = CreateFontW(-ui_scale(dpi, 11), 0, 0, 0, FW_NORMAL, 0, 0, 0,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    g_guiXFont = CreateFontW(-ui_scale(dpi, 18), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-
-    g_guiTitleFontSm = CreateFontW(-ui_scale(dpi, 14), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Variable Display");
-    g_guiCardFontSm = CreateFontW(-ui_scale(dpi, 12), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    g_guiSmallFontSm = CreateFontW(-ui_scale(dpi, 9), 0, 0, 0, FW_NORMAL, 0, 0, 0,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    g_guiXFontSm = CreateFontW(-ui_scale(dpi, 13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
 }
 
 static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -897,7 +770,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             // Settings window, so the strip stays at four buttons.
             HINSTANCE hi = GetModuleHandleW(NULL);
             for (int i = 0; i < GUI_BTN_COUNT; i++) {
-                HWND hb = CreateWindowExW(0, L"BUTTON", kGuiButtons[i].longText,
+                HWND hb = CreateWindowExW(0, L"BUTTON", kGuiButtons[i].text,
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     0, 0, 10, 10,
                     hwnd, (HMENU)(INT_PTR)kGuiButtons[i].id, hi, NULL);
@@ -1001,8 +874,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
             // Title bar.
             RECT tr = { L.margin, 0, themeRc.left - 8, L.titleH };
-            HFONT oldFont = (HFONT)SelectObject(dc,
-                L.compact ? g_guiTitleFontSm : g_guiTitleFont);
+            HFONT oldFont = (HFONT)SelectObject(dc, g_guiTitleFont);
             SetTextColor(dc, GUI_TEXT);
             DrawTextW(dc, L"JXL Shot", -1, &tr,
                       DT_SINGLELINE | DT_VCENTER | DT_LEFT);
@@ -1029,8 +901,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 FillRect(dc, &bar, ab);
                 DeleteObject(ab);
 
-                HFONT oldThemeFont = (HFONT)SelectObject(dc,
-                    L.compact ? g_guiCardFontSm : g_guiCardFont);
+                HFONT oldThemeFont = (HFONT)SelectObject(dc, g_guiCardFont);
                 SetTextColor(dc, g_cfg.dark_mode ? GUI_TEXT : GUI_DIM);
                 DrawTextW(dc, L"Dark", -1, &dl, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
                 SetTextColor(dc, g_cfg.dark_mode ? GUI_DIM : GUI_TEXT);
@@ -1057,8 +928,6 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 case IDC_GUI_REGION:   gui_start_capture(2); break;
                 case IDC_GUI_SETTINGS: execute_hotkey_settings(NULL); break;
                 case IDC_GUI_EXPORT:   execute_open_export_folder(); break;
-                case IDC_GUI_ABOUT:    execute_about(); break;
-                case IDC_GUI_CLOSE:    DestroyWindow(hwnd); break;
             }
             return 0;
 
@@ -1069,24 +938,14 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
                 int kind = g_guiPendingCapture;
                 g_guiPendingCapture = 0;
 
+                // The strip stays hidden after each capture
+                // and the tray icon is the only thing left
+
                 if (kind == 1) {
                     execute_full_capture();
-                    // Stay hidden after the grab: the capture opens in the
-                    // default image viewer and the tray icon is the only UI
-                    // left.
                 } else if (kind == 2) {
                     start_region_capture();
-                    // The overlay is topmost and owns the screen; wait until it
-                    // is gone before deciding what to do with this window.
-                    SetTimer(hwnd, TIMER_GUI_REGION_DONE, GUI_REGION_POLL_MS, NULL);
                 }
-                return 0;
-            }
-            if (wp == TIMER_GUI_REGION_DONE) {
-                if (g_hwndRegion) return 0; // selection still in progress
-                KillTimer(hwnd, TIMER_GUI_REGION_DONE);
-                // Keep the strip hidden so the tray icon is the only UI left
-                // after a region capture too.
                 return 0;
             }
             return DefWindowProcW(hwnd, msg, wp, lp);
@@ -1224,22 +1083,14 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             // Never PostQuitMessage here: the tray application owns this
             // window and must keep running after it is closed.
             KillTimer(hwnd, TIMER_GUI_CAPTURE);
-            KillTimer(hwnd, TIMER_GUI_REGION_DONE);
             g_guiPendingCapture = 0;
             g_guiHoverBtn = NULL;
             g_guiCloseHot = FALSE;
             g_guiThemeHot = 0;
-            g_guiShortLabelsSet = FALSE;
 
             if (g_guiBgBrush)   { DeleteObject(g_guiBgBrush);   g_guiBgBrush = NULL; }
             if (g_guiTitleFont) { DeleteObject(g_guiTitleFont); g_guiTitleFont = NULL; }
             if (g_guiCardFont)  { DeleteObject(g_guiCardFont);  g_guiCardFont = NULL; }
-            if (g_guiSmallFont) { DeleteObject(g_guiSmallFont); g_guiSmallFont = NULL; }
-            if (g_guiXFont)     { DeleteObject(g_guiXFont);     g_guiXFont = NULL; }
-            if (g_guiTitleFontSm) { DeleteObject(g_guiTitleFontSm); g_guiTitleFontSm = NULL; }
-            if (g_guiCardFontSm)  { DeleteObject(g_guiCardFontSm);  g_guiCardFontSm = NULL; }
-            if (g_guiSmallFontSm) { DeleteObject(g_guiSmallFontSm); g_guiSmallFontSm = NULL; }
-            if (g_guiXFontSm)     { DeleteObject(g_guiXFontSm);     g_guiXFontSm = NULL; }
 
             // Closing the strip closes the attached Settings window too.
             if (g_hwnd_catcher && IsWindow(g_hwnd_catcher)) {
