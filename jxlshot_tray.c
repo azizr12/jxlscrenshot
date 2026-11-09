@@ -912,15 +912,15 @@ static void execute_hotkey_settings(HWND hwnd) {
 static void show_tray_menu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
     HMENU hMenu = CreatePopupMenu();
-    AppendMenuW(hMenu, MF_STRING, IDM_GUI, L"Open Window...");
+    AppendMenuW(hMenu, MF_STRING, IDM_GUI, L"Open Capture Tool");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_FULL, L"Capture Full Screen");
-    AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region...");
+    AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region");
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
     AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, L"Open Export Folder");
     AppendMenuW(hMenu, MF_STRING, IDM_OPENCONFIG, L"Open Config File");
-    AppendMenuW(hMenu, MF_STRING, IDM_HOTKEYS, L"Settings...");
+    AppendMenuW(hMenu, MF_STRING, IDM_HOTKEYS, L"Settings");
     wchar_t debug_label[32];
     _snwprintf(debug_label, 32, L"Debug: %s", g_cfg.debug_enabled ? L"ON" : L"OFF");
     AppendMenuW(hMenu, MF_STRING, IDM_DEBUG, debug_label);
