@@ -647,6 +647,40 @@ static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int samp
     return 1;
 }
 
+// same logic as is_frame_blank, but reads the mapped DXGI source directly
+// (BGRA8 = 4 bytes/px, RGBA16F = 8 bytes/px) so a blank frame can be rejected
+// before any conversion or allocation. Alpha is ignored.
+static int is_blank_src(const uint8_t *p, size_t pitch, int w, int h, int is_hdr, int mode) {
+    if (mode == 0) return 0;
+    if (!p || w <= 0 || h <= 0) return 1;
+
+    size_t bpp = is_hdr ? 8 : 4;
+    size_t n   = is_hdr ? 6 : 3;   // colour bytes only
+
+    if (mode == 3) {
+        for (int y = 0; y < h; y++) {
+            const uint8_t *row = p + (size_t)y * pitch;
+            for (int x = 0; x < w; x++) {
+                const uint8_t *px = row + (size_t)x * bpp;
+                for (size_t k = 0; k < n; k++) if (px[k]) return 0;
+            }
+        }
+        return 1;
+    }
+
+    int cols = (mode == 1) ? 4 : 16;
+    int rows = cols;
+    for (int r = 0; r < rows; r++) {
+        int y = (h * r) / rows;
+        for (int c = 0; c < cols; c++) {
+            int x = (w * c) / cols;
+            const uint8_t *px = p + (size_t)y * pitch + (size_t)x * bpp;
+            for (size_t k = 0; k < n; k++) if (px[k]) return 0;
+        }
+    }
+    return 1;
+}
+
 // GDI BitBlt fallback capture (works without DXGI Desktop Duplication)
 
 /*
@@ -919,6 +953,28 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                 dupl->lpVtbl->ReleaseFrame(dupl); goto cleanup;
             }
 
+            // reject blank frames on the raw mapped data
+            // BEFORE allocating and converting.
+            // A blank frame now costs only Map + a small sample check
+            {
+                int blank = is_blank_src((const uint8_t *)mapped.pData, mapped.RowPitch,
+                                         w_phys, h_phys, g->is_hdr, g_cfg.blank_check_mode);
+                // Last attempt: same final exhaustive (mode 3) check as before.
+                if (blank && attempt == MAX_ATTEMPTS && g_cfg.blank_check_mode != 3) {
+                    dbg("dxgi: last attempt blank by mode %d, running full-pixel check", g_cfg.blank_check_mode);
+                    blank = is_blank_src((const uint8_t *)mapped.pData, mapped.RowPitch,
+                                         w_phys, h_phys, g->is_hdr, 3);
+                }
+                if (blank) {
+                    ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
+                    dupl->lpVtbl->ReleaseFrame(dupl);
+                    dbg("dxgi: attempt %d frame is blank, retrying", attempt);
+                    SwitchToThread(); // Yields remainder of time slice to the game/DWM
+                    if (attempt >= 3) Sleep(4); // fix 1: only sleep if blanks keep coming
+                    continue;
+                }
+            }
+
             size_t rgb_bpp = g->is_hdr ? 6 : 3;
             size_t src_bpp = g->is_hdr ? 8 : 4; // DXGI source is 8 bytes (HDR) or 4 bytes (SDR)
             
@@ -935,47 +991,66 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
 
             uint8_t *src_row = (uint8_t *)mapped.pData;
             size_t src_pitch = mapped.RowPitch;
-
-            // Copy, convert format, and rotate in a single pass
-            for (int py = 0; py < h_phys; py++) {
-                uint8_t *src = src_row;
-                for (int px = 0; px < w_phys; px++) {
-                    int dx, dy;
-
-                    // Map physical pixels to logical coordinates based on rotation
-                    switch (rotation) {
-                        case DXGI_MODE_ROTATION_ROTATE90:
-                            dx = h_phys - 1 - py;
-                            dy = px;
-                            break;
-                        case DXGI_MODE_ROTATION_ROTATE180:
-                            dx = w_phys - 1 - px;
-                            dy = h_phys - 1 - py;
-                            break;
-                        case DXGI_MODE_ROTATION_ROTATE270:
-                            dx = py;
-                            dy = w_phys - 1 - px;
-                            break;
-                        default: // IDENTITY or UNSPECIFIED
-                            dx = px;
-                            dy = py;
-                            break;
-                    }
-
-                    // Calculate destination pointer in the logical buffer
-                    uint8_t *dst_px = g->bits + ((size_t)dy * w_logical + dx) * rgb_bpp;
-
+// Copy, convert format, and rotate in a single pass
+            if (rotation != DXGI_MODE_ROTATION_ROTATE90 &&
+                rotation != DXGI_MODE_ROTATION_ROTATE180 &&
+                rotation != DXGI_MODE_ROTATION_ROTATE270) {
+                // Fast path: IDENTITY or UNSPECIFIED. No rotation, so rows map 1:1
+                // and w_logical == w_phys.
+                for (int py = 0; py < h_phys; py++) {
+                    const uint8_t *s = src_row + (size_t)py * src_pitch;
+                    uint8_t *d = g->bits + (size_t)py * w_phys * rgb_bpp;
                     if (g->is_hdr) {
                         // Convert R16G16B16A16_FLOAT (8 bytes) -> RGB48 (6 bytes)
-                        dst_px[0]=src[0]; dst_px[1]=src[1]; dst_px[2]=src[2];
-                        dst_px[3]=src[3]; dst_px[4]=src[4]; dst_px[5]=src[5];
+                        for (int px = 0; px < w_phys; px++, s += 8, d += 6) {
+                            d[0]=s[0]; d[1]=s[1]; d[2]=s[2];
+                            d[3]=s[3]; d[4]=s[4]; d[5]=s[5];
+                        }
                     } else {
                         // Convert B8G8R8A8 (4 bytes) -> RGB24 (3 bytes)
-                        dst_px[0]=src[2]; dst_px[1]=src[1]; dst_px[2]=src[0];
+                        for (int px = 0; px < w_phys; px++, s += 4, d += 3) {
+                            d[0]=s[2]; d[1]=s[1]; d[2]=s[0];
+                        }
                     }
-                    src += src_bpp;
                 }
-                src_row += src_pitch;
+            } else {
+                // Copy, convert format, and rotate in a single pass (original loop)
+                for (int py = 0; py < h_phys; py++) {
+                    uint8_t *src = src_row;
+                    for (int px = 0; px < w_phys; px++) {
+                        int dx, dy;
+// Map physical pixels to logical coordinates based on rotation
+                        switch (rotation) {
+                            case DXGI_MODE_ROTATION_ROTATE90:
+                                dx = h_phys - 1 - py;
+                                dy = px;
+                                break;
+                            case DXGI_MODE_ROTATION_ROTATE180:
+                                dx = w_phys - 1 - px;
+                                dy = h_phys - 1 - py;
+                                break;
+                            case DXGI_MODE_ROTATION_ROTATE270:
+                                dx = py;
+                                dy = w_phys - 1 - px;
+                                break;
+                            default:// IDENTITY or UNSPECIFIED
+                                dx = px;
+                                dy = py;
+                                break;
+                        }
+// Calculate destination pointer in the logical buffer
+                        uint8_t *dst_px = g->bits + ((size_t)dy * w_logical + dx) * rgb_bpp;
+
+                        if (g->is_hdr) {
+                            dst_px[0]=src[0]; dst_px[1]=src[1]; dst_px[2]=src[2];
+                            dst_px[3]=src[3]; dst_px[4]=src[4]; dst_px[5]=src[5];
+                        } else {
+                            dst_px[0]=src[2]; dst_px[1]=src[1]; dst_px[2]=src[0];
+                        }
+                        src += src_bpp;
+                    }
+                    src_row += src_pitch;
+                }
             }
 
             ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
@@ -986,21 +1061,16 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
                 attempt, now_ms() - t_b, g->w, g->h, g->is_hdr ? "HDR" : "SDR");
 #endif
 
-            /* Pass the configured blank check mode to the detection function */
-            if (!is_frame_blank(g->bits, g->w, g->h, g->is_hdr, g_cfg.blank_check_mode)) {
-                dbg("dxgi: attempt %d produced non-blank frame, accepting", attempt);
-                ok = 1;
-                break;
-            }
-
-            dbg("dxgi: attempt %d frame is blank, retrying", attempt);
-            SwitchToThread(); // Yields remainder of time slice to the game/DWM
-            Sleep(4); // Fallback to a short sleep to guarantee frame pacing alignment
+            // the blank check already ran on the raw frame above,
+            // so a frame that reaches this point is non-blank.
+            dbg("dxgi: attempt %d produced non-blank frame, accepting", attempt);
+            ok = 1;
+            break;
         }
 
         if (!ok) {
             dbg("dxgi: all %d attempts deemed blank by mode %d. Running one last full-pixel (mode 3) check on the final frame.", MAX_ATTEMPTS, g_cfg.blank_check_mode);
-            
+
             // Re-evaluate the 8th frame using Mode 3 (ALL pixels)
             if (g->bits && !is_frame_blank(g->bits, g->w, g->h, g->is_hdr, 3)) {
                 dbg("dxgi: full-pixel check found non-black pixels! Accepting frame.");
