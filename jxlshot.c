@@ -92,6 +92,10 @@ typedef struct {
 
 static AppConfig g_cfg;
 static wchar_t   g_exe_dir[MAX_PATH];
+// Full path of jxlshot.ini, computed once in init_paths(). Init happens
+// before any window or worker thread exists, so every read/write below can
+// use this directly instead of rebuilding the path.
+static wchar_t   g_ini_path[MAX_PATH];
 
 static void init_paths(void) {
     wchar_t tmp[32768]; // Support Windows long paths
@@ -99,12 +103,16 @@ static void init_paths(void) {
     if (len == 0 || len == 32768) {
         // Fallback to current directory if path is too long or fails
         wcscpy(g_exe_dir, L".");
-        return;
+    } else {
+        wchar_t *slash = wcsrchr(tmp, L'\\');
+        if (slash) *slash = 0;
+        wcsncpy(g_exe_dir, tmp, MAX_PATH - 1);
+        g_exe_dir[MAX_PATH - 1] = 0;
     }
-    wchar_t *slash = wcsrchr(tmp, L'\\');
-    if (slash) *slash = 0;
-    wcsncpy(g_exe_dir, tmp, MAX_PATH - 1);
-    g_exe_dir[MAX_PATH - 1] = 0;
+
+    // The INI, and the atomic-replace temp file used by ensure_default_ini().
+    _snwprintf(g_ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    g_ini_path[MAX_PATH - 1] = 0;
 }
 
 // Adds one key to [Capture] only if it is missing.
@@ -128,9 +136,7 @@ static void ini_ensure_key(const wchar_t *ini, const wchar_t *key, const wchar_t
 }
 
 static void ensure_default_ini(void) {
-    wchar_t ini_path[MAX_PATH];
-    _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-    ini_path[MAX_PATH - 1] = 0;
+    const wchar_t *ini_path = g_ini_path;
 
     int needs_refresh = 0;
     wchar_t val_debug[64] = L"0", val_lossless[64] = L"1", val_distance[64] = L"1.0", val_effort[64] = L"7";
@@ -188,7 +194,7 @@ static void ensure_default_ini(void) {
 
     // Case 2: file missing OR was just deleted because it was outdated.
     wchar_t tmp_path[MAX_PATH];
-    _snwprintf(tmp_path, MAX_PATH, L"%s\\jxlshot.ini.tmp", g_exe_dir);
+    _snwprintf(tmp_path, MAX_PATH, L"%s.tmp", g_ini_path);
     tmp_path[MAX_PATH - 1] = 0;
 
     static const wchar_t default_ini[] =
@@ -325,8 +331,7 @@ static void get_cfg_string(LPCWSTR key, LPCWSTR default_val, LPWSTR out_buf, DWO
 }
 
 static void init_config(void) {
-    wchar_t ini_path[MAX_PATH];
-    _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    const wchar_t *ini_path = g_ini_path;
 
     // Force Windows to drop its cached copy of this INI and re-read from disk.
     WritePrivateProfileStringW(NULL, NULL, NULL, ini_path);

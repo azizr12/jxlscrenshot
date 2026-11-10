@@ -193,11 +193,8 @@ static void gui_open_capture_now(void);
 static void toggle_debug(void) {
     g_cfg.debug_enabled = !g_cfg.debug_enabled;
 
-    wchar_t ini[MAX_PATH];
-    _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-    ini[MAX_PATH - 1] = L'\0';
     WritePrivateProfileStringW(L"Capture", L"Debug",
-        g_cfg.debug_enabled ? L"1" : L"0", ini);
+        g_cfg.debug_enabled ? L"1" : L"0", g_ini_path);
 
     if (g_cfg.debug_enabled && !g_dbg) {
         dbg_init(); // open (and truncate) the log for this session
@@ -352,14 +349,13 @@ static UINT current_mods(void) {
 }
 
 static void jxl_save_settings(void) {
-    wchar_t ini[MAX_PATH], s[32];
-    _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-    WritePrivateProfileStringW(L"Capture", L"Lossless", g_cfg.lossless ? L"1" : L"0", ini);
+    wchar_t s[32];
+    WritePrivateProfileStringW(L"Capture", L"Lossless", g_cfg.lossless ? L"1" : L"0", g_ini_path);
     _snwprintf(s, 32, L"%.1f", g_cfg.distance);
-    WritePrivateProfileStringW(L"Capture", L"Distance", s, ini);
+    WritePrivateProfileStringW(L"Capture", L"Distance", s, g_ini_path);
     _snwprintf(s, 32, L"%d", g_cfg.effort);
-    WritePrivateProfileStringW(L"Capture", L"Effort", s, ini);
-    WritePrivateProfileStringW(L"Capture", L"ShowPreview", g_cfg.show_preview ? L"1" : L"0", ini);
+    WritePrivateProfileStringW(L"Capture", L"Effort", s, g_ini_path);
+    WritePrivateProfileStringW(L"Capture", L"ShowPreview", g_cfg.show_preview ? L"1" : L"0", g_ini_path);
     dbg("settings changed: effort=%d lossless=%d distance=%.2f",
         g_cfg.effort, g_cfg.lossless, g_cfg.distance);
     gui_refresh(); // repaint the main window's status line / capture hints
@@ -498,12 +494,11 @@ static void hk_save(int target, UINT vk, UINT mod) {
     if (target == 1) { g_cfg.hk_full_vk = vk;   g_cfg.hk_full_mod = mod; }
     else             { g_cfg.hk_region_vk = vk; g_cfg.hk_region_mod = mod; }
 
-    wchar_t ini_path[MAX_PATH], vk_str[32], mod_str[32];
-    _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+    wchar_t vk_str[32], mod_str[32];
     _snwprintf(vk_str, 32, L"%u", vk);
     _snwprintf(mod_str, 32, L"%u", mod);
-    WritePrivateProfileStringW(L"Capture", vk_key, vk_str, ini_path);
-    WritePrivateProfileStringW(L"Capture", mod_key, mod_str, ini_path);
+    WritePrivateProfileStringW(L"Capture", vk_key, vk_str, g_ini_path);
+    WritePrivateProfileStringW(L"Capture", mod_key, mod_str, g_ini_path);
     gui_refresh(); // the capture cards show the new hotkey
 }
 
@@ -754,10 +749,9 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
                 case IDC_DISABLE_HOOK:
                     g_cfg.disable_keyboard_hook = !g_cfg.disable_keyboard_hook;                    {
-                        wchar_t ini[MAX_PATH], s[32];
-                        _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
+                        wchar_t s[32];
                         _snwprintf(s, 32, L"%d", g_cfg.disable_keyboard_hook);
-                        WritePrivateProfileStringW(L"Capture", L"DisableKeyboardHook", s, ini);
+                        WritePrivateProfileStringW(L"Capture", L"DisableKeyboardHook", s, g_ini_path);
                         dbg("settings changed: disable_keyboard_hook=%d", g_cfg.disable_keyboard_hook);
                     }
                     // Dynamically apply the change immediately
@@ -1097,8 +1091,7 @@ static void execute_set_path(void) {
         wchar_t path[MAX_PATH];
         if (SHGetPathFromIDListW(pidl, path)) {
             wcsncpy(g_cfg.export_path, path, MAX_PATH - 1); g_cfg.export_path[MAX_PATH - 1] = L'\0';
-            wchar_t ini_path[MAX_PATH]; _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-            WritePrivateProfileStringW(L"Capture", L"ExportPath", path, ini_path);
+            WritePrivateProfileStringW(L"Capture", L"ExportPath", path, g_ini_path);
             MessageBoxW(g_hwnd_catcher, L"Export path updated.", L"jxlshot", MB_ICONINFORMATION);
         }
         CoTaskMemFree(pidl);
@@ -1106,17 +1099,14 @@ static void execute_set_path(void) {
 }
 
 static void execute_open_config(HWND hwnd) {
-    wchar_t ini_path[MAX_PATH];
-    _snwprintf(ini_path, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-    
     // Attempt 1: Explicitly open with Notepad
-    HINSTANCE hResult = ShellExecuteW(hwnd, L"open", L"notepad.exe", ini_path, NULL, SW_SHOWNORMAL);
+    HINSTANCE hResult = ShellExecuteW(hwnd, L"open", L"notepad.exe", g_ini_path, NULL, SW_SHOWNORMAL);
     if ((INT_PTR)hResult > 32) {
         return; // Success
     }
     
     // Attempt 2: Fallback to default .txt/.ini viewer
-    hResult = ShellExecuteW(hwnd, L"open", ini_path, NULL, NULL, SW_SHOWNORMAL);
+    hResult = ShellExecuteW(hwnd, L"open", g_ini_path, NULL, NULL, SW_SHOWNORMAL);
     if ((INT_PTR)hResult > 32) {
         return; // Success
     }

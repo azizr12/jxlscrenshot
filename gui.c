@@ -180,27 +180,22 @@ static void gui_update_theme(void) {
 
 // Persist just the theme choice; used by the Dark/Light toggle.
 static void gui_save_theme(void) {
-    wchar_t ini[MAX_PATH];
-    _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-    ini[MAX_PATH - 1] = L'\0';
     WritePrivateProfileStringW(L"Capture", L"DarkMode",
-        g_cfg.dark_mode ? L"1" : L"0", ini);
+        g_cfg.dark_mode ? L"1" : L"0", g_ini_path);
 }
 
 // Persist the theme together with the strip's geometry when the window closes,
 // so both survive a restart.
 static void gui_save_window_state(void) {
-    wchar_t ini[MAX_PATH], s[32];
-    _snwprintf(ini, MAX_PATH, L"%s\\jxlshot.ini", g_exe_dir);
-    ini[MAX_PATH - 1] = L'\0';
+    wchar_t s[32];
 
     WritePrivateProfileStringW(L"Capture", L"DarkMode",
-        g_cfg.dark_mode ? L"1" : L"0", ini);
+        g_cfg.dark_mode ? L"1" : L"0", g_ini_path);
 
-    _snwprintf(s, 32, L"%d", g_cfg.gui_x); WritePrivateProfileStringW(L"Capture", L"GuiX", s, ini);
-    _snwprintf(s, 32, L"%d", g_cfg.gui_y); WritePrivateProfileStringW(L"Capture", L"GuiY", s, ini);
-    _snwprintf(s, 32, L"%d", g_cfg.gui_w); WritePrivateProfileStringW(L"Capture", L"GuiW", s, ini);
-    _snwprintf(s, 32, L"%d", g_cfg.gui_h); WritePrivateProfileStringW(L"Capture", L"GuiH", s, ini);
+    _snwprintf(s, 32, L"%d", g_cfg.gui_x); WritePrivateProfileStringW(L"Capture", L"GuiX", s, g_ini_path);
+    _snwprintf(s, 32, L"%d", g_cfg.gui_y); WritePrivateProfileStringW(L"Capture", L"GuiY", s, g_ini_path);
+    _snwprintf(s, 32, L"%d", g_cfg.gui_w); WritePrivateProfileStringW(L"Capture", L"GuiW", s, g_ini_path);
+    _snwprintf(s, 32, L"%d", g_cfg.gui_h); WritePrivateProfileStringW(L"Capture", L"GuiH", s, g_ini_path);
 }
 
 
