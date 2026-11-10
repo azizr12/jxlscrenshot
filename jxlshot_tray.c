@@ -150,9 +150,6 @@ static HWND g_hwndMenuOwner = NULL;
 #define IDM_HOTKEYS      110
 #define IDM_GUI          111
 
-// Explicitly define the icon resource ID here to prevent "undeclared" errors in CI/CD pipelines
-#define IDI_APP_ICON  1001
-
 static NOTIFYICONDATAW g_nid;
 static BOOL            g_trayIconAdded = FALSE;
 static UINT            g_msgTaskbarCreated = 0;
@@ -2730,7 +2727,8 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
 #include "gui.c"          // Snipping Tool style main window
 
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
-    // 1. Initialize COM for Shell APIs (SHBrowseForFolder), TaskDialog, and DXGI/D3D11 stability
+    // 1. Initialize COM for Shell APIs (SHBrowseForFolder, the open-export
+    //    folder dialog) and DXGI/D3D11 stability
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
 
     // Single instance: a second tray would install duplicate global hooks and a

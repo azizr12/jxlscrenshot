@@ -7,8 +7,6 @@
 #include <shellapi.h>
 #include <gdiplus.h>
 
-#define GUI_DEF_W        600
-#define GUI_DEF_H        190
 #define GUI_MIN_W        400
 #define GUI_MIN_H        96
 #define GUI_MAX_W        2000
@@ -18,9 +16,7 @@
 
 // Close button shared by the strip and the settings window
 #define GUI_CLOSE_W      34
-#define GUI_CLOSE_H      24
 #define GUI_CLOSE_GLYPH  4
-#define GUI_BTN_GAP      4
 
 #define IDC_GUI_FULL     301
 #define IDC_GUI_REGION   302
@@ -35,7 +31,7 @@
 // the whole window between themes at runtime. gui_update_theme fills them from
 // g_cfg.dark_mode before any painting happens.
 static COLORREF g_guiBg, g_guiBtn, g_guiBtnHot, g_guiBtnDown, g_guiBorder;
-static COLORREF g_guiAccent, g_guiText, g_guiDim, g_guiCloseBg;
+static COLORREF g_guiAccent, g_guiText, g_guiDim;
 
 #define GUI_BG        (g_guiBg)
 #define GUI_BTN       (g_guiBtn)
@@ -45,7 +41,6 @@ static COLORREF g_guiAccent, g_guiText, g_guiDim, g_guiCloseBg;
 #define GUI_ACCENT    (g_guiAccent)
 #define GUI_TEXT      (g_guiText)
 #define GUI_DIM       (g_guiDim)
-#define GUI_CLOSE_HOT (g_guiCloseBg)
 
 
 static int gui_dpi_for_monitor(HMONITOR mon) {
@@ -158,7 +153,6 @@ static void gui_update_theme(void) {
         g_guiAccent   = RGB(0, 120, 215);
         g_guiText     = RGB(240, 240, 240);
         g_guiDim      = RGB(150, 150, 150);
-        g_guiCloseBg  = RGB(232, 17, 35);
     } else {
         g_guiBg       = RGB(246, 246, 246);
         g_guiBtn      = RGB(255, 255, 255);
@@ -168,7 +162,6 @@ static void gui_update_theme(void) {
         g_guiAccent   = RGB(0, 120, 215);
         g_guiText     = RGB(26, 26, 26);
         g_guiDim      = RGB(110, 110, 110);
-        g_guiCloseBg  = RGB(232, 17, 35);
     }
 
     if (g_guiBgBrush) {

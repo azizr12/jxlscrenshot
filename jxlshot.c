@@ -37,9 +37,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <wchar.h>
-#include <ctype.h>
 #include <stdarg.h>
-#include <errno.h>
 #include <jxl/encode.h>
 
 #include <d3d11.h>
@@ -49,7 +47,7 @@
 #include <objbase.h>
 #include <jxl/thread_parallel_runner.h>
 #include <knownfolders.h> // Required for FOLDERID_Pictures
-#include <math.h> // DIAG: pow/fabs/ldexpf for pixel statistics
+#include <math.h> // DIAG: powf (pq_encode), ldexpf (half_to_float, linear_to_srgb8)
 #include "resource.h"
 
 // Forward Declarations
