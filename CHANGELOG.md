@@ -1,4 +1,4 @@
-v2.4.7 - ? November 2026
+v2.4.7 - 10 November 2026
 - made effort 7 the default config for jxl, its the best balance beetwen size and performance
 - fixed some dead code
 
