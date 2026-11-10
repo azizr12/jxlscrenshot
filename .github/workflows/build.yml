@@ -62,8 +62,15 @@ jobs:
           cp jxlshot_tray.exe dist/
           cp README.md dist/ 2>/dev/null || true
 
+
           BINDIR="$(dirname "$(which ${{ matrix.cc }})")"
           echo "Collecting DLLs from: $BINDIR"
+
+
+          for pat in 'libwinpthread-1.dll' 'libstdc++-6.dll' 'libgcc_s_*.dll' 'libc++.dll' \
+                     'libunwind.dll' 'libhwy*.dll' 'liblcms2-*.dll' 'libjxl*.dll' 'libbrotli*.dll'; do
+            find "$BINDIR" -maxdepth 1 -iname "$pat" -exec cp -n {} dist/ \;
+          done
 
           changed=1
           while [ "$changed" -eq 1 ]; do
@@ -84,6 +91,23 @@ jobs:
 
           echo "--- dist contents ---"
           ls -lh dist/
+
+          missing=0
+          for f in dist/*.exe dist/*.dll; do
+            if [ ! -f "$f" ]; then continue; fi
+            for dll in $(${{ matrix.objdump }} -p "$f" | awk '/DLL Name:/ {print $3}'); do
+              case "$dll" in api-ms-win-*|API-MS-WIN-*|ext-ms-win-*|EXT-MS-WIN-*) continue ;; esac
+              if [ -f "dist/$dll" ]; then continue; fi
+              if [ -f "/c/Windows/System32/$dll" ]; then continue; fi
+              echo "MISSING: $dll (needed by $(basename "$f"))"
+              missing=1
+            done
+          done
+          if [ "$missing" -eq 1 ]; then
+            echo "Some runtime DLLs could not be resolved. See MISSING lines above."
+            exit 1
+          fi
+          echo "All DLL dependencies resolved."
 
       - name: Package portable ZIP
         run: |
