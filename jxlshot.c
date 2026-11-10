@@ -1680,6 +1680,60 @@ static DWORD WINAPI EncodeWorker(LPVOID param) {
     return 0;
 }
 
+// Hand a captured frame to the encoder: single entry point shared by the CLI
+// main() and the tray build. On success the worker (or the synchronous
+// fallback) owns the pixels; g->bits is always NULL on return, so a later
+// free_grab() is safe on every path. Returns 1 if the frame was accepted
+// (threaded or synchronous fallback), 0 if nothing was saved.
+//
+// join = 0 : fire and forget (tray) - the worker keeps running.
+// join = 1 : block until the worker finishes, which the CLI needs before
+//            main() returns: ExitProcess() would otherwise kill the worker
+//            mid-write and leave a truncated .jxl on disk.
+static int queue_grab_encode(Grab *g, const wchar_t *path, int join) {
+    if (!g || !g->bits || !path) return 0;
+
+    EncodeTask *task = (EncodeTask *)malloc(sizeof(EncodeTask));
+    if (task) {
+        // The task owns the pixels from here on (worker or fallback).
+        task->bits = g->bits;
+        g->bits = NULL;
+        task->w = g->w;
+        task->h = g->h;
+        task->is_hdr = g->is_hdr;
+        task->lossless = g_cfg.lossless;
+        task->distance = g_cfg.distance;
+        wcsncpy_s(task->out_path, MAX_PATH, path, _TRUNCATE);
+
+        // Spawn the background thread
+        InterlockedIncrement(&g_activeEncodes);
+        HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
+        if (hThread) {
+            dbg("encode: offloaded to background thread (%ls)", path);
+            if (join) WaitForSingleObject(hThread, INFINITE);
+            CloseHandle(hThread);
+            if (join) dbg("encode: background thread completed");
+            return 1;
+        }
+
+        // Fallback to synchronous if thread creation fails
+        InterlockedDecrement(&g_activeEncodes);
+        dbg("encode: CreateThread failed, saving synchronously");
+        int ok = save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr,
+                                 task->lossless, task->distance, task->out_path);
+        free(task->bits);
+        free(task);
+        return ok;
+    }
+
+    // Fallback if malloc fails
+    dbg("encode: malloc failed for EncodeTask, saving synchronously");
+    int ok = save_rgb_as_jxl(g->bits, g->w, g->h, g->is_hdr,
+                             g_cfg.lossless, g_cfg.distance, path);
+    free_grab(g);
+    return ok;
+}
+
 // Entry points & main
 
 #ifndef JXLSHOT_TRAY_BUILD
@@ -1731,47 +1785,9 @@ int main(int argc, char **argv) {
     wchar_t out_path[MAX_PATH]; 
     build_out_path(out_path, MAX_PATH, g.is_hdr); 
     
-    int rc = 0;
-    
-    // Transfer ownership of the captured buffer to the background thread
-    EncodeTask *task = (EncodeTask *)malloc(sizeof(EncodeTask));
-    if (task) {
-        task->bits = g.bits;
-        task->w = g.w;
-        task->h = g.h;
-        task->is_hdr = g.is_hdr;
-        task->lossless = g_cfg.lossless;
-        task->distance = g_cfg.distance;
-        wcsncpy_s(task->out_path, MAX_PATH, out_path, _TRUNCATE);
-        
-        // Spawn the background thread
-        InterlockedIncrement(&g_activeEncodes);
-        HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
-        if (hThread) {
-            g.bits = NULL; // Prevent free_grab from freeing the buffer (thread owns it now)
-            dbg("main: encoding offloaded to background thread");
-            
-            // CRITICAL: Wait for the thread to finish. 
-            // Returning from main() calls ExitProcess()
-            // which instantly 
-            // kills all background threads, aborting the save.
-            WaitForSingleObject(hThread, INFINITE);
-            CloseHandle(hThread);
-            dbg("main: background thread completed");
-        } else {
-            // Fallback to synchronous if thread creation fails
-            InterlockedDecrement(&g_activeEncodes);
-            dbg("main: CreateThread failed, falling back to synchronous save");
-            rc = save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr, task->lossless, task->distance, task->out_path) ? 0 : 1;
-            free(task->bits);
-            free(task);
-            g.bits = NULL;
-        }
-    } else {
-        // Fallback if malloc fails
-        dbg("main: malloc failed for EncodeTask, falling back to synchronous save");
-        rc = save_rgb_as_jxl(g.bits, g.w, g.h, g.is_hdr, g_cfg.lossless, g_cfg.distance, out_path) ? 0 : 1;
-    }
+    // Hand the frame to the shared encode queue and join the worker: main()
+    // returning while it still runs would hard-kill it mid-write.
+    int rc = queue_grab_encode(&g, out_path, 1) ? 0 : 1;
     
     free_grab(&g); 
     

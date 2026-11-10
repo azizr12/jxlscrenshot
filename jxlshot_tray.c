@@ -951,47 +951,8 @@ static void show_tray_menu(HWND hwnd) {
     if (cmd) PostMessageW(hwnd, WM_COMMAND, MAKEWPARAM(cmd, 0), 0);
 }
 
-// Hand a captured frame to the encoder. On success the worker owns the pixels
-// and g->bits is cleared; on failure the frame is consumed here. Returns 1 if
-// the frame was accepted (threaded or synchronous fallback).
-static int queue_grab_encode(Grab *g, const wchar_t *path) {
-    if (!g || !g->bits || !path) return 0;
-    // OFFLOAD TO BACKGROUND THREAD
-    // Thread owns the buffer now
-    EncodeTask *task = (EncodeTask *)malloc(sizeof(EncodeTask));
-    if (task) {
-        task->bits = g->bits;
-        g->bits = NULL;
-        task->w = g->w;
-        task->h = g->h;
-        task->is_hdr = g->is_hdr;
-        task->lossless = g_cfg.lossless;
-        task->distance = g_cfg.distance;
-        wcsncpy_s(task->out_path, MAX_PATH, path, _TRUNCATE);
-
-        InterlockedIncrement(&g_activeEncodes);
-        HANDLE hThread = CreateThread(NULL, 0, EncodeWorker, task, 0, NULL);
-        if (hThread) {
-            CloseHandle(hThread);
-            dbg("queue_grab_encode: encoding offloaded (%ls)", path);
-            return 1;
-        }
-
-        InterlockedDecrement(&g_activeEncodes);
-        dbg("queue_grab_encode: CreateThread failed, saving synchronously");
-        int ok = save_rgb_as_jxl(task->bits, task->w, task->h, task->is_hdr,
-                                task->lossless, task->distance, task->out_path);
-        free(task->bits);
-        free(task);
-        return ok;
-    }
-
-    dbg("queue_grab_encode: malloc failed, saving synchronously");
-    int ok = save_rgb_as_jxl(g->bits, g->w, g->h, g->is_hdr,
-                            g_cfg.lossless, g_cfg.distance, path);
-    free_grab(g);
-    return ok;
-}
+// queue_grab_encode() lives in jxlshot.c: one implementation serves both the
+// tray (join = 0, fire and forget) and the CLI main() (join = 1).
 
 static void execute_full_capture(void) {
     // Never let the Settings window end up inside the new screenshot. When this
@@ -1035,7 +996,7 @@ static void execute_full_capture(void) {
             // Separate-images mode still saves every monitor.
             if (saved == 0) gui_open_capture_viewer(&g, out_path);
 
-            if (queue_grab_encode(&g, out_path)) saved++;
+            if (queue_grab_encode(&g, out_path, 0)) saved++;
             free_grab(&g);
         }
 
@@ -1064,7 +1025,7 @@ static void execute_full_capture(void) {
     // Hand the saved path to the viewer once the encoder is done with it.
     gui_open_capture_viewer(&g, out_path);
 
-    if (!queue_grab_encode(&g, out_path)) {
+    if (!queue_grab_encode(&g, out_path, 0)) {
         MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
     }
     free_grab(&g);
@@ -1935,7 +1896,7 @@ static void crop_and_encode_region(RECT *r) {
     // Hand the crop to the viewer once the encoder has written the file.
     gui_open_capture_viewer(&crop, out_path);
 
-    if (!queue_grab_encode(&crop, out_path)) {
+    if (!queue_grab_encode(&crop, out_path, 0)) {
         dbg("crop_and_encode_region: save failed");
     }
     free_grab(&crop);// Guaranteed cleanup before early exit
