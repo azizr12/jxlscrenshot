@@ -47,7 +47,7 @@
 #include <objbase.h>
 #include <jxl/thread_parallel_runner.h>
 #include <knownfolders.h> // Required for FOLDERID_Pictures
-#include <math.h> // DIAG: powf (pq_encode), ldexpf (half_to_float, linear_to_srgb8)
+#include <math.h> // DIAG: powf (pq_encode, linear_to_srgb8), ldexpf (half_to_float - once per entry when building the half->float LUT)
 #include "resource.h"
 
 // Forward Declarations
@@ -1199,6 +1199,31 @@ static float half_to_float(uint16_t h) {
     return s ? -v : v;
 }
 
+// 65536-entry half -> float table (256 KB). half_to_float() costs a couple of
+// ldexpf per call and the HDR conversion below calls it three times per pixel;
+// building the table once turns that into a single load per sample. It is
+// filled by calling half_to_float() itself, so the values are identical by
+// construction (including the NaN -> 0.0 / inf -> 65504 clamping).
+// InitOnceExecuteOnce makes the fill race-free: multimonitor mode can run
+// several EncodeWorkers, and any of them may hit the first HDR conversion.
+static float     g_half2float_lut[65536];
+static INIT_ONCE g_half2float_lut_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK init_half2float_lut(PINIT_ONCE once, PVOID param, PVOID *ctx) {
+    (void)once; (void)param; (void)ctx;
+    for (uint32_t i = 0; i < 65536; i++)
+        g_half2float_lut[i] = half_to_float((uint16_t)i);
+    return TRUE;
+}
+
+// Returns the table, building it on first use. Callers only read through the
+// returned pointer. Concurrent first callers block until the fill completes,
+// and CreateThread's start-up edge hands the finished table to worker threads.
+static const float *half_to_float_lut(void) {
+    InitOnceExecuteOnce(&g_half2float_lut_once, init_half2float_lut, NULL, NULL);
+    return g_half2float_lut;
+}
+
 static uint16_t pq_encode(float nits_norm) {          /* input: nits / 10000 */
     const float m1 = 0.1593017578125f, m2 = 78.84375f;
     const float c1 = 0.8359375f, c2 = 18.8515625f, c3 = 18.6875f;
@@ -1211,14 +1236,24 @@ static uint16_t pq_encode(float nits_norm) {          /* input: nits / 10000 */
 }
 
 /* scRGB FP16 (6 bytes/px) -> PQ Rec.2020 UINT16 (6 bytes/px) */
-static uint16_t *scrgb_to_pq2020(const uint8_t *src, size_t npix) {
-    uint16_t *out = (uint16_t *)malloc(npix * 6);
-    if (!out) return NULL;
-    const uint16_t *h = (const uint16_t *)src;
-    for (size_t i = 0; i < npix; i++) {
-        float r = half_to_float(h[i*3+0]) * 80.0f / 10000.0f;
-        float g = half_to_float(h[i*3+1]) * 80.0f / 10000.0f;
-        float b = half_to_float(h[i*3+2]) * 80.0f / 10000.0f;
+
+// One contiguous pixel range of the conversion. The per-pixel math is pure
+// (pq_encode has no globals, the LUT is read-only after InitOnce), so slices
+// are independent and can run on separate threads.
+typedef struct {
+    const uint16_t *h;
+    uint16_t       *out;
+    size_t          start, end;
+} PqSlice;
+
+static void pq_convert_slice(const PqSlice *s) {
+    const uint16_t *h   = s->h;
+    uint16_t       *out = s->out;
+    const float    *lut = g_half2float_lut; // built before any slice runs
+    for (size_t i = s->start; i < s->end; i++) {
+        float r = lut[h[i*3+0]] * 80.0f / 10000.0f;
+        float g = lut[h[i*3+1]] * 80.0f / 10000.0f;
+        float b = lut[h[i*3+2]] * 80.0f / 10000.0f;
         float R = 0.627404f*r + 0.329283f*g + 0.043313f*b;
         float G = 0.069097f*r + 0.919540f*g + 0.011362f*b;
         float B = 0.016391f*r + 0.088013f*g + 0.895595f*b;
@@ -1226,6 +1261,55 @@ static uint16_t *scrgb_to_pq2020(const uint8_t *src, size_t npix) {
         out[i*3+1] = pq_encode(G);
         out[i*3+2] = pq_encode(B);
     }
+}
+
+static DWORD WINAPI pq_convert_worker(LPVOID param) {
+    pq_convert_slice((const PqSlice *)param);
+    return 0;
+}
+
+static uint16_t *scrgb_to_pq2020(const uint8_t *src, size_t npix) {
+    uint16_t *out = (uint16_t *)malloc(npix * 6);
+    if (!out) return NULL;
+
+    // Build the half->float LUT (race-free) before any conversion thread runs.
+    half_to_float_lut();
+
+    // At 4K HDR this loop is ~50M transcendental ops; it used to run
+    // single-threaded before libjxl even started. Split it by pixel range
+    // across the cores. Small frames stay serial - spawning threads would
+    // cost more than it saves. Cap 64 = WaitForMultipleObjects handle limit.
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    int nthreads = (int)si.dwNumberOfProcessors;
+    if (nthreads > 64) nthreads = 64;
+    if (npix < 262144) nthreads = 1; // under ~512x512: not worth it
+
+    if (nthreads <= 1) {
+        PqSlice s = { (const uint16_t *)src, out, 0, npix };
+        pq_convert_slice(&s);
+        return out;
+    }
+
+    // If thread creation fails for a slice, convert that slice synchronously
+    // here - the same fallback rule the encode queue uses.
+    PqSlice slices[64];
+    HANDLE  th[64];
+    int n = 0;
+    for (int i = 0; i < nthreads; i++) {
+        size_t a = npix * (size_t)i / (size_t)nthreads;
+        size_t b = npix * (size_t)(i + 1) / (size_t)nthreads;
+        if (a >= b) continue;
+        slices[n].h = (const uint16_t *)src;
+        slices[n].out = out;
+        slices[n].start = a;
+        slices[n].end = b;
+        th[n] = CreateThread(NULL, 0, pq_convert_worker, &slices[n], 0, NULL);
+        if (th[n]) n++;
+        else pq_convert_slice(&slices[n]);
+    }
+    if (n) WaitForMultipleObjects((DWORD)n, th, TRUE, INFINITE);
+    while (n) CloseHandle(th[--n]);
     return out;
 }
 
@@ -1376,8 +1460,21 @@ static int encode_jxl_identity(const uint8_t *rgb, int w, int h, int is_hdr, int
 
     // Start small: screenshots compress well, and the growth loop below
     // doubles the buffer only if the encoder actually needs more.
-    size_t cap = (4 << 20);
+    // Seed the output buffer from a plausible size so the common case needs a
+    // single allocation: raw frame bytes plus headroom, capped so a
+    // pathological frame can't commit unbounded memory. Screenshots compress
+    // to a fraction of the raw size, so this is generous; the growth loop
+    // below still doubles the buffer if the encoder actually needs more.
+    // Previously it started at 4 MB and doubling from there copied the whole
+    // buffer up to three times on a large lossless capture.
+    size_t cap = npix * bytes_per_pixel + (1 << 20);
+    if (cap > (64 << 20)) cap = (64 << 20);
     buf = (uint8_t *)malloc(cap);
+    if (!buf) {
+        // Memory pressure fallback: the old small buffer is better than none.
+        cap = (4 << 20);
+        buf = (uint8_t *)malloc(cap);
+    }
     if (!buf) goto done;
 
     uint8_t *next = buf;

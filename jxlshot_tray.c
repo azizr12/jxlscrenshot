@@ -1137,8 +1137,12 @@ static uint8_t g_hdr_srgb_lut[65536];
 static BOOL    g_hdr_srgb_lut_ready = FALSE;
 
 static void init_hdr_srgb_lut(void) {
+    // Feed off the shared half->float table (jxlshot.c): identical values to
+    // half_to_float(), without running its ldexpf 65536 times on the UI
+    // thread during the first HDR preview draw.
+    const float *hf = half_to_float_lut();
     for (uint32_t i = 0; i < 65536; i++) {
-        g_hdr_srgb_lut[i] = linear_to_srgb8(half_to_float((uint16_t)i));
+        g_hdr_srgb_lut[i] = linear_to_srgb8(hf[i]);
     }
     g_hdr_srgb_lut_ready = TRUE;
 }
