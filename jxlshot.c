@@ -595,66 +595,23 @@ typedef struct {
 
 // Blank-frame detection
 
-/*  THIS FUNTION MAY BE STUPID BUT ITS BETTER TO FIX THE STUPID BLANK SCREENSHOT    */
+//  THIS FUNTION MAY BE STUPID BUT ITS BETTER TO FIX THE STUPID BLANK SCREENSHOT
 //  ON SOME STUPID HARDWARE
-/*
- * Checks if a frame is completely blank (all black).
- * 
- * sample_mode:
- *   1 = 16 samples (4x4 grid) - Fastest, may miss tiny non-black artifacts.
- *   2 = 256 samples (16x16 grid) - Balanced, default behavior.
- *   3 = ALL pixels (exhaustive scan) - Slowest, absolute certainty.
- *
- * A frame is deemed blank ONLY when every checked pixel is exactly black.
- * If even one checked pixel carries any colour information, the frame is
- * considered valid (returns 0).
- */
-static int is_frame_blank(const uint8_t *rgb, int w, int h, int is_hdr, int sample_mode) {
-    // Mode 0: Disabled. Assume the frame is valid and skip checking.
-    if (sample_mode == 0) return 0; 
 
-    if (!rgb || w <= 0 || h <= 0) return 1;
+// Checks if a frame is completely blank (all black),
+// reading the mapped DXGI source directly (BGRA8 = 4 bytes/px, RGBA16F = 8 bytes/px)
+// so a blank frame can be rejected before any conversion or allocation. Alpha is ignored.
 
-    size_t bpp = is_hdr ? 6 : 3;
+// mode:
+//   0 = Disabled: assume the frame is valid and skip checking.
+//   1 = 16 samples (4x4 grid) - Fastest, may miss tiny non-black artifacts.
+//   2 = 256 samples (16x16 grid) - Balanced, default behavior.
+//   3 = ALL pixels (exhaustive scan) - Slowest, absolute certainty.
 
-    if (sample_mode == 3) {
-        /* Mode 3: Exhaustive scan of every single pixel */
-        size_t total_pixels = (size_t)w * h;
-        for (size_t i = 0; i < total_pixels; i++) {
-            const uint8_t *px = rgb + (i * bpp);
-            if (is_hdr) {
-                if (px[0] | px[1] | px[2] | px[3] | px[4] | px[5]) return 0;
-            } else {
-                if (px[0] | px[1] | px[2]) return 0;
-            }
-        }
-    } else {
-        /* Mode 1 or 2: Grid sampling (4x4 or 16x16) */
-        int cols = (sample_mode == 1) ? 4 : 16;
-        int rows = (sample_mode == 1) ? 4 : 16;
+// A frame is deemed blank ONLY when every checked pixel is exactly black.
+// If even one checked pixel carries any colour information,
+// the frame is considered valid (returns 0).
 
-        for (int r = 0; r < rows; r++) {
-            int y = (h * r) / rows;
-            for (int c = 0; c < cols; c++) {
-                int x = (w * c) / cols;
-                const uint8_t *px = rgb + ((size_t)y * w + x) * bpp;
-
-                if (is_hdr) {
-                    if (px[0] | px[1] | px[2] | px[3] | px[4] | px[5]) return 0;
-                } else {
-                    if (px[0] | px[1] | px[2]) return 0;
-                }
-            }
-        }
-    }
-
-    // Every checked pixel was exactly zero — frame is blank
-    return 1;
-}
-
-// same logic as is_frame_blank, but reads the mapped DXGI source directly
-// (BGRA8 = 4 bytes/px, RGBA16F = 8 bytes/px) so a blank frame can be rejected
-// before any conversion or allocation. Alpha is ignored.
 static int is_blank_src(const uint8_t *p, size_t pitch, int w, int h, int is_hdr, int mode) {
     if (mode == 0) return 0;
     if (!p || w <= 0 || h <= 0) return 1;
@@ -964,7 +921,11 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             {
                 int blank = is_blank_src((const uint8_t *)mapped.pData, mapped.RowPitch,
                                          w_phys, h_phys, g->is_hdr, g_cfg.blank_check_mode);
-                // Last attempt: same final exhaustive (mode 3) check as before.
+                // Exhaustive (mode 3) escalation on the final attempt: the mode
+                // 1/2 grid can miss content smaller than the sampling gaps.
+                // This MUST run here, while the frame is still mapped - after
+                // ReleaseFrame the pixels are gone, and g->bits is only allocated
+                // for an accepted frame (an all-blank run ends with it NULL).
                 if (blank && attempt == MAX_ATTEMPTS && g_cfg.blank_check_mode != 3) {
                     dbg("dxgi: last attempt blank by mode %d, running full-pixel check", g_cfg.blank_check_mode);
                     blank = is_blank_src((const uint8_t *)mapped.pData, mapped.RowPitch,
@@ -1073,16 +1034,12 @@ static int grab_via_dxgi(Grab *g, HMONITOR target_monitor) {
             break;
         }
 
+        // Everything that gets here was exhaustively re-checked inside the loop on the last attempt,
+        // while the frame was still mapped.
+        // In this state g->bits is NULL - a blank attempt bails before the allocation
+        // so the old post-loop full-pixel re-check on g->bits is dead code and removed.
         if (!ok) {
-            dbg("dxgi: all %d attempts deemed blank by mode %d. Running one last full-pixel (mode 3) check on the final frame.", MAX_ATTEMPTS, g_cfg.blank_check_mode);
-
-            // Re-evaluate the 8th frame using Mode 3 (ALL pixels)
-            if (g->bits && !is_frame_blank(g->bits, g->w, g->h, g->is_hdr, 3)) {
-                dbg("dxgi: full-pixel check found non-black pixels! Accepting frame.");
-                ok = 1;
-            } else {
-                dbg("dxgi: full-pixel check confirmed frame is truly blank. Giving up on DXGI.");
-            }
+            dbg("dxgi: all %d attempts deemed blank by mode %d. Giving up on DXGI.", MAX_ATTEMPTS, g_cfg.blank_check_mode);
         }
     }
 
