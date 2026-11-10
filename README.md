@@ -2,7 +2,7 @@
     <img alt="Logo" src="icon.ico" />
 </div>
 
-[![Download Windows Installer](https://img.shields.io/badge/⬇_Download-Windows_Installer-2ea44f?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/azizr12/jxlscrenshot/releases/latest/download/jxlshot-setup-x64.exe)
+[![Download Windows Installer](https://img.shields.io/badge/⬇_Download-Windows_Installer-2ea44f?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/azizr12/jxlshot/releases/latest/download/jxlshot-setup-x64.exe)
 
 - Small c project to capture monitor screenshot using jxl image codec on windows.
 > The entire idea here is to build a screenshot app using jxl  to achieve great compression and good quality unlike jpeg which give bad quality and bad colors and png has mid compression

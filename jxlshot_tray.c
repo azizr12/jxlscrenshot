@@ -1,4 +1,4 @@
-//       https://github.com/azizr12/jxlscrenshot/
+//       https://github.com/azizr12/jxlshot/
 
 /* ofc this will get flag as a virus
  * because its a c code and need low level access to work
@@ -1033,7 +1033,7 @@ static void execute_full_capture(void) {
 static void execute_open_releases(HWND hwnd) {
     // No version download and no temp file: let the browser do the work.
     ShellExecuteW(hwnd, L"open",
-                  L"https://github.com/azizr12/jxlscrenshot/releases",
+                  L"https://github.com/azizr12/jxlshot/releases",
                   NULL, NULL, SW_SHOWNORMAL);
 }
 

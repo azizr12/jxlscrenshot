@@ -1,9 +1,11 @@
-v2.4.7 - ? November 2026
+v2.4.8 - 10 November 2026
 - made effort 7 the default config for jxl, its the best balance beetwen size and performance
 - fixed some dead code
+- changed repo and app name from "jxlscrenshot" to "jxlshot"
+- add optimization to hdr
 
 v2.4.6 - 8 November 2026
-- region capture overlay is now presented by a D3D11 flip-model swap chain instead of a GDI DIB, so the preview is actually HDR instead of an 8-bit SDR approximation of the FP16 scRGB frame [#7](https://github.com/azizr12/jxlscrenshot/issues/7)
+- region capture overlay is now presented by a D3D11 flip-model swap chain instead of a GDI DIB, so the preview is actually HDR instead of an 8-bit SDR approximation of the FP16 scRGB frame [#7](https://github.com/azizr12/jxlshot/issues/7)
 - HDR overlay: `R16G16B16A16_FLOAT` swap chain in linear scRGB, so highlights above SDR white stay HDR in the preview; the dim layer, selection border and size label are drawn in the same space by a small runtime-compiled shader
 - SDR overlay now uses the same renderer with a `B8G8R8A8_UNORM` sRGB swap chain, so the GPU path can be tested on any monitor; the old GDI overlay is kept only as a fallback when the D3D setup fails
 - addded a dark/light theme selection in "open capture tool"
@@ -78,7 +80,7 @@ v2.3.0 - 15 October 2026
 
 
 v2.2.9 - 13 October 2026
-- made the app use linear FP16 scRGB to PQ Rec.2020 for a correct HDR image [#5](https://github.com/azizr12/jxlscrenshot/issues/5)
+- made the app use linear FP16 scRGB to PQ Rec.2020 for a correct HDR image [#5](https://github.com/azizr12/jxlshot/issues/5)
 
 
 v2.2.6 - 5 October 2026
@@ -142,7 +144,7 @@ in case of any issue with the software you are free to open discussion in "issue
 
 v2 - 30 August 2026
 
-- Hdr notone by @azizr12 in [#4](https://github.com/azizr12/jxlscrenshot/pull/4)
+- Hdr notone by @azizr12 in [#4](https://github.com/azizr12/jxlshot/pull/4)
 - added HDR support (still experimental)
 and need test consider opening issue if it doesnt work if you care about hdr, in case hdr work your screenshot end with _hdr.jxl
 - made some layer with compatibility and making screenshot always work because :

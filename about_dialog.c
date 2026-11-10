@@ -105,7 +105,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 
             // Hyperlink
             // Y=256 (241 + 15px gap), Height=22 -> Bottom edge = 278
-            CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlscrenshot\">View on GitHub</a>",
+            CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlshot\">View on GitHub</a>",
                 WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 256, 250, 22, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
 
             // Splash Icon
