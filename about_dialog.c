@@ -54,7 +54,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 
             // Title (Left aligned)
             // Y=40, Height=36 -> Bottom edge = 76
-            HWND hTitle = CreateWindowExW(0, L"STATIC", L"JXL Screenshot Tool",
+            HWND hTitle = CreateWindowExW(0, L"STATIC", L"JXL Shot",
                 WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 40, 290, 36, hwnd, (HMENU)IDC_ABOUT_TITLE, GetModuleHandleW(NULL), NULL);
             SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hTitleFont, TRUE);
 
@@ -89,7 +89,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             // Format the final string.
             // Double-space after each label gives a little breathing room without needing tabs.
             _snwprintf(desc_text, 511,
-                L"Minimal tray screenshot tool using JPEG XL.\n\n"
+                L"A minimal screenshot tool using JPEG XL.\n\n"
                 L"App Version:  %s\n"
                 L"libjxl Version:  %d.%d.%d\n"
                 L"CPU Architecture:  x86-64 (%s)",
