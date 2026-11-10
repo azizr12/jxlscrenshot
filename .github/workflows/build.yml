@@ -62,18 +62,25 @@ jobs:
           cp jxlshot_tray.exe dist/
           cp README.md dist/ 2>/dev/null || true
 
-          # Recursively collect non-system DLL dependencies from the toolchain's bin dir
-          # (uses objdump instead of ldd, which can't read ARM64 binaries reliably)
-          BINDIR="$MSYSTEM_PREFIX/bin"
-          collect() {
-            for dll in $(${{ matrix.objdump }} -p "$1" | awk '/DLL Name:/ {print $3}'); do
-              if [ -f "$BINDIR/$dll" ] && [ ! -f "dist/$dll" ]; then
-                cp "$BINDIR/$dll" dist/
-                collect "$BINDIR/$dll"
-              fi
+          BINDIR="$(dirname "$(which ${{ matrix.cc }})")"
+          echo "Collecting DLLs from: $BINDIR"
+
+          changed=1
+          while [ "$changed" -eq 1 ]; do
+            changed=0
+            for f in jxlshot_tray.exe dist/*.dll; do
+              if [ ! -f "$f" ]; then continue; fi
+              for dll in $(${{ matrix.objdump }} -p "$f" | awk '/DLL Name:/ {print $3}'); do
+                if [ -f "dist/$dll" ]; then continue; fi
+                src="$(find "$BINDIR" -maxdepth 1 -iname "$dll" | head -n 1)"
+                if [ -n "$src" ]; then
+                  echo "  + $(basename "$src")  (needed by $(basename "$f"))"
+                  cp "$src" dist/
+                  changed=1
+                fi
+              done
             done
-          }
-          collect jxlshot_tray.exe
+          done
 
           echo "--- dist contents ---"
           ls -lh dist/
