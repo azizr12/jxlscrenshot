@@ -26,7 +26,6 @@ static HWND g_hwndAbout = NULL;
 
 // Forward declaration
 extern void ApplyDarkMode(HWND hwnd);
-extern HWND g_hwndTray;
 extern HWND g_hwndMenuOwner;
 
 // Close ("X") button hit-box, kept in one place so paint/hit-test/mouse code all agree.
@@ -37,15 +36,14 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         case WM_CREATE: {
             ApplyDarkMode(hwnd);
 
-            // Create Modern Typography (Consolas Regular)
-            // FW_NORMAL (400) ensures the "Regular" weight. 
+            // FW_NORMAL (400) ensures the "Regular" weight.
             // FIXED_PITCH | FF_MODERN is the correct flag for monospaced fonts like Consolas.
             // Sizes bumped up slightly for better legibility on the larger window.
             g_hTitleFont = CreateFontW(-28, 0,0,0, FW_SEMIBOLD, 0,0,0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI Variable Display");
             g_hBodyFont  = CreateFontW(-15, 0,0,0, FW_NORMAL, 0,0,0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
-            g_hXFont = CreateFontW(-22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, 
+            g_hXFont = CreateFontW(-22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
             // Create Background Brush
             g_hAboutBgBrush = CreateSolidBrush(RGB(30, 30, 30));
@@ -71,14 +69,6 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             int jxl_minor = (jxl_ver / 1000) % 1000;
             int jxl_patch = jxl_ver % 1000;
 
-            // Detect CPU architecture and instruction sets.
-            // The architecture is decided at compile time, so each build reports itself correctly.
-#if defined(_M_ARM64) || defined(__aarch64__)
-            // ARM64 build: NEON (Advanced SIMD) is mandatory on ARMv8-A,
-            // so it is always present and needs no runtime check.
-            const wchar_t* cpu_arch = L"ARM64";
-            const wchar_t* cpu_ext  = L"NEON";
-#else
             // Define fallback constants for older Windows SDK headers
 #ifndef PF_AVX512F_INSTRUCTIONS_AVAILABLE
 #define PF_AVX512F_INSTRUCTIONS_AVAILABLE 41
@@ -91,26 +81,20 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 #endif
 
             // Detect CPU instruction sets
-            BOOL has_avx512 = IsProcessorFeaturePresent(PF_AVX512F_INSTRUCTIONS_AVAILABLE);
-            BOOL has_avx2 = IsProcessorFeaturePresent(PF_AVX2_INSTRUCTIONS_AVAILABLE);
-            BOOL has_avx = IsProcessorFeaturePresent(PF_AVX_INSTRUCTIONS_AVAILABLE);
-
-            const wchar_t* cpu_arch = L"x86-64";
             const wchar_t* cpu_ext = L"SSE2";
-            if (has_avx512) cpu_ext = L"AVX-512";
-            else if (has_avx2) cpu_ext = L"AVX2";
-            else if (has_avx) cpu_ext = L"AVX";
-#endif
+            if (IsProcessorFeaturePresent(PF_AVX512F_INSTRUCTIONS_AVAILABLE)) cpu_ext = L"AVX-512";
+            else if (IsProcessorFeaturePresent(PF_AVX2_INSTRUCTIONS_AVAILABLE)) cpu_ext = L"AVX2";
+            else if (IsProcessorFeaturePresent(PF_AVX_INSTRUCTIONS_AVAILABLE)) cpu_ext = L"AVX";
 
             // Format the final string.
             // Double-space after each label gives a little breathing room without needing tabs.
-            _snwprintf(desc_text, 511, // Changed 512 to 511 to leave room for null terminator
+            _snwprintf(desc_text, 511,
                 L"Minimal tray screenshot tool using JPEG XL.\n\n"
                 L"App Version:  %s\n"
                 L"libjxl Version:  %d.%d.%d\n"
-                L"CPU Architecture:  %s (%s)",
-                APP_VERSIONW, jxl_major, jxl_minor, jxl_patch, cpu_arch, cpu_ext);
-            
+                L"CPU Architecture:  x86-64 (%s)",
+                APP_VERSIONW, jxl_major, jxl_minor, jxl_patch, cpu_ext);
+
             desc_text[511] = L'\0'; // Guarantee null-termination
 
             // Description
@@ -125,7 +109,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
                 WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 256, 250, 22, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
 
             // Splash Icon
-            // Pushed further right (x=340) so there's a clear gap between it and
+            // Pushed further right so there's a clear gap between it and
             // the text column, while still stopping short of the close button
             // (kCloseBtnRect starts at x=472; the icon ends at x=468).
             HWND hIconCtrl = CreateWindowExW(0, L"STATIC", L"",
@@ -136,20 +120,15 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         }
 
         case WM_ERASEBKGND: {
-            HDC hdc = (HDC)wParam;
             RECT rc;
             GetClientRect(hwnd, &rc);
-            FillRect(hdc, &rc, g_hAboutBgBrush);
+            FillRect((HDC)wParam, &rc, g_hAboutBgBrush);
             return 1;
         }
 
         case WM_PAINT: {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
-            RECT rc;
-            GetClientRect(hwnd, &rc);
-
-            FillRect(hdc, &rc, g_hAboutBgBrush);
 
             SetBkMode(hdc, TRANSPARENT);
             RECT rcX = kCloseBtnRect;
@@ -167,8 +146,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 
         case WM_CTLCOLORSTATIC: {
             HDC hdcStatic = (HDC)wParam;
-            HWND hCtrl = (HWND)lParam;
-            int id = GetDlgCtrlID(hCtrl);
+            int id = GetDlgCtrlID((HWND)lParam);
 
             SetBkMode(hdcStatic, TRANSPARENT);
 
@@ -192,11 +170,8 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 
             // 2. Interactive controls (e.g., hyperlink): Treat as client so they can be clicked
             HWND hChild = ChildWindowFromPoint(hwnd, pt);
-            if (hChild != NULL && hChild != hwnd) {
-                int id = GetDlgCtrlID(hChild);
-                if (id == IDC_ABOUT_LINK) {
-                    return HTCLIENT;
-                }
+            if (hChild != NULL && hChild != hwnd && GetDlgCtrlID(hChild) == IDC_ABOUT_LINK) {
+                return HTCLIENT;
             }
 
             // 3. Everywhere else acts as the title bar (fully draggable by the OS)
@@ -206,21 +181,8 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
         case WM_MOUSEMOVE: {
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 
-            // Check if cursor is within the "X" button bounds
-            if (PtInRect(&kCloseBtnRect, pt)) {
-                SetCursor(LoadCursorW(NULL, IDC_HAND));
-
-                // Request a WM_MOUSELEAVE message when the cursor exits the window
-                TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
-                TrackMouseEvent(&tme);
-            } else {
-                SetCursor(LoadCursorW(NULL, IDC_ARROW));
-            }
-            return 0;
-        }
-
-        case WM_MOUSELEAVE: {
-            SetCursor(LoadCursorW(NULL, IDC_ARROW));
+            // Hand cursor inside the "X" button bounds, arrow everywhere else
+            SetCursor(LoadCursorW(NULL, PtInRect(&kCloseBtnRect, pt) ? IDC_HAND : IDC_ARROW));
             return 0;
         }
 
@@ -237,7 +199,6 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             // Handle close button click exclusively
             if (PtInRect(&kCloseBtnRect, pt)) {
                 DestroyWindow(hwnd);
-                return 0;
             }
 
             // Dragging is fully handled by WM_NCHITTEST returning HTCAPTION.
@@ -255,33 +216,22 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             break;
         }
 
-        // NOTE: the old WM_ACTIVATE handler called SetForegroundWindow() every
-        // time the dialog lost focus. Combined with WS_EX_TOPMOST that produced a
-        // foreground war (and two instances fought each other). Removed: a normal
-        // topmost window is the correct behaviour.
-
         case WM_DESTROY:
-            // Re-enabling a message-only/hidden window never did anything; the
-            // EnableWindow(g_hwndTray, ...) calls were dead code and are gone.
-            
             // Clean up GDI objects safely
             if (g_hAboutBgBrush) { DeleteObject(g_hAboutBgBrush); g_hAboutBgBrush = NULL; }
             if (g_hTitleFont) { DeleteObject(g_hTitleFont); g_hTitleFont = NULL; }
             if (g_hBodyFont) { DeleteObject(g_hBodyFont); g_hBodyFont = NULL; }
             if (g_hXFont) { DeleteObject(g_hXFont); g_hXFont = NULL; }
+
+            // CRITICAL: DO NOT destroy g_hAppIcon here.
+            // It is shared with the main tray application.
             
-            // CRITICAL: DO NOT destroy g_hAppIcon here. 
-            // It is shared with the main tray application. Destroying it here 
-            // is what causes the "broken icon" bug in the system tray.
-            
-            // CRITICAL: DO NOT call PostQuitMessage(0) here. 
+            // Destroying it here will cause a "broken icon" bug in the system tray.
+
+            // CRITICAL: DO NOT call PostQuitMessage(0) here.
             // It will terminate your entire tray application when this dialog closes.
 
             g_hwndAbout = NULL;
-            return 0;
-
-        case WM_CLOSE:
-            DestroyWindow(hwnd);
             return 0;
     }
     return DefWindowProcW(hwnd, uMsg, wParam, lParam);
@@ -294,28 +244,23 @@ static void execute_about(void) {
         return;
     }
 
-    AllowSetForegroundWindow(GetCurrentProcessId());
-
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_LINK_CLASS };
     InitCommonControlsEx(&icc);
 
     // ICON LOADING
     // Modern .ico files often skip 128x128 and go straight to 256x256 (PNG compressed).
     // We cascade through these specific sizes to guarantee we retrieve the custom icon.
-    // Must be loaded before the window class is registered so wc.hIcon is valid.
     if (!g_hAppIcon) {
         // Attempt 1: Exact 128x128
         g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 128, 128, LR_DEFAULTCOLOR);
-        
+
         // Attempt 2: Fallback to 256x256 (Windows will smoothly scale this down)
         if (!g_hAppIcon) {
             g_hAppIcon = (HICON)LoadImageW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDI_APP_ICON), IMAGE_ICON, 256, 256, LR_DEFAULTCOLOR);
         }
     }
 
-    // Register the window class exactly once. (The old code registered it twice:
-    // once inside the GetClassInfoExW guard and once again unconditionally, where
-    // the second call always failed.)
+    // Register the window class exactly once.
     static BOOL registered = FALSE;
     if (!registered) {
         WNDCLASSEXW wc = {0};
@@ -323,10 +268,7 @@ static void execute_about(void) {
         wc.lpfnWndProc = AboutWindowProc;
         wc.hInstance = GetModuleHandleW(NULL);
         wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
-        wc.hbrBackground = NULL;
         wc.lpszClassName = L"JxlShotAboutClass";
-        wc.hIcon = g_hAppIcon;
-        wc.hIconSm = g_hAppIcon;
         RegisterClassExW(&wc);
         registered = TRUE;
     }
@@ -342,7 +284,7 @@ static void execute_about(void) {
     int y = rc.top + (rc.bottom - rc.top - dlgHeight) / 2;
 
     g_hwndAbout = CreateWindowExW(
-        WS_EX_TOPMOST, // Remove WS_EX_APPWINDOW
+        WS_EX_TOPMOST,
         L"JxlShotAboutClass",
         L"About",
         WS_POPUP | WS_VISIBLE,
@@ -355,8 +297,7 @@ static void execute_about(void) {
 
     if (g_hwndAbout) {
         SetForegroundWindow(g_hwndAbout);
-        
-        // REMOVED the local while(GetMessage) loop.
+
         // The main application's message loop will handle this window automatically.
     } else {
         MessageBoxW(NULL, L"Failed to create About dialog.", L"jxlshot", MB_ICONERROR);
