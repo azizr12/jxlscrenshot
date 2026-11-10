@@ -1,6 +1,6 @@
 v2.4.7 - ? November 2026
 - made effort 7 the default config for jxl, its the best balance beetwen size and performance
-
+- fixed some dead code
 
 v2.4.6 - 8 November 2026
 - region capture overlay is now presented by a D3D11 flip-model swap chain instead of a GDI DIB, so the preview is actually HDR instead of an 8-bit SDR approximation of the FP16 scRGB frame [#7](https://github.com/azizr12/jxlscrenshot/issues/7)
