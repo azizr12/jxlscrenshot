@@ -1,5 +1,5 @@
-# One workflow: builds portable ZIP + installer EXE for x64 and ARM64,
-# uploads them, and attaches them to a GitHub release when a v* tag is pushed.
+# One job: builds the portable ZIP and the installer EXE, uploads both,
+# and attaches both to a GitHub release when a v* tag is pushed.
 
 name: build-windows installer
 on:
@@ -13,26 +13,9 @@ on:
 
 jobs:
   build:
-    name: build-${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: windows-latest
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            runner: windows-latest
-            msystem: MINGW64
-            pkgprefix: mingw-w64-x86_64
-            cc: gcc
-            objdump: objdump
-          - arch: arm64
-            runner: windows-11-arm
-            msystem: CLANGARM64
-            pkgprefix: mingw-w64-clang-aarch64
-            cc: clang
-            objdump: llvm-objdump
     defaults:
       run:
         shell: msys2 {0}
@@ -40,79 +23,40 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up MSYS2 (${{ matrix.msystem }})
+      - name: Set up MSYS2 (MinGW-w64)
         uses: msys2/setup-msys2@v2
         with:
-          msystem: ${{ matrix.msystem }}
+          msystem: MINGW64
           update: true
           install: >-
-            ${{ matrix.pkgprefix }}-toolchain
-            ${{ matrix.pkgprefix }}-libjxl
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-libjxl
             zip
 
       - name: Compile and bundle runtime DLLs
         run: |
           windres -i resource.rc -o resource.o
 
-          ${{ matrix.cc }} -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
+          gcc -O2 -s -flto -ffunction-sections -fdata-sections -Wl,--gc-sections \
               -mwindows -o jxlshot_tray.exe jxlshot_tray.c resource.o \
               -ljxl_threads -ljxl -lgdi32 -luser32 -lshell32 -lcomctl32 -lmsimg32 -lole32 -ldxgi -ld3d11 -luuid -lgdiplus
 
+          # Prepare distribution directory
           mkdir -p dist
           cp jxlshot_tray.exe dist/
           cp README.md dist/ 2>/dev/null || true
 
-
-          BINDIR="$(dirname "$(which ${{ matrix.cc }})")"
-          echo "Collecting DLLs from: $BINDIR"
-
-
-          for pat in 'libwinpthread-1.dll' 'libstdc++-6.dll' 'libgcc_s_*.dll' 'libc++.dll' \
-                     'libunwind.dll' 'libhwy*.dll' 'liblcms2-*.dll' 'libjxl*.dll' 'libbrotli*.dll'; do
-            find "$BINDIR" -maxdepth 1 -iname "$pat" -exec cp -n {} dist/ \;
-          done
-
-          changed=1
-          while [ "$changed" -eq 1 ]; do
-            changed=0
-            for f in jxlshot_tray.exe dist/*.dll; do
-              if [ ! -f "$f" ]; then continue; fi
-              for dll in $(${{ matrix.objdump }} -p "$f" | awk '/DLL Name:/ {print $3}'); do
-                if [ -f "dist/$dll" ]; then continue; fi
-                src="$(find "$BINDIR" -maxdepth 1 -iname "$dll" | head -n 1)"
-                if [ -n "$src" ]; then
-                  echo "  + $(basename "$src")  (needed by $(basename "$f"))"
-                  cp "$src" dist/
-                  changed=1
-                fi
-              done
-            done
-          done
+          # Copy all MinGW/libjxl DLL dependencies without running the exe
+          ldd jxlshot_tray.exe | grep "/mingw64/bin" | awk '{print $3}' | sort -u | xargs -I {} cp {} dist/
 
           echo "--- dist contents ---"
           ls -lh dist/
 
-          missing=0
-          for f in dist/*.exe dist/*.dll; do
-            if [ ! -f "$f" ]; then continue; fi
-            for dll in $(${{ matrix.objdump }} -p "$f" | awk '/DLL Name:/ {print $3}'); do
-              case "$dll" in api-ms-win-*|API-MS-WIN-*|ext-ms-win-*|EXT-MS-WIN-*) continue ;; esac
-              if [ -f "dist/$dll" ]; then continue; fi
-              if [ -f "/c/Windows/System32/$dll" ]; then continue; fi
-              echo "MISSING: $dll (needed by $(basename "$f"))"
-              missing=1
-            done
-          done
-          if [ "$missing" -eq 1 ]; then
-            echo "Some runtime DLLs could not be resolved. See MISSING lines above."
-            exit 1
-          fi
-          echo "All DLL dependencies resolved."
-
       - name: Package portable ZIP
         run: |
-          (cd dist && zip -r ../jxlshot-windows-${{ matrix.arch }}.zip .)
-          ls -lh jxlshot-windows-${{ matrix.arch }}.zip
+          # Keep the portable files at the ZIP root
+          (cd dist && zip -r ../jxlshot-windows-x64.zip .)
+          ls -lh jxlshot-windows-x64.zip
 
       - name: Build Inno Setup Installer
         shell: pwsh
@@ -126,12 +70,14 @@ jobs:
               throw "Inno Setup compiler not found."
           }
 
-          & $iscc "/DMyArch=${{ matrix.arch }}" setup.iss
+          # setup.iss reads dist\jxlshot_tray.exe and dist\*.dll
+          & $iscc setup.iss
           if ($LASTEXITCODE -ne 0) {
               throw "ISCC failed with exit code $LASTEXITCODE"
           }
 
-          if (-Not (Test-Path "Output\jxlshot-setup-${{ matrix.arch }}.exe")) {
+          # setup.iss has OutputDir=Output, so the installer lands here
+          if (-Not (Test-Path "Output\jxlshot-setup-x64.exe")) {
               Get-ChildItem -Recurse -Filter *.exe | Select-Object FullName
               throw "The installer EXE was not created."
           }
@@ -139,16 +85,16 @@ jobs:
       - name: Upload portable ZIP
         uses: actions/upload-artifact@v7
         with:
-          name: jxlshot-windows-${{ matrix.arch }}.zip
-          path: jxlshot-windows-${{ matrix.arch }}.zip
+          name: jxlshot-windows-x64.zip
+          path: jxlshot-windows-x64.zip
           archive: false
           if-no-files-found: error
 
       - name: Upload installer EXE
         uses: actions/upload-artifact@v7
         with:
-          name: jxlshot-setup-${{ matrix.arch }}.exe
-          path: Output/jxlshot-setup-${{ matrix.arch }}.exe
+          name: jxlshot-setup-x64.exe
+          path: Output/jxlshot-setup-x64.exe
           archive: false
           if-no-files-found: error
 
@@ -158,5 +104,5 @@ jobs:
         with:
           fail_on_unmatched_files: true
           files: |
-            jxlshot-windows-${{ matrix.arch }}.zip
-            Output/jxlshot-setup-${{ matrix.arch }}.exe
+            jxlshot-windows-x64.zip
+            Output/jxlshot-setup-x64.exe
