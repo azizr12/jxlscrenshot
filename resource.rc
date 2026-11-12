@@ -1,8 +1,7 @@
 
 
-// filling this file something triggrt BitDefender's Gen:Variant.Barys heuristic flags 
+// filling this file triggrt BitDefender's Gen:Variant.Barys heuristic flags 
 // ??????
-
 
 
 #include "resource.h"
