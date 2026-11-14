@@ -1,6 +1,7 @@
 *.txt
 *.dll
 *.ini
+!lang/*.ini
 *.exe
 *.jxl
 *.log
