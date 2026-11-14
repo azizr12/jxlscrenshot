@@ -1,3 +1,8 @@
+v2.5.1 - 14 November 2026
+- running the exe normally now opens the "Capture Tool" window;
+- added -silent flag for the tray on start up
+
+
 v2.5.0 - 10 November 2026
 - made effort 7 the default config for jxl, its the best balance beetwen size and performance
 - fixed some dead code

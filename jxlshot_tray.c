@@ -22,6 +22,9 @@
 // fresh at every start, truncating the previous run's data to 0 bytes).
 
 
+//  jxlshot_tray.exe           "opens the Capture Tool window"
+//  jxlshot_tray.exe -silent   "tray only"
+
 
 #define _WIN32_IE 0x0600
 #define UNICODE
@@ -153,6 +156,7 @@ static HWND g_hwndMenuOwner = NULL;
 static NOTIFYICONDATAW g_nid;
 static BOOL            g_trayIconAdded = FALSE;
 static UINT            g_msgTaskbarCreated = 0;
+static UINT            g_msgShowGui = 0;
 static HICON           g_iconNormal = NULL; // shared module icon, never destroyed
 static HICON           g_iconOk = NULL;     // green-dot variant, owned by us
 static HWND            g_hwndTray = NULL;
@@ -2722,6 +2726,11 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
                 }
                 return 0;
             }
+            if (g_msgShowGui && msg == g_msgShowGui) {
+                dbg("tray: show-gui request received from a second launch");
+                execute_gui();
+                return 0;
+            }
             return DefWindowProcW(hwnd, msg, wp, lParam);
     }
     return 0;
@@ -2730,10 +2739,28 @@ LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lParam) {
 #include "about_dialog.c" // Pulls in the custom About dialog implementation
 #include "gui.c"          // Snipping Tool style main window
 
+static BOOL cmdline_has_flag(const wchar_t *flag) {
+    int argc = 0;
+    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) return FALSE;
+
+    BOOL found = FALSE;
+    for (int i = 1; i < argc; i++) {
+        if (_wcsicmp(argv[i], flag) == 0) { found = TRUE; break; }
+    }
+    LocalFree(argv);
+    return found;
+}
+
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
+    (void)szCmdLine;
+    (void)sw;
+
     // 1. Initialize COM for Shell APIs (SHBrowseForFolder, the open-export
     //    folder dialog) and DXGI/D3D11 stability
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    const BOOL silent = cmdline_has_flag(L"-silent");
+    g_msgShowGui = RegisterWindowMessageW(L"JxlShotShowGui");
 
     // Single instance: a second tray would install duplicate global hooks and a
     // second tray icon, and whichever exits first would tear the hooks down from
@@ -2741,6 +2768,15 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     SetLastError(0);
     HANDLE hInstanceLock = CreateMutexW(NULL, TRUE, L"JxlShotTray_SingleInstance_Mutex");
     if (hInstanceLock && GetLastError() == ERROR_ALREADY_EXISTS) {
+        // A normal launch means "open the capture tool"
+        if (!silent && g_msgShowGui) {
+            HWND tray = NULL;
+            for (int i = 0; i < 30 && !tray; i++) {
+                tray = FindWindowW(L"JxlShotTrayClass", NULL);
+                if (!tray) Sleep(100); // first launch may still be starting up
+            }
+            if (tray) PostMessageW(tray, g_msgShowGui, 0, 0);
+        }
         CloseHandle(hInstanceLock);
         CoUninitialize();
         return 0;
@@ -2821,6 +2857,12 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
 
     // Once the encoder has closed the .jxl, open it in the default viewer.
     g_saveReady = gui_capture_saved;
+    if (!silent) {
+        dbg("WinMain: no -silent flag, opening the capture tool");
+        execute_gui();
+    } else {
+        dbg("WinMain: -silent, staying in the tray");
+    }
 
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) { 

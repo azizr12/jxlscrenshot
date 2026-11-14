@@ -7,6 +7,7 @@
 - Small c project to capture monitor screenshot using jxl image codec on windows.
 > The entire idea here is to build a screenshot app using jxl  to achieve great compression and good quality unlike jpeg which give bad quality and bad colors and png has mid compression
 - to use it as screenshot app run the installer and it will run in background and give you two option either capture specific region or whole monitor and path for export or picture folder as default
+- & launching the app normally opens the Capture Tool window
 
 - there is also keyboard shortcut you either press imprscreen key to capture full screenshot or ctrl+imprscreen to pick a region to screenshot or use them from tray menu(you have the freedom to change combo keys from settings)
 
