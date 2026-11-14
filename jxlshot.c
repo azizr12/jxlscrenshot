@@ -113,6 +113,10 @@ static void init_paths(void) {
     g_ini_path[MAX_PATH - 1] = 0;
 }
 
+// Language packs (lang\*.ini). Included here because it needs g_exe_dir and
+// g_ini_path; every later file in the build can call tr() and friends.
+#include "lang.c"
+
 // Adds one key to [Capture] only if it is missing.
 // Migrates from legacy sections if found there, otherwise uses the default.
 static void ini_ensure_key(const wchar_t *ini, const wchar_t *key, const wchar_t *def) {
@@ -141,7 +145,7 @@ static void ensure_default_ini(void) {
     wchar_t val_export[MAX_PATH] = L"", val_hk_fvk[64] = L"44", val_hk_fmod[64] = L"0";
     wchar_t val_hk_rvk[64] = L"44", val_hk_rmod[64] = L"2", val_blank[64] = L"2";
     wchar_t val_multi[64] = L"focusmonitor", val_hook[64] = L"0", val_dark[64] = L"1";
-    wchar_t val_preview[64] = L"1";
+    wchar_t val_preview[64] = L"1", val_lang[64] = L"auto";
 
     // Case 1: file exists
     if (GetFileAttributesW(ini_path) != INVALID_FILE_ATTRIBUTES) {
@@ -160,6 +164,7 @@ static void ensure_default_ini(void) {
         ini_ensure_key(ini_path, L"DisableKeyboardHook", L"0");
         ini_ensure_key(ini_path, L"ShowPreview", L"1");
         ini_ensure_key(ini_path, L"DarkMode", L"1");
+        ini_ensure_key(ini_path, L"Language", L"auto");
 
         // Check if the INI version is older than the current app version
         wchar_t current_version[64];
@@ -181,6 +186,7 @@ static void ensure_default_ini(void) {
             GetPrivateProfileStringW(L"Capture", L"DisableKeyboardHook", L"0", val_hook, 64, ini_path);
             GetPrivateProfileStringW(L"Capture", L"ShowPreview", L"1", val_preview, 64, ini_path);
             GetPrivateProfileStringW(L"Capture", L"DarkMode", L"1", val_dark, 64, ini_path);
+            GetPrivateProfileStringW(L"Capture", L"Language", L"auto", val_lang, 64, ini_path);
             
             // Delete the old file so it falls through to Case 2 to rewrite with new comments
             DeleteFileW(ini_path);
@@ -224,6 +230,10 @@ static void ensure_default_ini(void) {
         L";   ShowPreview    : 1 = Open the saved capture in the default image viewer (default).\n"
         L";                    0 = Save silently.\n"
         L";   DarkMode       : 1 = Dark window/menu theme, 0 = Light theme.\n"
+        L";   Language       : UI language. auto = follow the Windows display language.\n"
+        L";                    Otherwise a code from the lang\\ folder (en, ar, ...).\n"
+        L";                    Adding a language = translate lang\\en.ini to lang\\<code>.ini;\n"
+        L";                    it then appears under Settings > Language automatically.\n"
         L";\n"
         L"; [Hotkey Settings] (Use the 'Hotkey Settings...' tray menu to configure these easily!)\n"
         L";   HotkeyFullVK    : Virtual Key code for Full Screen capture (e.g., 44 = PrintScreen).\n"
@@ -250,7 +260,8 @@ static void ensure_default_ini(void) {
         L"MultiMonitor=focusmonitor\n"
         L"DisableKeyboardHook=0\n"
         L"ShowPreview=1\n"
-        L"DarkMode=1\n";
+        L"DarkMode=1\n"
+        L"Language=auto\n";
 
 // Lossless at distance 1.0 give small size compare to lossy 1.0
 // Changing effort in distance 1.0 when using lossy is not useful
@@ -294,6 +305,7 @@ static void ensure_default_ini(void) {
         WritePrivateProfileStringW(L"Capture", L"DisableKeyboardHook", val_hook, ini_path);
         WritePrivateProfileStringW(L"Capture", L"ShowPreview", val_preview, ini_path);
         WritePrivateProfileStringW(L"Capture", L"DarkMode", val_dark, ini_path);
+        WritePrivateProfileStringW(L"Capture", L"Language", val_lang, ini_path);
     }
 }
 
@@ -1661,20 +1673,18 @@ static int save_rgb_as_jxl(const uint8_t *rgb, int w, int h, int is_hdr, int los
         // code runs on the EncodeWorker, not on the window thread.
         if (!ok) {
             wchar_t err_msg[512];
-            _snwprintf(err_msg, 512, 
-                L"Failed to save screenshot to:\n%s\n\nFallback to Pictures folder:\n%s\nalso failed.\n\n"
-                L"Please check disk space and permissions.", 
+            _snwprintf(err_msg, 512,
+                tr(L"SaveErrorBody"),
                 path, fallback_path);
             err_msg[511] = L'\0'; // _snwprintf may not NUL-terminate on truncation (MSVC)
-            notify_save_result(MB_ICONERROR, L"jxlshot Save Error", err_msg);
+            notify_save_result(MB_ICONERROR, tr(L"SaveErrorTitle"), err_msg);
         } else {
             wchar_t success_msg[512];
-            _snwprintf(success_msg, 512, 
-                L"Failed to save to configured export path.\n\n"
-                L"Screenshot was successfully saved to fallback location:\n%s", 
+            _snwprintf(success_msg, 512,
+                tr(L"SaveFallbackBody"),
                 fallback_path);
             success_msg[511] = L'\0'; // _snwprintf may not NUL-terminate on truncation (MSVC)
-            notify_save_result(MB_ICONWARNING, L"jxlshot Fallback Save", success_msg);
+            notify_save_result(MB_ICONWARNING, tr(L"SaveFallbackTitle"), success_msg);
         }
     }
     
@@ -1819,6 +1829,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-w") && i + 1 < argc) { wait_ms = (DWORD)strtol(argv[++i], NULL, 10); }
     }
     set_dpi_aware(); init_paths(); ensure_default_ini(); init_config();
+    lang_init();
     if (cli_lossless != -1) g_cfg.lossless = cli_lossless;
     if (cli_distance >= 0.0f) g_cfg.distance = cli_distance;
     dbg_init();

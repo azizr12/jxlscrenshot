@@ -209,20 +209,20 @@ static void toggle_debug(void) {
 // Tray Icon & Context Menu
 
 static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_size) {
-    if (vk == 0) { wcsncpy_s(out, out_size, L"None (Click to set)", _TRUNCATE); return; }
+    if (vk == 0) { wcsncpy_s(out, out_size, tr(L"HotkeyNone"), _TRUNCATE); return; }
     wchar_t buf[128] = L"";
-    if (mod & MOD_CONTROL) wcscat_s(buf, 128, L"Ctrl+");
-    if (mod & MOD_SHIFT)   wcscat_s(buf, 128, L"Shift+");
-    if (mod & MOD_ALT)     wcscat_s(buf, 128, L"Alt+");
-    if (mod & MOD_WIN)     wcscat_s(buf, 128, L"Win+");
+    if (mod & MOD_CONTROL) wcscat_s(buf, 128, tr(L"ModCtrl"));
+    if (mod & MOD_SHIFT)   wcscat_s(buf, 128, tr(L"ModShift"));
+    if (mod & MOD_ALT)     wcscat_s(buf, 128, tr(L"ModAlt"));
+    if (mod & MOD_WIN)     wcscat_s(buf, 128, tr(L"ModWin"));
 
-    if (vk == VK_SNAPSHOT) wcscat_s(buf, 128, L"PrintScreen");
+    if (vk == VK_SNAPSHOT) wcscat_s(buf, 128, tr(L"HotkeyPrintScreen"));
     else if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
         wchar_t c[2] = {(wchar_t)vk, L'\0'}; wcscat_s(buf, 128, c);
     }
     else if (vk >= VK_F1 && vk <= VK_F24) {
         size_t l = wcslen(buf);
-        _snwprintf(buf + l, 128 - l, L"F%d", (int)(vk - VK_F1 + 1));
+        _snwprintf(buf + l, 128 - l, tr(L"HotkeyF"), (int)(vk - VK_F1 + 1));
     }
     else {
         UINT sc = MapVirtualKeyW(vk, MAPVK_VK_TO_VSC);
@@ -231,7 +231,7 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
             lparam |= (1 << 24); // extended key
         wchar_t name[64] = L"";
         if (GetKeyNameTextW(lparam, name, 64) > 0) wcscat_s(buf, 128, name);
-        else wcscat_s(buf, 128, L"Key");
+        else wcscat_s(buf, 128, tr(L"HotkeyKey"));
     }
     wcsncpy_s(out, out_size, buf, _TRUNCATE);
 }
@@ -251,11 +251,12 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
 #define IDC_DISABLE_HOOK 209
 #define IDC_SETPATH      210
 #define IDC_PREVIEW      211
+#define IDC_LANG         212
 
 // Design metrics at 96 DPI. g_hkDpi holds the DPI of the monitor the window is
 // on and hk_*() scale these for the actual window.
 #define HK_W        300
-#define HK_H        500
+#define HK_H        540
 #define HK_TITLE_H  40
 #define HK_Y_HEAD   178
 #define HK_Y_LOSS   198
@@ -264,7 +265,8 @@ static void format_hotkey_string(UINT vk, UINT mod, wchar_t *out, size_t out_siz
 #define HK_Y_SYS    324
 #define HK_Y_EXPORT 344
 #define HK_Y_PREVIEW 384
-#define HK_Y_HOOK   424
+#define HK_Y_LANG   424
+#define HK_Y_HOOK   464
 #define HK_ROW_H    34
 #define HK_STEP_W   34
 #define HK_VAL_W    64
@@ -366,27 +368,27 @@ static void hk_refresh_buttons(HWND hwnd) {
     wchar_t hk[128], txt[192];
     
     // Full Screen Hotkey
-    if (g_catcher_target == 1) wcscpy_s(txt, 192, L"Full Screen:  press a key...");
+    if (g_catcher_target == 1) wcsncpy_s(txt, 192, tr(L"HkFullPrompt"), _TRUNCATE);
     else {
         format_hotkey_string(g_cfg.hk_full_vk, g_cfg.hk_full_mod, hk, 128);
-        _snwprintf(txt, 192, L"Full Screen:  %s", hk); txt[191] = 0;
+        _snwprintf(txt, 192, tr(L"HkFullLabel"), hk); txt[191] = 0;
     }
     SetWindowTextW(GetDlgItem(hwnd, IDC_HK_FULL), txt);
 
     // Region Hotkey
-    if (g_catcher_target == 2) wcscpy_s(txt, 192, L"Region:  press a key...");
+    if (g_catcher_target == 2) wcsncpy_s(txt, 192, tr(L"HkRegionPrompt"), _TRUNCATE);
     else {
         format_hotkey_string(g_cfg.hk_region_vk, g_cfg.hk_region_mod, hk, 128);
-        _snwprintf(txt, 192, L"Region:  %s", hk); txt[191] = 0;
+        _snwprintf(txt, 192, tr(L"HkRegionLabel"), hk); txt[191] = 0;
     }
     SetWindowTextW(GetDlgItem(hwnd, IDC_HK_REGION), txt);
 
 
     SetWindowTextW(GetDlgItem(hwnd, IDC_LOSSLESS),
-                   g_cfg.lossless ? L"Lossless:  ON" : L"Lossless:  OFF (lossy)");
-    SetWindowTextW(GetDlgItem(hwnd, IDC_SETPATH), L"Set Export Folder...");
+                   tr(g_cfg.lossless ? L"LosslessOn" : L"LosslessOff"));
+    SetWindowTextW(GetDlgItem(hwnd, IDC_SETPATH), tr(L"SetExportFolder"));
     SetWindowTextW(GetDlgItem(hwnd, IDC_PREVIEW),
-                   g_cfg.show_preview ? L"Open In Viewer:  ON" : L"Open In Viewer:  OFF");
+                   tr(g_cfg.show_preview ? L"PreviewOn" : L"PreviewOff"));
     SetWindowTextW(GetDlgItem(hwnd, IDC_DIST_DN), L"\u2212");
     SetWindowTextW(GetDlgItem(hwnd, IDC_DIST_UP), L"+");
     SetWindowTextW(GetDlgItem(hwnd, IDC_EFF_DN),  L"\u2212");
@@ -396,12 +398,25 @@ static void hk_refresh_buttons(HWND hwnd) {
     
 
     SetWindowTextW(GetDlgItem(hwnd, IDC_DISABLE_HOOK),
-                   g_cfg.disable_keyboard_hook ? L"Keyboard Hook:  Disabled" : L"Keyboard Hook:  Enabled");
+                   tr(g_cfg.disable_keyboard_hook ? L"HookDisabled" : L"HookEnabled"));
 
+    // Language: show what will be used after the next start.
+    {
+        wchar_t value[96];
+        if (lang_is_auto()) {
+            _snwprintf(value, 96, tr(L"LangAuto"), lang_name());
+            value[95] = 0;
+        } else {
+            wcsncpy_s(value, 96, lang_display_name(lang_selected_code()), _TRUNCATE);
+        }
+        _snwprintf(txt, 192, tr(L"HkLanguage"), value);
+        txt[191] = 0;
+        SetWindowTextW(GetDlgItem(hwnd, IDC_LANG), txt);
+    }
 
     {
-        int ids[] = { IDC_LOSSLESS, IDC_SETPATH, IDC_PREVIEW, IDC_DIST_DN, IDC_DIST_UP, IDC_EFF_DN, IDC_EFF_UP, IDC_DISABLE_HOOK };
-        for (int i = 0; i < 8; i++) {
+        int ids[] = { IDC_LOSSLESS, IDC_SETPATH, IDC_PREVIEW, IDC_DIST_DN, IDC_DIST_UP, IDC_EFF_DN, IDC_EFF_UP, IDC_DISABLE_HOOK, IDC_LANG };
+        for (int i = 0; i < 9; i++) {
             InvalidateRect(GetDlgItem(hwnd, ids[i]), NULL, FALSE);
         }
     }
@@ -503,14 +518,46 @@ static void hk_save(int target, UINT vk, UINT mod) {
     gui_refresh(); // the capture cards show the new hotkey
 }
 
+// Settings > Language. Cycles Automatic -> every lang\*.ini -> Automatic.
+// The choice is written to jxlshot.ini and applied on the next start: the
+// strings and the RTL layout direction of the open windows are fixed.
+// A new language is just a new file in lang\, so this list grows by itself.
+static void language_cycle(HWND hwnd) {
+    int n = lang_file_count();
+    int cur = 0;
+
+    if (!lang_is_auto()) {
+        const wchar_t *sel = lang_selected_code();
+        for (int i = 0; i < n; i++) {
+            if (_wcsicmp(lang_file_code(i), sel) == 0) { cur = i + 1; break; }
+        }
+    }
+
+    int next = (cur + 1) % (n + 1);
+    const wchar_t *value = (next == 0) ? L"auto" : lang_file_code(next - 1);
+
+    WritePrivateProfileStringW(L"Capture", L"Language", value, g_ini_path);
+    lang_refresh_selection();   // updates the button label only
+    hk_refresh_buttons(hwnd);
+
+    const wchar_t *shown = lang_is_auto() ? lang_name()
+                                          : lang_display_name(lang_selected_code());
+    wchar_t msg[256];
+    _snwprintf(msg, 256, tr(L"LangRestart"), shown);
+    msg[255] = L'\0';
+    MessageBoxW(hwnd, msg, tr(L"AppTitle"), MB_ICONINFORMATION);
+
+    dbg("lang: selection written as %ls", value);
+}
+
 static void hk_create_fonts(void) {
     if (g_hkFont)      { DeleteObject(g_hkFont); g_hkFont = NULL; }
     if (g_hkFontSmall) { DeleteObject(g_hkFontSmall); g_hkFontSmall = NULL; }
 
     g_hkFont = CreateFontW(-hk_s(15), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
-                           CLEARTYPE_QUALITY, 0, L"Segoe UI");
+                           CLEARTYPE_QUALITY, 0, lang_font_name());
     g_hkFontSmall = CreateFontW(-hk_s(12), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
-                                CLEARTYPE_QUALITY, 0, L"Segoe UI");
+                                CLEARTYPE_QUALITY, 0, lang_font_name());
 }
 
 // Everything in the Settings window is laid out from the 96-DPI design values
@@ -534,6 +581,7 @@ static void hk_layout_children(HWND hwnd) {
         { IDC_EFF_UP,       hk_up_x(), hk_s(HK_Y_EFF),  step, row },
         { IDC_SETPATH,      m, hk_s(HK_Y_EXPORT),  bw, row },
         { IDC_PREVIEW,      m, hk_s(HK_Y_PREVIEW), bw, row },
+        { IDC_LANG,         m, hk_s(HK_Y_LANG),    bw, row },
         { IDC_DISABLE_HOOK, m, hk_s(HK_Y_HOOK),    bw, row },
     };
 
@@ -555,7 +603,7 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             static const int ids[] = {
                 IDC_HK_FULL, IDC_HK_REGION, IDC_HK_CLOSE, IDC_LOSSLESS,
                 IDC_DIST_DN, IDC_DIST_UP, IDC_EFF_DN, IDC_EFF_UP,
-                IDC_SETPATH, IDC_PREVIEW, IDC_DISABLE_HOOK
+                IDC_SETPATH, IDC_PREVIEW, IDC_LANG, IDC_DISABLE_HOOK
             };
             for (int i = 0; i < (int)(sizeof(ids) / sizeof(ids[0])); i++) {
                 HWND hb = CreateWindowExW(0, L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -603,20 +651,18 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             HFONT of = (HFONT)SelectObject(dc, g_hkFont);
             SetTextColor(dc, HK_TEXT);
             RECT t = { m, 0, W - hk_s(48), hk_title_h() };
-            DrawTextW(dc, L"Settings", -1, &t, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            DrawTextW(dc, tr(L"HkTitle"), -1, &t, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
             SelectObject(dc, g_hkFontSmall);
             SetTextColor(dc, HK_DIM);
             RECT h = { m, hk_s(140), W - m, hk_s(172) };
-            DrawTextW(dc, g_catcher_target
-                ? L"Press the new key combo. Esc cancels."
-                : L"Click a button, then press the new key combo.",
+            DrawTextW(dc, tr(g_catcher_target ? L"HkHintCapture" : L"HkHintIdle"),
                 -1, &h, DT_WORDBREAK | DT_LEFT);
 
             SelectObject(dc, g_hkFontSmall);
             SetTextColor(dc, HK_DIM);
             RECT hd = { m, yHead, W - m, yHead + hk_s(16) };
-            DrawTextW(dc, L"JPEG XL", -1, &hd, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+            DrawTextW(dc, tr(L"HkSectionJxl"), -1, &hd, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
 
             SelectObject(dc, g_hkFont);
             wchar_t vbuf[32];
@@ -624,14 +670,14 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
             RECT lr = { m, yDist, dnX - hk_s(4), yDist + row };
             SetTextColor(dc, dist_col);
-            DrawTextW(dc, L"Distance", -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            DrawTextW(dc, tr(L"HkDistance"), -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
             RECT vr = { dnX + step, yDist, upX, yDist + row };
             _snwprintf(vbuf, 32, L"%.1f", g_cfg.distance);
             DrawTextW(dc, vbuf, -1, &vr, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
 
             lr.top = yEff; lr.bottom = yEff + row;
             SetTextColor(dc, HK_TEXT);
-            DrawTextW(dc, L"Effort", -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+            DrawTextW(dc, tr(L"HkEffort"), -1, &lr, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
             vr.top = yEff; vr.bottom = yEff + row;
             _snwprintf(vbuf, 32, L"%d", g_cfg.effort);
             DrawTextW(dc, vbuf, -1, &vr, DT_SINGLELINE | DT_VCENTER | DT_CENTER);
@@ -639,7 +685,7 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             SelectObject(dc, g_hkFontSmall);
             SetTextColor(dc, HK_DIM);
             RECT hs = { m, ySys, W - m, ySys + hk_s(16) };
-            DrawTextW(dc, L"System", -1, &hs, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
+            DrawTextW(dc, tr(L"HkSectionSystem"), -1, &hs, DT_SINGLELINE | DT_LEFT | DT_VCENTER);
 
             // Current export folder, right-aligned in the section header.
             {
@@ -653,21 +699,43 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             }
 
 
-            RECT info = { m, H - hk_s(35), W - m, H - hk_s(5) };
-            SIZE sz;
+            // "Open .ini file for more infos": the ".ini" part is accent
+            // coloured. Keeping it one key means translators translate one
+            // sentence; the literal ".ini" is found in the translation.
+            // Right-to-left text is drawn as one run: splitting a bidi string
+            // into pieces would place the chunks in the wrong visual order.
+            {
+                const wchar_t *hint = tr(L"HkIniInfo");
+                const wchar_t *mark = wcsstr(hint, L".ini");
+                RECT info = { m, H - hk_s(35), W - m, H - hk_s(5) };
 
-            SetTextColor(dc, HK_DIM);
-            DrawTextW(dc, L"Open ", -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-            GetTextExtentPoint32W(dc, L"Open ", 5, &sz);
-            info.left += sz.cx;
+                if (!mark || lang_is_rtl()) {
+                    SetTextColor(dc, HK_DIM);
+                    DrawTextW(dc, hint, -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+                } else {
+                    wchar_t before[192], after[192];
+                    size_t blen = (size_t)(mark - hint);
+                    if (blen > 191) blen = 191;
+                    wcsncpy(before, hint, blen);
+                    before[blen] = L'\0';
+                    wcsncpy(after, mark + 4, 191);
+                    after[191] = L'\0';
 
-            SetTextColor(dc, HK_ACCENT);
-            DrawTextW(dc, L".ini", -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
-            GetTextExtentPoint32W(dc, L".ini", 4, &sz);
-            info.left += sz.cx;
+                    SIZE sz;
+                    SetTextColor(dc, HK_DIM);
+                    DrawTextW(dc, before, -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+                    GetTextExtentPoint32W(dc, before, (int)wcslen(before), &sz);
+                    info.left += sz.cx;
 
-            SetTextColor(dc, HK_DIM);
-            DrawTextW(dc, L" file for more infos", -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+                    SetTextColor(dc, HK_ACCENT);
+                    DrawTextW(dc, L".ini", -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+                    GetTextExtentPoint32W(dc, L".ini", 4, &sz);
+                    info.left += sz.cx;
+
+                    SetTextColor(dc, HK_DIM);
+                    DrawTextW(dc, after, -1, &info, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+                }
+            }
 
             SelectObject(dc, of);
             EndPaint(hwnd, &ps);
@@ -746,6 +814,10 @@ static LRESULT CALLBACK CatcherWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     hk_refresh_buttons(hwnd);
                     if (!g_cfg.show_preview) gui_cancel_open_capture();
                     dbg("settings changed: show_preview=%d", g_cfg.show_preview);
+                    break;
+
+                case IDC_LANG:
+                    language_cycle(hwnd);
                     break;
 
                 case IDC_DISABLE_HOOK:
@@ -907,22 +979,24 @@ static void execute_hotkey_settings(HWND hwnd) {
 static void show_tray_menu(HWND hwnd) {
     POINT pt; GetCursorPos(&pt);
     HMENU hMenu = CreatePopupMenu();
-    AppendMenuW(hMenu, MF_STRING, IDM_GUI, L"Open Capture Tool");
+    AppendMenuW(hMenu, MF_STRING, IDM_GUI, tr(L"MenuOpenGui"));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, IDM_FULL, L"Capture Full Screen");
-    AppendMenuW(hMenu, MF_STRING, IDM_REGION, L"Capture Region");
+    AppendMenuW(hMenu, MF_STRING, IDM_FULL, tr(L"MenuFull"));
+    AppendMenuW(hMenu, MF_STRING, IDM_REGION, tr(L"MenuRegion"));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, L"Set Export Path...");
-    AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, L"Open Export Folder");
-    AppendMenuW(hMenu, MF_STRING, IDM_OPENCONFIG, L"Open Config File");
-    AppendMenuW(hMenu, MF_STRING, IDM_HOTKEYS, L"Settings");
-    wchar_t debug_label[32];
-    _snwprintf(debug_label, 32, L"Debug: %s", g_cfg.debug_enabled ? L"ON" : L"OFF");
+    AppendMenuW(hMenu, MF_STRING, IDM_SETPATH, tr(L"MenuSetPath"));
+    AppendMenuW(hMenu, MF_STRING, IDM_OPENEXPORT, tr(L"MenuOpenExport"));
+    AppendMenuW(hMenu, MF_STRING, IDM_OPENCONFIG, tr(L"MenuOpenConfig"));
+    AppendMenuW(hMenu, MF_STRING, IDM_HOTKEYS, tr(L"MenuSettings"));
+    wchar_t debug_label[64];
+    _snwprintf(debug_label, 64, tr(L"MenuDebug"),
+               g_cfg.debug_enabled ? tr(L"On") : tr(L"Off"));
+    debug_label[63] = L'\0';
     AppendMenuW(hMenu, MF_STRING, IDM_DEBUG, debug_label);
-    AppendMenuW(hMenu, MF_STRING, IDM_CHECK_UPDATE, L"Open Releases Page");
+    AppendMenuW(hMenu, MF_STRING, IDM_CHECK_UPDATE, tr(L"MenuReleases"));
     AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
-    AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, L"About...");
-    AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
+    AppendMenuW(hMenu, MF_STRING, IDM_ABOUT, tr(L"MenuAbout"));
+    AppendMenuW(hMenu, MF_STRING, IDM_EXIT, tr(L"MenuExit"));
     
     // Force dark mode on the transient menu window before displaying it
     if (g_hwndMenuOwner) {
@@ -970,7 +1044,7 @@ static void execute_full_capture(void) {
         int count = enumerate_monitors(monitors, 16);
 
         if (count <= 0) {
-            MessageBoxW(NULL, L"No monitors found.", L"jxlshot", MB_ICONERROR);
+            MessageBoxW(NULL, tr(L"NoMonitors"), tr(L"AppTitle"), MB_ICONERROR);
             settings_finish_capture();
             return;
         }
@@ -1002,7 +1076,7 @@ static void execute_full_capture(void) {
         }
 
         if (saved == 0) {
-            MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
+            MessageBoxW(NULL, tr(L"CaptureFailed"), tr(L"AppTitle"), MB_ICONERROR);
         } else if (saved < count) {
             dbg("execute_full_capture: only %d of %d monitors saved", saved, count);
         }
@@ -1014,7 +1088,7 @@ static void execute_full_capture(void) {
     ZeroMemory(&g, sizeof(g));
     if (!grab_monitor(&g, monitor_under_cursor())) {
         dbg("execute_full_capture: grab failed, showing MessageBox");
-        MessageBoxW(NULL, L"Screen capture failed.", L"jxlshot", MB_ICONERROR);
+        MessageBoxW(NULL, tr(L"CaptureFailed"), tr(L"AppTitle"), MB_ICONERROR);
         settings_finish_capture();
         return;
     }
@@ -1027,7 +1101,7 @@ static void execute_full_capture(void) {
     gui_open_capture_viewer(&g, out_path);
 
     if (!queue_grab_encode(&g, out_path, 0)) {
-        MessageBoxW(NULL, L"Encoding or saving failed.", L"jxlshot", MB_ICONERROR);
+        MessageBoxW(NULL, tr(L"EncodeFailed"), tr(L"AppTitle"), MB_ICONERROR);
     }
     free_grab(&g);
 
@@ -1046,7 +1120,7 @@ static void execute_set_path(void) {
     // Own the picker by the Settings window when it is open: that window is
     // topmost, so an ownerless dialog would open behind it.
     bi.hwndOwner = g_hwnd_catcher;
-    bi.lpszTitle = L"Select Export Folder for Screenshots";
+    bi.lpszTitle = tr(L"ExportPathTitle");
     bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
     LPITEMIDLIST pidl = SHBrowseForFolderW(&bi);
     if (pidl) {
@@ -1054,7 +1128,7 @@ static void execute_set_path(void) {
         if (SHGetPathFromIDListW(pidl, path)) {
             wcsncpy(g_cfg.export_path, path, MAX_PATH - 1); g_cfg.export_path[MAX_PATH - 1] = L'\0';
             WritePrivateProfileStringW(L"Capture", L"ExportPath", path, g_ini_path);
-            MessageBoxW(g_hwnd_catcher, L"Export path updated.", L"jxlshot", MB_ICONINFORMATION);
+            MessageBoxW(g_hwnd_catcher, tr(L"ExportPathUpdated"), tr(L"AppTitle"), MB_ICONINFORMATION);
         }
         CoTaskMemFree(pidl);
     }
@@ -1916,6 +1990,11 @@ LRESULT CALLBACK RegionWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PAINTSTRUCT ps;
             HDC hdc = BeginPaint(hwnd, &ps);
 
+            // Right-to-left languages mirror every window by default, but this
+            // window shows a screenshot: a mirrored desktop preview would be
+            // wrong, so the overlay always draws left-to-right.
+            SetLayout(hdc, 0);
+
             if (g_gpuOverlayActive) {
                 gpu_overlay_present();
                 EndPaint(hwnd, &ps);
@@ -2236,6 +2315,13 @@ static void start_region_capture(void) {
         begin_mouse_grace();
         settings_finish_capture();
         return;
+    }
+
+    // Opt the overlay out of the RTL layout (Arabic, Hebrew, ...): its content
+    // is a screenshot and must keep its original orientation.
+    {
+        LONG_PTR ex = GetWindowLongPtrW(g_hwndRegion, GWL_EXSTYLE);
+        SetWindowLongPtrW(g_hwndRegion, GWL_EXSTYLE, ex & ~(LONG_PTR)WS_EX_LAYOUTRTL);
     }
 
     // Use the GPU overlay on both HDR and SDR monitors. 
@@ -2786,7 +2872,19 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     init_paths(); 
     ensure_default_ini(); 
     init_config();
+    lang_init();
     dbg_init();
+
+    // A right-to-left language flips the whole UI (menus, message boxes and
+    // our custom windows). New windows inherit it, so it must be set before
+    // anything is created.
+    if (lang_is_rtl()) {
+        SetProcessDefaultLayout(LAYOUT_RTL);
+        dbg("lang: %ls (%ls, RTL layout)", lang_name(), lang_code());
+    } else {
+        dbg("lang: %ls (%ls)", lang_name(), lang_code());
+    }
+
     // Initialize dark mode BEFORE creating any windows or dialogs
     InitializeDarkMode();
 
@@ -2796,7 +2894,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     wc.hInstance = hInst; 
     wc.lpszClassName = L"JxlShotTrayClass"; 
     if (!RegisterClassExW(&wc)) {
-        MessageBoxW(NULL, L"Failed to initialize the tray application window class.", L"jxlshot", MB_ICONERROR);
+        MessageBoxW(NULL, tr(L"TrayInitFailed"), tr(L"AppTitle"), MB_ICONERROR);
         CoUninitialize();
         return 1;
     }
@@ -2804,7 +2902,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
     g_hwndTray = CreateWindowExW(WS_EX_TOOLWINDOW, L"JxlShotTrayClass", L"", WS_POPUP,
                                  0, 0, 0, 0, NULL, NULL, hInst, NULL);
     if (!g_hwndTray) {
-        MessageBoxW(NULL, L"Failed to create the tray window.", L"jxlshot", MB_ICONERROR);
+        MessageBoxW(NULL, tr(L"TrayCreateFailed"), tr(L"AppTitle"), MB_ICONERROR);
         CoUninitialize();
         return 1;
     }
@@ -2834,7 +2932,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR szCmdLine, int sw) {
 
     g_iconNormal = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APP_ICON));
     g_nid.hIcon = g_iconNormal;
-    wcscpy(g_nid.szTip, L"JXL Shot");
+    wcsncpy_s(g_nid.szTip, 128, tr(L"AppName"), _TRUNCATE);
 
     // Registered before the window exists: explorer.exe broadcasts this message
     // to every top-level window after it starts, which is the only way to know

@@ -1,6 +1,10 @@
 v2.5.1 - 14 November 2026
 - running the exe normally now opens the "Capture Tool" window;
 - added -silent flag for the tray on start up
+- added an external language system: the UI text lives in `lang\<code>.ini` next to the exe, with English and Arabic included
+- Settings > Language cycles Automatic (Windows display language) and every installed language pack; the choice is stored as `Language=` in jxlshot.ini and applied on restart
+- adding a language needs no coding: copy `lang\en.ini`, translate the values, save as `lang\<code>.ini`; missing keys fall back to English
+- right-to-left languages (Arabic) flip the menus and our windows, while the region-capture overlay and screenshot output stay left-to-right
 
 
 v2.5.0 - 10 November 2026

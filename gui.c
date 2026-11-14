@@ -87,12 +87,12 @@ static RECT gui_theme_rect(const GuiLayout *L, const RECT *closeRc) {
 
 static const struct {
     int     id;
-    LPCWSTR text;
+    LPCWSTR key;   // language key, resolved through tr()
 } kGuiButtons[GUI_BTN_COUNT] = {
-    { IDC_GUI_FULL,     L"Full Screen"},
-    { IDC_GUI_REGION,   L"Region"},
-    { IDC_GUI_SETTINGS, L"Settings"},
-    { IDC_GUI_EXPORT,   L"Open Folder"},
+    { IDC_GUI_FULL,     L"BtnFull" },
+    { IDC_GUI_REGION,   L"BtnRegion" },
+    { IDC_GUI_SETTINGS, L"BtnSettings" },
+    { IDC_GUI_EXPORT,   L"BtnOpenFolder" },
 };
 
 static int  g_guiThemeHot = 0;   // 0 none, 1 Dark segment, 2 Light segment
@@ -580,7 +580,7 @@ static void gui_draw_button(LPDRAWITEMSTRUCT di) {
     int labelPx = (int)(ui_scale(L.dpi, 12) * fit + 0.5f);
     HFONT labelFont = CreateFontW(-labelPx, 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, lang_font_name());
     if (!labelFont) labelFont = g_guiCardFont;
 
     HFONT old = (HFONT)SelectObject(dc, labelFont);
@@ -742,7 +742,7 @@ static void gui_create_fonts(int dpi) {
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI Variable Display");
     g_guiCardFont = CreateFontW(-ui_scale(dpi, 12), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, lang_font_name());
 }
 
 static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -758,7 +758,7 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             // Settings window, so the strip stays at four buttons.
             HINSTANCE hi = GetModuleHandleW(NULL);
             for (int i = 0; i < GUI_BTN_COUNT; i++) {
-                HWND hb = CreateWindowExW(0, L"BUTTON", kGuiButtons[i].text,
+                HWND hb = CreateWindowExW(0, L"BUTTON", tr(kGuiButtons[i].key),
                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                     0, 0, 10, 10,
                     hwnd, (HMENU)(INT_PTR)kGuiButtons[i].id, hi, NULL);
@@ -861,10 +861,10 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             RECT themeRc = gui_theme_rect(&L, &closeRc);
 
             // Title bar.
-            RECT tr = { L.margin, 0, themeRc.left - 8, L.titleH };
+            RECT titleRc = { L.margin, 0, themeRc.left - 8, L.titleH };
             HFONT oldFont = (HFONT)SelectObject(dc, g_guiTitleFont);
             SetTextColor(dc, GUI_TEXT);
-            DrawTextW(dc, L"JXL Shot", -1, &tr,
+            DrawTextW(dc, tr(L"AppName"), -1, &titleRc,
                       DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
             // Theme selection bar: flat Dark | Light segments. The active one
@@ -891,9 +891,9 @@ static LRESULT CALLBACK GuiWindowProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
                 HFONT oldThemeFont = (HFONT)SelectObject(dc, g_guiCardFont);
                 SetTextColor(dc, g_cfg.dark_mode ? GUI_TEXT : GUI_DIM);
-                DrawTextW(dc, L"Dark", -1, &dl, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                DrawTextW(dc, tr(L"ThemeDark"), -1, &dl, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
                 SetTextColor(dc, g_cfg.dark_mode ? GUI_DIM : GUI_TEXT);
-                DrawTextW(dc, L"Light", -1, &dr, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
+                DrawTextW(dc, tr(L"ThemeLight"), -1, &dr, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
                 SelectObject(dc, oldThemeFont);
             }
 
@@ -1225,6 +1225,6 @@ static void execute_gui(void) {
         SetForegroundWindow(g_hwndGui);
         SetFocus(g_hwndGui);
     } else {
-        MessageBoxW(NULL, L"Failed to create the jxlshot window.", L"jxlshot", MB_ICONERROR);
+        MessageBoxW(NULL, tr(L"GuiCreateFailed"), tr(L"AppTitle"), MB_ICONERROR);
     }
 }

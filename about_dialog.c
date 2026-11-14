@@ -42,7 +42,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             g_hTitleFont = CreateFontW(-28, 0,0,0, FW_SEMIBOLD, 0,0,0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                 CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI Variable Display");
             g_hBodyFont  = CreateFontW(-15, 0,0,0, FW_NORMAL, 0,0,0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, L"Segoe UI");
+                CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH|FF_SWISS, lang_font_name());
             g_hXFont = CreateFontW(-22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
             // Create Background Brush
@@ -54,7 +54,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 
             // Title (Left aligned)
             // Y=40, Height=36 -> Bottom edge = 76
-            HWND hTitle = CreateWindowExW(0, L"STATIC", L"JXL Shot",
+            HWND hTitle = CreateWindowExW(0, L"STATIC", tr(L"AppName"),
                 WS_CHILD | WS_VISIBLE | SS_LEFT, 30, 40, 290, 36, hwnd, (HMENU)IDC_ABOUT_TITLE, GetModuleHandleW(NULL), NULL);
             SendMessageW(hTitle, WM_SETFONT, (WPARAM)g_hTitleFont, TRUE);
 
@@ -89,10 +89,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
             // Format the final string.
             // Double-space after each label gives a little breathing room without needing tabs.
             _snwprintf(desc_text, 511,
-                L"A minimal screenshot tool using JPEG XL.\n\n"
-                L"App Version:  %s\n"
-                L"libjxl Version:  %d.%d.%d\n"
-                L"CPU Architecture:  x86-64 (%s)",
+                tr(L"AboutBody"),
                 APP_VERSIONW, jxl_major, jxl_minor, jxl_patch, cpu_ext);
 
             desc_text[511] = L'\0'; // Guarantee null-termination
@@ -105,7 +102,7 @@ static LRESULT CALLBACK AboutWindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPA
 
             // Hyperlink
             // Y=256 (241 + 15px gap), Height=22 -> Bottom edge = 278
-            CreateWindowExW(0, WC_LINK, L"<a href=\"https://github.com/azizr12/jxlshot\">View on GitHub</a>",
+            CreateWindowExW(0, WC_LINK, tr(L"AboutLink"),
                 WS_CHILD | WS_VISIBLE | LWS_TRANSPARENT, 30, 256, 250, 22, hwnd, (HMENU)IDC_ABOUT_LINK, GetModuleHandleW(NULL), NULL);
 
             // Splash Icon
@@ -286,7 +283,7 @@ static void execute_about(void) {
     g_hwndAbout = CreateWindowExW(
         WS_EX_TOPMOST,
         L"JxlShotAboutClass",
-        L"About",
+        tr(L"AboutWindow"),
         WS_POPUP | WS_VISIBLE,
         x, y, dlgWidth, dlgHeight,
         g_hwndMenuOwner,
@@ -300,6 +297,6 @@ static void execute_about(void) {
 
         // The main application's message loop will handle this window automatically.
     } else {
-        MessageBoxW(NULL, L"Failed to create About dialog.", L"jxlshot", MB_ICONERROR);
+        MessageBoxW(NULL, tr(L"AboutError"), tr(L"AppTitle"), MB_ICONERROR);
     }
 }

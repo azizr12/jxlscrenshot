@@ -15,4 +15,6 @@
 
 - also there is HDR support too, alongside DPI and colors support, and multi-monitor.
 
+- the UI is translated from plain text files in the `lang` folder next to the exe (English and Arabic included). Pick a language in Settings > Language, or leave it on Automatic to follow the Windows display language. To add a language, copy `lang\en.ini` to `lang\<code>.ini`, translate the values and save it as UTF-16 LE - it shows up in Settings by itself, no rebuild needed.
+
 - ***. . .***
