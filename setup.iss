@@ -57,7 +57,7 @@ Source: "dist\jxlshot_tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\*.dll"; DestDir: "{app}"; Flags: ignoreversion
 ; Language packs. Never uninstalled: any translation the user adds (or edits)
 ; is plain data in this folder and should survive an uninstall/reinstall.
-Source: "dist\lang\*.ini"; DestDir: "{app}\lang"; Flags: ignoreversion uninsneveruninstall
+
 
 [Icons]
 Name: "{group}\{#MyAppName} Tray"; Filename: "{app}\{#MyAppExeName}"
